@@ -1,0 +1,52 @@
+schema_version: 1
+
+identity:
+  provider: local
+  local_user_id: local
+
+credits:
+  tokens_per_credit: 1000000
+  timezone: UTC
+  default_monthly_credits: 100
+
+routing:
+  default: auto
+  credit_first:
+    minimum_quality: 85
+
+auto:
+  confidence_threshold: 0.7
+  quality_threshold:
+    low: 75
+    medium: 85
+    high: 92
+  llm_classifier:
+    enabled: false
+    provider: deepseek-official
+    model: deepseek-v4-flash
+
+fallback:
+  enabled: true
+  # Includes the initial attempt. A value of 2 means A fails, then B is tried.
+  max_attempts: 2
+  after_partial_output: false
+
+models:
+  deepseek-official:deepseek-v4-flash:
+    enabled: true
+    multiplier: 0.25
+    capabilities: [text, coding, reasoning, tool_use]
+    quality:
+      general: 90
+      coding: 96
+      reasoning: 94
+      writing: 85
+      data_analysis: 92
+      vision: 0
+      tool_use: 94
+
+users:
+  local:
+    allow: []
+    monthly_credits: 100
+

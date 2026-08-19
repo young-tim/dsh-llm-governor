@@ -1,0 +1,11 @@
+# Design scaffold only. Do not install this repository into a real DSH profile.
+#
+# The implementation will insert the Governor host plugin and Web client row.
+# It must also make Governor the sole owner of agent/request-error recovery.
+# Whether that is represented by disabling the base `llm-retry` row or by a
+# verified composition contract is intentionally gated by Phase 0 tests.
+
+- insert:
+    - id: dsh-llm-governor
+      name: dsh-llm-governor
+
