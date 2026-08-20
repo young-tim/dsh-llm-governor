@@ -13,14 +13,32 @@
 #    docs/TECHNICAL_DESIGN.md §4.1）。卸载本 bundle 后（dsh plugin remove
 #    dsh-llm-governor），dsh 重新启用基础 llm-retry，恢复默认行为。
 #
-# 身份默认 local 模式（DSH 进程所有者即治理用户）；多用户部署应改为 header/jwt
-# 并在 Web 入站边界绑定 session（无绑定时 fail closed）。
+# 身份默认 local 模式（DSH 进程所有者即治理用户）；多用户部署应改为 header/jwt：
+#
+#   identity:
+#     provider: header
+#     header_name: X-Governor-User
+#     trusted_proxy: my-ingress          # 强制声明信任边界
+#     proxy_header_name: X-Proxy-Id      # 可选：校验代理标识
+#   identity:
+#     provider: jwt
+#     jwt_issuer: https://sso.example.com
+#     jwt_audience: governor
+#     jwt_algorithms: [RS256]
+#     jwt_key_file: /etc/governor/pub.pem
+#
+# header/jwt 模式下 session 必须在入站边界绑定（POST /governor/api/bind，
+# 仅本地回环可信，由反向代理/companion ingress 调用），无绑定时 fail closed。
 # UI 默认挂载到 DSH webServer 的 /governor 前缀路由（Models/Users/Usage 三页）。
+# Auto 路由的 LLM 分类器默认关闭（auto.llm_classifier），启用后经 ctx.llm
+# 调用配置的轻量模型分类（temperature=0，严格 JSON，失败降级 Quality First）。
 
 - insert:
     - id: dsh-llm-governor
       name: 'dsh-llm-governor'
       config:
+        # 配置由严格 Schema 验证（未知字段拒绝/范围校验/条件必填），非法配置拒绝加载
+        schema_version: 1
         identity:
           provider: local
           local_user_id: local
