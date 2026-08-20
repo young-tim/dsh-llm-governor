@@ -27,18 +27,20 @@ Identity bound to session
 
 ## 2. 上游基线与兼容策略
 
-截至 2026-08-20：
+当前基线：
 
-- npm `@deepseek-ai/dsh` 的 `latest` 为 `0.1.0-rc.7`，`next` 为 rc.8。
-- 本次核对的 DSH 主干提交为 `141eb6fef83422698aef7a981029e843e8161534`；
-  根版本为 rc.8，Node 要求 `^22.19.0 || >=24.0.0`。
+- 仓库中的 `@deepseek-ai/dsh` 及直接使用的 DSH 核心包统一固定为 `0.1.0-rc.8`。
+- Node 要求 `^22.19.0 || >=24.0.0`。
 - 官方明确 DSH 仍在 developer preview，可能发生破坏性变更。
+- rc.8 发布物自身仍依赖少量 rc.7 基础包；lockfile 必须保证每个 DSH 包名只解析一个
+  版本，禁止通过别名让同包双版本共存。
 - DSH 的模型目录是 advisory，不是请求白名单；真正的路由键是
   `GenerateOptions.provider + model`。
 
-因此首版以 rc.7 为最低支持版本，CI 同时跑 rc.8 合同测试。DSH 类型、事件名、
-Client Remote 和 bundle 组合全部隔离到 `src/dsh-adapter/` 与 `src/plugin/`；领域层
-不 import DSH。
+因此首版只支持 rc.8 公开契约，主安装树不混装同一个 DSH 包的多个版本。DSH 类型、
+事件名、Client Remote 和 bundle 组合全部隔离到 `src/dsh-adapter/` 与 `src/plugin/`；
+领域层不 import DSH。
+未来版本兼容性应在隔离 CI workspace 验证，不能通过主仓库别名制造多版本依赖图。
 
 参考：
 
@@ -464,7 +466,7 @@ SQL 细节。
 
 | 风险 | 影响 | 缓解 |
 | --- | --- | --- |
-| DSH RC API 漂移 | 插件无法加载或路由错误 | adapter 隔离、rc.7/rc.8 合同矩阵、pack smoke |
+| DSH RC API 漂移 | 插件无法加载或路由错误 | rc.8 直接依赖锁定、同包单版本检查、adapter 隔离、pack smoke；未来版本在隔离 workspace 验证 |
 | Header/JWT 无稳定入站 Hook | 无法安全获得 user_id | Phase 0 companion ingress；不从 Agent 事件猜身份 |
 | 双 Recovery Owner | 重复调用、费用失控 | Governor 独占 recovery，dump-config + 故障计数测试 |
 | Partial output 后切模型 | 重复文本或 Tool 副作用 | 默认禁止，记录明确错误 |

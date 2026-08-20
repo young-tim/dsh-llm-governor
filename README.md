@@ -63,7 +63,7 @@ pnpm typecheck        # 类型检查
 pnpm lint             # ESLint（--max-warnings 0）
 pnpm format:check     # Prettier 检查
 pnpm test             # 全量测试
-pnpm test:contracts   # rc.7 / rc.8 合同测试
+pnpm test:contracts   # rc.8 合同测试
 pnpm test:unit        # 单元测试
 pnpm test:integration # 集成测试（Fallback / 加固 / 运行时接线）
 pnpm test:ui          # Playwright UI 测试
@@ -102,7 +102,7 @@ src/
 └── usage/        # Usage 计量与聚合
 
 test/
-├── contracts/    # rc.7 / rc.8 合同测试
+├── contracts/    # rc.8 合同测试
 ├── eval/         # 七类任务 Eval 数据集
 ├── integration/  # 运行时接线 / 加固 / Fallback
 ├── package/      # tarball、安装 smoke、真实安装

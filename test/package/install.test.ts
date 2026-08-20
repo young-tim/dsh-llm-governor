@@ -1,5 +1,5 @@
 /**
- * 安装 smoke 测试：rc.7/rc.8 临时加载、Governor recovery 注册、bundle 组合契约、卸载后监听器清理。
+ * 安装 smoke 测试：rc.8 临时加载、Governor recovery 注册、bundle 组合契约、卸载后监听器清理。
  *
  * 验证 Task 5 要求：
  * - 打包后 tarball 包含 dist/plugin/mod.js、cordis.patch.yml 与 dist/ui/pages 静态页
@@ -77,7 +77,7 @@ function recoveryOwnerCount(ctx: Context): number {
   return hooks['agent/request-error']?.length ?? 0;
 }
 
-describe('rc.7 临时安装 smoke', () => {
+describe('rc.8 临时安装 smoke', () => {
   it('tarball 解压后包含 dist/plugin/mod.js、cordis.patch.yml 与 dist/ui/pages 静态页', () => {
     expect(existsSync(join(packageDir, 'dist', 'plugin', 'mod.js'))).toBe(true);
     expect(existsSync(join(packageDir, 'cordis.patch.yml'))).toBe(true);
@@ -174,11 +174,8 @@ describe('rc.7 临时安装 smoke', () => {
   });
 });
 
-describe('rc.8 兼容性验证', () => {
+describe('rc.8 运行时验证', () => {
   it('Governor 在 rc.8 LlmRuntime 下加载并注册事件', async () => {
-    // 使用 rc.8 别名包验证兼容性
-    // 由于 vitest projects 的 resolve.alias 只在 contracts-rc8 project 生效，
-    // 这里通过验证 GovernorPlugin 的事件注册来证明 rc.8 兼容性
     const ctx = new Context();
     const llmFiber = ctx.plugin(LlmRuntime);
     await llmFiber;

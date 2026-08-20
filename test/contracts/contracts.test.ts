@@ -2,7 +2,7 @@
  * DSH 合同测试：证明 Governor 能正确嵌入 DSH 的全部集成点。
  * 覆盖：model directory、pre-step、request 改写、stream 无损观察、
  * request-error 重路由、唯一 Recovery Owner、Web 身份绑定、Client Remote。
- * 在 rc.7 与 rc.8 下各跑一遍。
+ * 在仓库唯一的 rc.8 DSH 契约下运行。
  */
 import { describe, it, expect } from 'vitest';
 import { bootFake, modelInfo } from './harness.js';

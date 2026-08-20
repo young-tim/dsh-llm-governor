@@ -18,7 +18,7 @@
 - `agent/request-error` 返回 retry 后，同 turn/step 会再次经过 `agent/request`。
 - Governor 与官方 `dsh-llm-retry` 只有一个 Recovery Owner；最终 bundle 组合可被
   `dsh --profile <profile> --dump-config` 证明。
-- Header/JWT 身份能在 Web 入站边界绑定到 session；如果 rc.7 没有稳定 Hook，验证
+- Header/JWT 身份能在 rc.8 Web 入站边界绑定到 session；如果没有稳定 Hook，验证
   companion ingress adapter，而不是从 `agent/request` 猜 HTTP Header。
 - Web Client 能通过受信 Remote 调用 host service，并注册 Models / Users / Usage
   页面。
@@ -78,7 +78,8 @@
 - 对同一数据集运行 Quality First 与 Auto。
 - 输出 Quality Retention 与 Credit Saving，样本量和分母透明。
 - 临时 Profile 安装 tarball，验证 headless 和 web 的加载、卸载与恢复默认 retry。
-- 生成兼容矩阵：npm latest rc.7 与 next rc.8。
+- 验证直接依赖、CLI 与合同测试使用 rc.8，且 lockfile 中每个 DSH 包只解析一个版本；
+  未来版本在隔离 CI workspace 验证。
 
 发布门槛：
 
@@ -98,7 +99,7 @@ Auto Credits < Quality First Credits
 
 ### Contract
 
-- rc.7 和 rc.8 的 LlmCallConfig、Session Event、StreamChunk fixture。
+- rc.8 的 LlmCallConfig、Session Event、StreamChunk fixture。
 - 模型目录为空、模型不在建议目录但 Provider 接受的 advisory 行为。
 - DSH 上游增加未知事件或 finish reason 时失败可诊断。
 
@@ -122,4 +123,3 @@ Auto Credits < Quality First Credits
 临时 DSH Profile；四种策略、身份、Access、Quota、Fallback 和 Usage 均通过需求
 基线；Web 三页能操作同一 host service；Eval 指标达标；无 skip/todo、无真实模型
 费用、无明文凭证或 Prompt 落库。
-

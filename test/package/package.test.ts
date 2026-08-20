@@ -73,6 +73,41 @@ afterAll(() => {
 });
 
 describe('package smoke (pnpm pack + dist)', () => {
+  it('仓库直接 DSH 依赖统一为 rc.8 且不存在版本别名', () => {
+    const pkg = JSON.parse(readFileSync(join(projectRoot, 'package.json'), 'utf8')) as {
+      devDependencies?: Record<string, string>;
+    };
+    const dependencies = pkg.devDependencies ?? {};
+    const directDsh = Object.entries(dependencies).filter(([name]) =>
+      name.startsWith('@deepseek-ai/dsh'),
+    );
+
+    expect(directDsh.length).toBeGreaterThan(0);
+    expect(directDsh.every(([, version]) => version === '0.1.0-rc.8')).toBe(true);
+    expect(Object.keys(dependencies).some((name) => /^dsh-.+-rc\d+$/.test(name))).toBe(false);
+  });
+
+  it('lockfile 中每个 DSH 包只解析一个版本', () => {
+    const lockfile = readFileSync(join(projectRoot, 'pnpm-lock.yaml'), 'utf8');
+    const versionsByPackage = new Map<string, Set<string>>();
+    const packageEntry = /^[ ]{2}'(@deepseek-ai\/dsh(?:-[^@']+)?)@(0\.1\.0-rc\.\d+)':$/gm;
+
+    for (const match of lockfile.matchAll(packageEntry)) {
+      const [, name, version] = match;
+      if (name === undefined || version === undefined) continue;
+      const versions = versionsByPackage.get(name) ?? new Set<string>();
+      versions.add(version);
+      versionsByPackage.set(name, versions);
+    }
+
+    expect(versionsByPackage.size).toBeGreaterThan(0);
+    expect(
+      [...versionsByPackage]
+        .filter(([, versions]) => versions.size > 1)
+        .map(([name, versions]) => `${name}: ${[...versions].sort().join(', ')}`),
+    ).toEqual([]);
+  });
+
   it('tarball 存在且非空', () => {
     expect(existsSync(tarballPath)).toBe(true);
     expect(statSync(tarballPath).size).toBeGreaterThan(0);
@@ -116,9 +151,9 @@ describe('package smoke (pnpm pack + dist)', () => {
     const peer = pkg.peerDependencies as Record<string, string> | undefined;
     expect(peer).toBeDefined();
     expect(peer?.['@deepseek-ai/cordis']).toBe('>=4.0.1 <5');
-    expect(peer?.['@deepseek-ai/dsh-agent']).toBe('>=0.1.0-rc.7 <0.2.0-0');
-    expect(peer?.['@deepseek-ai/dsh-llm']).toBe('>=0.1.0-rc.7 <0.2.0-0');
-    expect(peer?.['@deepseek-ai/dsh-session']).toBe('>=0.1.0-rc.7 <0.2.0-0');
+    expect(peer?.['@deepseek-ai/dsh-agent']).toBe('>=0.1.0-rc.8 <0.2.0-0');
+    expect(peer?.['@deepseek-ai/dsh-llm']).toBe('>=0.1.0-rc.8 <0.2.0-0');
+    expect(peer?.['@deepseek-ai/dsh-session']).toBe('>=0.1.0-rc.8 <0.2.0-0');
   });
 
   it('package.json 包含正确的 name/version/type/license 元数据', () => {

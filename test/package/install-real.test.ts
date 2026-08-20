@@ -1,6 +1,6 @@
 /**
  * 真实安装测试：把打包出的 tgz 安装进临时 DSH profile，
- * 用真实 dsh CLI（rc.7）的 plugin 管理与 --dump-config 证明：
+ * 用仓库唯一的真实 dsh CLI（rc.8）的 plugin 管理与 --dump-config 证明：
  *
  * 1. `dsh plugin --profile <name> add <tgz>` 后，package 声明的 dsh.bundle
  *    使其进入 dsh.profile.bundles（profile layer，不是普通依赖），
@@ -22,7 +22,7 @@ import { join } from 'node:path';
 
 /** 项目根目录。 */
 const projectRoot = process.cwd();
-/** 真实 dsh CLI 入口（rc.7 devDependency）。 */
+/** 真实 dsh CLI 入口（仓库唯一的 rc.8 devDependency）。 */
 const dshBin = join(projectRoot, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js');
 
 /** 临时工作目录（tarball + DSH_HOME）。 */
