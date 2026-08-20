@@ -196,6 +196,159 @@ describe('pre-step 自动分类接线', () => {
   });
 });
 
+describe('Quality First / Credit First 使用分类任务类型', () => {
+  /** 触发 coding 分类的消息（fenced 代码块命中 Rule 规则 → coding/medium/0.8）。 */
+  const CODING_MESSAGE = '请修复这段代码：\n```ts\nconst x: number = 1\n```';
+
+  it('quality_first 按 coding 维度排序（而非 general）', async () => {
+    // A 的 general=95 最高，但 coding=60；B 的 general=70，但 coding=95。
+    // 若错误使用 general 维度会选 A；正确行为是按当前分类（coding）选 B。
+    const h = await bootFake(
+      providers,
+      models,
+      successScript('hi', { inputTokens: 1, outputTokens: 1 }) as never,
+      {
+        models: {
+          'fake-provider:model-a': {
+            enabled: true,
+            multiplier: 1,
+            quality: { general: 95, coding: 60 },
+          },
+          'fake-provider:model-b': {
+            enabled: true,
+            multiplier: 1,
+            quality: { general: 70, coding: 95 },
+          },
+        },
+        routing: { default: 'quality_first' as const },
+        fallback: { enabled: true, max_attempts: 2 },
+        identity: { provider: 'local', local_user_id: 'local' },
+      },
+    );
+    try {
+      const e = ev(h.ctx);
+      // pre-step：带代码块的消息 → coding 分类
+      await e.waterfall(
+        'agent/pre-step',
+        {
+          agent: fakeAgent('session-1'),
+          messages: [{ role: 'user', content: [{ type: 'text', text: CODING_MESSAGE }] }],
+          turn: 1,
+          step: 1,
+          signal: new AbortController().signal,
+        },
+        async () => ({ kind: 'enter', messages: [] }),
+      );
+      // agent/request：quality_first 应按 coding 维度选 model-b
+      const config = (await e.waterfall(
+        'agent/request',
+        { agent: fakeAgent('session-1'), turn: 1, step: 1, signal: new AbortController().signal },
+        async () => ({ provider: 'fake-provider', model: 'model-a' }),
+      )) as { model: string };
+      expect(config.model).toBe('model-b');
+
+      // 决策记录确认使用了 coding 任务类型
+      const decisions = await h.governor!.listDecisions();
+      expect(decisions[0]!.selectedModel).toBe('model-b');
+    } finally {
+      await h.dispose();
+    }
+  });
+
+  it('credit_first 质量门槛作用于 coding 维度（而非 general）', async () => {
+    // A 最便宜（0.1x）且 general=95 达标，但 coding=60 不达标；
+    // B 的 general=90 也达标，coding=95 达标且更贵（1x）。
+    // 若错误使用 general 维度会选最便宜的 A；正确行为是 coding 门槛排除 A 后选 B。
+    const h = await bootFake(
+      providers,
+      models,
+      successScript('hi', { inputTokens: 1, outputTokens: 1 }) as never,
+      {
+        models: {
+          'fake-provider:model-a': {
+            enabled: true,
+            multiplier: 0.1,
+            quality: { general: 95, coding: 60 },
+          },
+          'fake-provider:model-b': {
+            enabled: true,
+            multiplier: 1,
+            quality: { general: 90, coding: 95 },
+          },
+        },
+        routing: {
+          default: 'credit_first' as const,
+          credit_first: { minimum_quality: 85 },
+        },
+        fallback: { enabled: true, max_attempts: 2 },
+        identity: { provider: 'local', local_user_id: 'local' },
+      },
+    );
+    try {
+      const e = ev(h.ctx);
+      await e.waterfall(
+        'agent/pre-step',
+        {
+          agent: fakeAgent('session-1'),
+          messages: [{ role: 'user', content: [{ type: 'text', text: CODING_MESSAGE }] }],
+          turn: 1,
+          step: 1,
+          signal: new AbortController().signal,
+        },
+        async () => ({ kind: 'enter', messages: [] }),
+      );
+      // agent/request：coding 门槛（85）排除 A（coding=60）→ 剩余 B 入选
+      const config = (await e.waterfall(
+        'agent/request',
+        { agent: fakeAgent('session-1'), turn: 1, step: 1, signal: new AbortController().signal },
+        async () => ({ provider: 'fake-provider', model: 'model-a' }),
+      )) as { model: string };
+      expect(config.model).toBe('model-b');
+    } finally {
+      await h.dispose();
+    }
+  });
+
+  it('未分类时 quality_first 回退 general 维度（保持既有行为）', async () => {
+    // 无 pre-step（无分类缓存）：quality_first 应回退 general 维度选 A
+    const h = await bootFake(
+      providers,
+      models,
+      successScript('hi', { inputTokens: 1, outputTokens: 1 }) as never,
+      {
+        models: {
+          'fake-provider:model-a': {
+            enabled: true,
+            multiplier: 1,
+            quality: { general: 95, coding: 60 },
+          },
+          'fake-provider:model-b': {
+            enabled: true,
+            multiplier: 1,
+            quality: { general: 70, coding: 95 },
+          },
+        },
+        routing: { default: 'quality_first' as const },
+        fallback: { enabled: true, max_attempts: 2 },
+        identity: { provider: 'local', local_user_id: 'local' },
+      },
+    );
+    try {
+      const e = ev(h.ctx);
+      // 直接 agent/request（未经过 pre-step 分类）
+      const config = (await e.waterfall(
+        'agent/request',
+        { agent: fakeAgent('session-1'), turn: 1, step: 1, signal: new AbortController().signal },
+        async () => ({ provider: 'fake-provider', model: 'model-a' }),
+      )) as { model: string };
+      // 默认分类 taskType=general → 选 general 最高的 model-a
+      expect(config.model).toBe('model-a');
+    } finally {
+      await h.dispose();
+    }
+  });
+});
+
 describe('月度额度真实计算', () => {
   it('已提交 Credits 达到限额后，下一次请求被拒绝（不依赖 setQuotaExceeded）', async () => {
     // monthly_credits 极小：1 次成功请求即耗尽

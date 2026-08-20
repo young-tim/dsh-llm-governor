@@ -649,9 +649,17 @@ export class GovernorService extends Service {
           this._buildRoutingContext(mode, classification),
         );
       } else if (mode === 'quality_first') {
-        result = routeQualityFirst(filterInput, 'general');
+        // 按当前分类的任务类型排序（pre-step 缓存；未分类回退 general）
+        result = routeQualityFirst(filterInput, classification.taskType);
       } else if (mode === 'credit_first') {
-        result = routeCreditFirst(filterInput, 'general', this._minimumQuality, 1, this._onNoMatch);
+        // 质量门槛同样作用于当前分类的任务类型维度
+        result = routeCreditFirst(
+          filterInput,
+          classification.taskType,
+          this._minimumQuality,
+          1,
+          this._onNoMatch,
+        );
       } else {
         // auto：置信度低于阈值时切 Quality First，否则按复杂度映射质量门槛
         result = routeAuto(
