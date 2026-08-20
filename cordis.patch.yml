@@ -1,11 +1,39 @@
-# Design scaffold only. Do not install this repository into a real DSH profile.
+# dsh-llm-governor bundle patch：将 Governor 治理层安装为 profile 的一个
+# patch layer。应用顺序为 dsh-base →（可选 web-app / headless）→ 本文件 →
+# 用户自己的 profile cordis.patch.yml。
 #
-# The implementation will insert the Governor host plugin and Web client row.
-# It must also make Governor the sole owner of agent/request-error recovery.
-# Whether that is represented by disabling the base `llm-retry` row or by a
-# verified composition contract is intentionally gated by Phase 0 tests.
+# 两个动作：
+# 1. insert：插入 Governor host 插件行。该插件注册 ctx.governor 服务，监听
+#    agent/pre-step（自动分类）、agent/request（准入与路由）、llm/stream（Usage
+#    观察）与 agent/request-error（Fallback 恢复），并将决策、Usage、身份绑定与
+#    策略写入 $DSH_HOME/dsh-llm-governor/governor.db（SQLite WAL）。
+# 2. disable：禁用基础 llm-retry 行，使 Governor 成为唯一的 Recovery Owner。
+#    官方 dsh-llm-retry 与 Governor 同时持有 agent/request-error 恢复权时，同一
+#    失败可能被重复重试，Credits 不可预测，因此 bundle 层面二选一（见
+#    docs/TECHNICAL_DESIGN.md §4.1）。卸载本 bundle 后（dsh plugin remove
+#    dsh-llm-governor），dsh 重新启用基础 llm-retry，恢复默认行为。
+#
+# 身份默认 local 模式（DSH 进程所有者即治理用户）；多用户部署应改为 header/jwt
+# 并在 Web 入站边界绑定 session（无绑定时 fail closed）。
+# UI 默认挂载到 DSH webServer 的 /governor 前缀路由（Models/Users/Usage 三页）。
 
 - insert:
     - id: dsh-llm-governor
-      name: dsh-llm-governor
+      name: 'dsh-llm-governor'
+      config:
+        identity:
+          provider: local
+          local_user_id: local
+        routing:
+          default: manual
+        fallback:
+          enabled: true
+          max_attempts: 2
+        storage:
+          enabled: true
+        ui:
+          enabled: true
 
+- id: llm-retry
+  name: '@deepseek-ai/dsh-llm-retry'
+  disabled: true

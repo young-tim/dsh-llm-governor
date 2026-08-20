@@ -30,3 +30,10 @@
 - [x] Task 3: Auto/Fallback/Usage — 5 integration tests 全绿；A失败→B成功(1 request_id/2 decisions/2 usage)、401不切换、partial output不切换、Credits红→绿、fallback上限红→绿；classifier(hint/rule/llm/缓存)、fallback(错误分类/排除集/attempt上限/部分输出保护)、usage(stream观察/幂等/聚合统计)；冻结合同零改动。
 - [x] Task 4: 产品界面 — 6 UI tests 全绿（Playwright chromium）；Models/Users/Usage 三页加载+console error=0、未授权PATCH 403、admin token 200、普通user_id 拒绝写；不直连SQLite（只通过GovernorService API）；Headless 保持完整治理能力。
 - [x] Task 5: Eval/加固/打包 — 全部 12 个验收命令通过；552 tests 全绿；Eval QR=95.78%/CS=25%；覆盖率 Lines 97.12%/Branches 91.23%；skip/todo=0；冻结合同零改动；三次红→绿验证；加固测试(安全/恢复/并发/月末/数据库损坏/重放)；安装smoke(rc.7/rc.8临时安装/Governor独占recovery/卸载后基础retry恢复/Web/Headless加载)；pack tarball 成功；无 BLOCKED。
+- [x] Task 6: 真实安装返工（验收退回意见修复）— 566 tests 全绿。
+  - **有效 dsh.bundle**：package.json 声明 `dsh.bundle.patch` + main/exports 插件入口；cordis.patch.yml 由"Design scaffold only"改为真实内容（插入 Governor host 行、禁用基础 llm-retry）。
+  - **真实安装测试**：`test/package/install-real.test.ts` 用真实 dsh CLI（rc.7）把 tgz 装进临时 DSH_HOME 的 profile：`dsh plugin add` 后进入 `dsh.profile.bundles`（无 "declares no dsh.bundle" 警告）；`--dump-config` 渲染 Governor 行且 llm-retry disabled；`dsh plugin remove` 后恢复。
+  - **运行时接线**：pre-step 自动分类（Hint/Rule→请求状态，auto 路由使用）；身份 fail closed（header/jwt 无绑定抛 IDENTITY_REQUIRED，local 自动绑定）；月度额度按月窗真实计算（不再仅靠 setQuotaExceeded）；SQLite 接入运行时（默认 $DSH_HOME/dsh-llm-governor/governor.db，决策/Usage/身份/策略落库，重启恢复，DB 为策略权威）；计费参数（tokensPerCredit/multiplierPpm/routingMode）来自配置。
+  - **UI**：插件把 /governor 前缀路由注册到 ctx.webServer（DSH Web 端口下的受信挂载），页面计算 API base 自适配前缀；`pnpm build` 复制 HTML 到 dist/ui/pages（scripts/copy-ui-pages.mjs）。
+  - **测试失真修复**：recovery owner 精确断言（=1 而非 >=1，组合层唯一性由 patch+dump-config 证明）；移除全部 --passWithNoTests；lint --max-warnings 0 且 44 条警告清零。
+  - 覆盖率 Lines 96.95%/Branches 90.37%；冻结合同零改动。

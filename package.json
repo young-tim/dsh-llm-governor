@@ -13,10 +13,33 @@
   "license": "MIT",
   "type": "module",
   "private": true,
+  "main": "dist/plugin/mod.js",
+  "exports": {
+    ".": {
+      "types": "./dist/plugin/mod.d.ts",
+      "default": "./dist/plugin/mod.js"
+    },
+    "./service": {
+      "types": "./dist/plugin/service.d.ts",
+      "default": "./dist/plugin/service.js"
+    },
+    "./ui": {
+      "types": "./dist/ui/index.d.ts",
+      "default": "./dist/ui/index.js"
+    },
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
   "files": [
     "dist",
     "src",
     "test",
+    "cordis.patch.yml",
     "tsconfig.json",
     "vitest.config.ts"
   ],
@@ -25,18 +48,19 @@
   },
   "packageManager": "pnpm@11.9.0",
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && node scripts/copy-ui-pages.mjs",
+    "prepack": "pnpm run build",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run --passWithNoTests",
+    "test": "vitest run",
     "test:contracts": "vitest run --project contracts-rc7 --project contracts-rc8",
-    "test:unit": "vitest run --project unit --passWithNoTests",
-    "test:integration": "vitest run --project integration --passWithNoTests",
-    "test:ui": "vitest run --project ui --passWithNoTests",
-    "test:eval": "vitest run --project eval --passWithNoTests",
-    "test:coverage": "vitest run --coverage --passWithNoTests",
-    "test:package": "vitest run --project package --passWithNoTests",
+    "test:unit": "vitest run --project unit",
+    "test:integration": "vitest run --project integration",
+    "test:ui": "vitest run --project ui",
+    "test:eval": "vitest run --project eval",
+    "test:coverage": "vitest run --coverage",
+    "test:package": "vitest run --project package",
     "format:check": "prettier --check \"src/**/*.ts\" \"test/**/*.ts\"",
-    "lint": "eslint src test --max-warnings 999"
+    "lint": "eslint src test --max-warnings 0"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": ">=4.0.1 <5",
