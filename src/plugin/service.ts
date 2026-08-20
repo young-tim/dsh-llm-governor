@@ -21,8 +21,14 @@ import {
 } from '../routing/strategies.js';
 import type { AutoClassification } from '../routing/strategies.js';
 import { createClassifier } from '../classifier/index.js';
-import type { Classifier, ClassifyInput } from '../classifier/index.js';
-import type { GovernorIdentity } from '../identity/types.js';
+import type {
+  Classifier,
+  ClassifyInput,
+  LlmClassifierBackend,
+  ClassifierCache,
+} from '../classifier/index.js';
+import { InMemoryClassifierCache } from '../classifier/cache.js';
+import type { GovernorIdentity, IdentityProvider } from '../identity/types.js';
 import { FallbackState, isRetryable } from '../fallback/mod.js';
 import type { FailureInfo } from '../fallback/mod.js';
 import type { UsageEvent } from '../usage/types.js';
@@ -37,6 +43,10 @@ interface RequestState {
   selectedRoute?: CanonicalRoute;
   /** 本次请求实际使用的路由模式（Usage 记录使用）。 */
   mode?: RoutingMode;
+  /** 本请求必须满足的能力（来自输入信号，如图片 → vision）。 */
+  requiredCapabilities: string[];
+  /** 本请求必须满足的输入模态（来自输入信号，如图片 → image）。 */
+  requiredModalities: string[];
   partialOutputDelivered: boolean;
 }
 
@@ -81,6 +91,16 @@ interface DecisionRecordMem {
   createdAt: string;
 }
 
+/** 服务构造选项：注入身份提供者实例与分类器后端/缓存。 */
+export interface GovernorServiceOptions {
+  /** header/jwt 模式的身份提供者实例（由 mod.ts 从已验证配置构建）。 */
+  identityProvider?: IdentityProvider;
+  /** LLM 分类后端（由 mod.ts 基于 ctx.llm 构建）。 */
+  classifierBackend?: LlmClassifierBackend;
+  /** 分类结果缓存（默认 InMemoryClassifierCache）。 */
+  classifierCache?: ClassifierCache;
+}
+
 /**
  * Governor 核心服务。集成全部领域模块，提供事件监听器所需的方法和 Client Remote API。
  */
@@ -113,10 +133,17 @@ export class GovernorService extends Service {
   private readonly _localIdentity: GovernorIdentity | undefined;
   /** 身份提供者模式：local 自动绑定；header/jwt 无绑定时 fail closed。 */
   private readonly _identityKind: 'local' | 'header' | 'jwt';
-  /** 分类器：Hint → Rule（LLM 阶段需显式配置后端，默认不启用）。 */
+  /** header/jwt 模式的身份提供者实例（入站绑定用）。 */
+  private readonly _identityProvider: IdentityProvider | undefined;
+  /** 分类器：Hint → Rule → LLM（llmBackend 由 mod.ts 注入时启用）。 */
   private readonly _classifier: Classifier;
 
-  constructor(ctx: Context, config: GovernorPluginConfig, repository?: GovernorRepository) {
+  constructor(
+    ctx: Context,
+    config: GovernorPluginConfig,
+    repository?: GovernorRepository,
+    options?: GovernorServiceOptions,
+  ) {
     super(ctx, 'governor');
     this._repository = repository;
     this._timezone = config.credits?.timezone ?? 'UTC';
@@ -126,8 +153,16 @@ export class GovernorService extends Service {
       this._identityKind === 'local'
         ? { userId: config.identity?.local_user_id ?? 'local' }
         : undefined;
+    this._identityProvider = options?.identityProvider;
+    // LLM 分类后端注入后，Auto 走完整 Hint → Rule → LLM 链
     this._classifier = createClassifier({
       confidenceThreshold: config.auto?.confidence_threshold ?? 0.7,
+      ...(options?.classifierBackend !== undefined
+        ? { llmBackend: options.classifierBackend }
+        : {}),
+      ...(options?.classifierCache !== undefined || options?.classifierBackend !== undefined
+        ? { cache: options?.classifierCache ?? new InMemoryClassifierCache() }
+        : {}),
     });
     this._models = new Map(Object.entries(config.models ?? {}));
     this._users = new Map(
@@ -250,6 +285,8 @@ export class GovernorService extends Service {
         requestId: crypto.randomUUID(),
         fallbackIndex: 0,
         fallback: new FallbackState(this._maxAttempts, this._afterPartialOutput),
+        requiredCapabilities: [],
+        requiredModalities: [],
         partialOutputDelivered: false,
       };
       this._requestStates.set(key, state);
@@ -352,7 +389,9 @@ export class GovernorService extends Service {
   }
 
   /**
-   * 对当前步骤输入执行分类（Hint → Rule），并缓存到请求状态。
+   * 对当前步骤输入执行分类（Hint → Rule → LLM），并缓存到请求状态。
+   * 同时从输入信号提取本请求的能力/模态要求：图片输入要求 vision 能力与
+   * image 模态（advisory 声明不支持时由公共过滤排除，§7.2.5）。
    * 被 agent/pre-step 调用；Auto 路由读取该分类，其他模式忽略。
    */
   async classifyStep(
@@ -363,7 +402,42 @@ export class GovernorService extends Service {
   ): Promise<AutoClassification> {
     const classification = await this._classifier.classify(input);
     this.setClassification(sessionId, turn, step, classification);
+
+    // 能力/模态要求：图片输入 → vision 能力 + image 模态
+    const state = this.getOrCreateRequestState(sessionId, turn, step);
+    if (input.hasImage === true) {
+      if (!state.requiredCapabilities.includes('vision')) {
+        state.requiredCapabilities = [...state.requiredCapabilities, 'vision'];
+      }
+      if (!state.requiredModalities.includes('image')) {
+        state.requiredModalities = [...state.requiredModalities, 'image'];
+      }
+    }
     return classification;
+  }
+
+  /**
+   * 从入站 Header 绑定身份（header/jwt 模式的真实绑定路径）。
+   *
+   * 由部署方的可信反向代理 / companion ingress 在 session 创建或首条消息提交时，
+   * 通过 /governor/api/bind 端点调用。使用配置的 IdentityProvider 验证：
+   * header 模式校验可信代理标识；jwt 模式验签并校验 issuer/audience/exp/nbf。
+   * 无身份提供者（local 模式）或验证失败时抛错（fail closed）。
+   *
+   * @param sessionId - 要绑定的 session。
+   * @param headers - 入站请求 Header（由可信代理转发）。
+   * @returns 绑定后的身份。
+   */
+  async bindIdentityFromHeaders(
+    sessionId: string,
+    headers: Readonly<Record<string, string>>,
+  ): Promise<GovernorIdentity> {
+    if (this._identityProvider === undefined) {
+      throw new Error('IDENTITY_PROVIDER_NOT_CONFIGURED');
+    }
+    const identity = await this._identityProvider.resolve({ sessionId, headers });
+    await this.bindIdentity(sessionId, identity);
+    return identity;
   }
 
   /** 构建全局默认可用 route 集合。 */
@@ -375,14 +449,8 @@ export class GovernorService extends Service {
     return result;
   }
 
-  /** 构建 FilterInput。 */
-  private buildFilterInput(
-    sessionId: string,
-    turn: number,
-    step: number,
-    requiredCapabilities: string[],
-    requiredModalities: string[],
-  ): FilterInput {
+  /** 构建 FilterInput。required capabilities/modalities 来自 pre-step 提取的输入信号。 */
+  private buildFilterInput(sessionId: string, turn: number, step: number): FilterInput {
     const state = this.getOrCreateRequestState(sessionId, turn, step);
     const identity = this.getIdentity(sessionId);
     const userPolicy = identity ? this._users.get(identity.userId) : undefined;
@@ -396,8 +464,8 @@ export class GovernorService extends Service {
       globalDefault: this.globalDefault,
       userPolicy: accessPolicy,
       excludedRoutes: state.fallback.excludedRoutes,
-      requiredCapabilities,
-      requiredModalities,
+      requiredCapabilities: state.requiredCapabilities,
+      requiredModalities: state.requiredModalities,
       quotaCheck: (_routeId: CanonicalRoute) => {
         if (identity === undefined) return true; // 无身份由 selectModel 前置 fail closed
         return !this._isQuotaExceeded(identity.userId);
@@ -453,7 +521,7 @@ export class GovernorService extends Service {
       );
     }
 
-    const filterInput = this.buildFilterInput(sessionId, turn, step, [], []);
+    const filterInput = this.buildFilterInput(sessionId, turn, step);
 
     let result: RoutingResult;
     const mode = this._defaultRouting;

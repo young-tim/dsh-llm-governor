@@ -11,6 +11,8 @@ export type {
   RoutingConfig,
   AutoConfig,
   FallbackConfig,
+  StorageConfig,
+  UiConfig,
   ModelEntryConfig,
   UserEntryConfig,
   GovernorConfig,

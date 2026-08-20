@@ -57,10 +57,31 @@ export interface ObserveStreamOptions {
   userId: string;
   /** 路由模式。 */
   routingMode: string;
+  /**
+   * 首个语义 chunk（text/reasoning/tool-call delta）已交付回调。
+   * 在 fallback.after_partial_output=false 的安全边界中，此后不得再切换模型
+   * （§11 透明 Fallback 的安全边界）。幂等：最多调用一次。
+   */
+  onPartialOutput?: () => void;
 }
 
 /** 视为成功的 finish kind 集合。 */
 const SUCCESS_FINISH_KINDS = new Set(['stop', 'tool-calls']);
+
+/**
+ * 判断 chunk 是否为已交付的语义内容（模型产出已到达消费者）。
+ * text/reasoning/tool-call 的 delta 属于语义 chunk；block-start/usage/finish
+ * 等控制信号不属于。
+ */
+function isSemanticDelta(chunk: StreamChunkLike): boolean {
+  return (
+    chunk.type === 'text-delta' ||
+    chunk.type === 'reasoning-delta' ||
+    chunk.type === 'tool-call-delta' ||
+    chunk.type === 'tool-call' ||
+    chunk.type === 'input-json-delta'
+  );
+}
 
 /**
  * 包装内部流迭代器，观察 usage/finish，不消费或乱序流。
@@ -69,6 +90,7 @@ const SUCCESS_FINISH_KINDS = new Set(['stop', 'tool-calls']);
  * - 每个来自 inner 的 chunk 原样 yield 给下游消费者（不消费、不重排序）
  * - 看到 chunk.usage 时保存最新计量（多份 usage chunk 取最后一份）
  * - 看到 chunk.reason 时记录 finish kind 与 failure 信息
+ * - 首个语义 chunk 交付时调用 onPartialOutput（幂等，最多一次）
  * - inner 抛错时记录 errorCode，然后重新抛出（不影响下游错误传播）
  * - 在 finally 中调用 onUsage 记录完整事件（无论成功/失败/提前终止）
  *
@@ -98,6 +120,7 @@ export async function* observeStream(
   let errorCode: string | undefined;
   let httpStatus: number | undefined;
   let thrown = false;
+  let partialOutputNotified = false;
 
   try {
     for await (const chunk of inner) {
@@ -119,6 +142,11 @@ export async function* observeStream(
             httpStatus = chunk.reason.failure.status;
           }
         }
+      }
+      // 首个语义 chunk 交付：通知上游标记部分输出保护（幂等）
+      if (!partialOutputNotified && isSemanticDelta(chunk)) {
+        partialOutputNotified = true;
+        options.onPartialOutput?.();
       }
       // 原样透传，不消费或乱序
       yield chunk;

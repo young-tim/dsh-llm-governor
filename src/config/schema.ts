@@ -56,14 +56,26 @@ const TOP_LEVEL_FIELDS: readonly string[] = [
   'fallback',
   'models',
   'users',
+  'storage',
+  'ui',
 ];
 const IDENTITY_FIELDS: readonly string[] = [
   'provider',
   'local_user_id',
   'header_name',
+  'trusted_proxy',
+  'proxy_header_name',
+  'display_name_header',
+  'email_header',
   'jwt_issuer',
   'jwt_audience',
   'jwt_algorithms',
+  'jwt_key',
+  'jwt_key_file',
+  'jwt_subject_claim',
+  'jwt_header_name',
+  'jwt_scheme',
+  'jwt_clock_tolerance_ms',
 ];
 const CREDITS_FIELDS: readonly string[] = [
   'tokens_per_credit',
@@ -82,6 +94,8 @@ const LLM_CLASSIFIER_FIELDS: readonly string[] = ['enabled', 'provider', 'model'
 const FALLBACK_FIELDS: readonly string[] = ['enabled', 'max_attempts', 'after_partial_output'];
 const MODEL_FIELDS: readonly string[] = ['enabled', 'multiplier', 'capabilities', 'quality'];
 const USER_FIELDS: readonly string[] = ['allow', 'monthly_credits'];
+const STORAGE_FIELDS: readonly string[] = ['enabled', 'path'];
+const UI_FIELDS: readonly string[] = ['enabled', 'port'];
 
 /** TaskType 集合，用于 O(1) 校验。 */
 const TASK_TYPE_SET: ReadonlySet<string> = new Set<string>(TASK_TYPES);
@@ -105,9 +119,29 @@ export interface IdentityConfig {
   readonly provider: IdentityProvider;
   readonly localUserId?: string;
   readonly headerName?: string;
+  /** header 模式：可信代理来源标识（必填，强制声明信任边界）。 */
+  readonly trustedProxy?: string;
+  /** header 模式：代理标识 Header 名（可选；配置后验证其值等于 trustedProxy）。 */
+  readonly proxyHeaderName?: string;
+  /** header 模式：展示名 Header 名。 */
+  readonly displayNameHeader?: string;
+  /** header 模式：邮箱 Header 名。 */
+  readonly emailHeader?: string;
   readonly jwtIssuer?: string;
   readonly jwtAudience?: string;
   readonly jwtAlgorithms?: readonly string[];
+  /** jwt 模式：签名密钥（HMAC 字符串或 PEM 字符串）。与 jwt_key_file 二选一。 */
+  readonly jwtKey?: string;
+  /** jwt 模式：从文件读取签名密钥（PEM）。与 jwt_key 二选一。 */
+  readonly jwtKeyFile?: string;
+  /** jwt 模式：映射 userId 的 claim 名，默认 sub。 */
+  readonly jwtSubjectClaim?: string;
+  /** jwt 模式：读取 JWT 的 Header 名，默认 authorization。 */
+  readonly jwtHeaderName?: string;
+  /** jwt 模式：Authorization scheme 前缀，默认 'Bearer '。 */
+  readonly jwtScheme?: string;
+  /** jwt 模式：时钟偏差（毫秒），默认 0。 */
+  readonly jwtClockToleranceMs?: number;
 }
 
 /** Credits 计量配置。 */
@@ -148,6 +182,20 @@ export interface FallbackConfig {
   readonly afterPartialOutput: boolean;
 }
 
+/** SQLite 持久化配置。 */
+export interface StorageConfig {
+  readonly enabled: boolean;
+  /** 数据库文件路径；空字符串表示使用默认 $DSH_HOME 路径。 */
+  readonly path?: string;
+}
+
+/** Web UI 配置。 */
+export interface UiConfig {
+  readonly enabled: boolean;
+  /** 无 webServer 时的独立监听端口；0 表示不独立监听。 */
+  readonly port: number;
+}
+
 /** 单个模型条目配置。 */
 export interface ModelEntryConfig {
   readonly enabled: boolean;
@@ -173,6 +221,8 @@ export interface GovernorConfig {
   readonly fallback: FallbackConfig;
   readonly models: Readonly<Record<string, ModelEntryConfig>>;
   readonly users: Readonly<Record<string, UserEntryConfig>>;
+  readonly storage: StorageConfig;
+  readonly ui: UiConfig;
 }
 
 // ===== 错误 =====
@@ -411,12 +461,22 @@ function parseIdentity(value: unknown): IdentityConfig {
   const provider = parseIdentityProvider(value['provider'], 'identity.provider');
 
   // 条件必填校验
-  if (provider === 'header' && value['header_name'] === undefined) {
-    throw new ConfigError(
-      'header_name is required when provider=header',
-      'CONFIG_MISSING_FIELD',
-      'identity.header_name',
-    );
+  if (provider === 'header') {
+    if (value['header_name'] === undefined) {
+      throw new ConfigError(
+        'header_name is required when provider=header',
+        'CONFIG_MISSING_FIELD',
+        'identity.header_name',
+      );
+    }
+    // 强制声明可信代理来源（信任边界不可缺省）
+    if (value['trusted_proxy'] === undefined) {
+      throw new ConfigError(
+        'trusted_proxy is required when provider=header (trust boundary must be explicit)',
+        'CONFIG_MISSING_FIELD',
+        'identity.trusted_proxy',
+      );
+    }
   }
   if (provider === 'jwt') {
     if (value['jwt_issuer'] === undefined) {
@@ -440,6 +500,21 @@ function parseIdentity(value: unknown): IdentityConfig {
         'identity.jwt_algorithms',
       );
     }
+    // 签名密钥必须显式提供（禁止无密钥的"只 decode"部署）
+    if (value['jwt_key'] === undefined && value['jwt_key_file'] === undefined) {
+      throw new ConfigError(
+        'jwt_key or jwt_key_file is required when provider=jwt',
+        'CONFIG_MISSING_FIELD',
+        'identity.jwt_key',
+      );
+    }
+    if (value['jwt_key'] !== undefined && value['jwt_key_file'] !== undefined) {
+      throw new ConfigError(
+        'jwt_key and jwt_key_file are mutually exclusive',
+        'CONFIG_CONFLICT',
+        'identity.jwt_key',
+      );
+    }
   }
 
   // 解析可选字段；provider=local 时 local_user_id 默认 "local"
@@ -453,6 +528,22 @@ function parseIdentity(value: unknown): IdentityConfig {
     value['header_name'] !== undefined
       ? parseNonEmptyString(value['header_name'], 'identity.header_name')
       : undefined;
+  const trustedProxy =
+    value['trusted_proxy'] !== undefined
+      ? parseNonEmptyString(value['trusted_proxy'], 'identity.trusted_proxy')
+      : undefined;
+  const proxyHeaderName =
+    value['proxy_header_name'] !== undefined
+      ? parseNonEmptyString(value['proxy_header_name'], 'identity.proxy_header_name')
+      : undefined;
+  const displayNameHeader =
+    value['display_name_header'] !== undefined
+      ? parseNonEmptyString(value['display_name_header'], 'identity.display_name_header')
+      : undefined;
+  const emailHeader =
+    value['email_header'] !== undefined
+      ? parseNonEmptyString(value['email_header'], 'identity.email_header')
+      : undefined;
   const jwtIssuer =
     value['jwt_issuer'] !== undefined
       ? parseNonEmptyString(value['jwt_issuer'], 'identity.jwt_issuer')
@@ -464,6 +555,28 @@ function parseIdentity(value: unknown): IdentityConfig {
   const jwtAlgorithms =
     value['jwt_algorithms'] !== undefined
       ? parseStringArray(value['jwt_algorithms'], 'identity.jwt_algorithms')
+      : undefined;
+  const jwtKey =
+    value['jwt_key'] !== undefined ? parseString(value['jwt_key'], 'identity.jwt_key') : undefined;
+  const jwtKeyFile =
+    value['jwt_key_file'] !== undefined
+      ? parseNonEmptyString(value['jwt_key_file'], 'identity.jwt_key_file')
+      : undefined;
+  const jwtSubjectClaim =
+    value['jwt_subject_claim'] !== undefined
+      ? parseNonEmptyString(value['jwt_subject_claim'], 'identity.jwt_subject_claim')
+      : undefined;
+  const jwtHeaderName =
+    value['jwt_header_name'] !== undefined
+      ? parseNonEmptyString(value['jwt_header_name'], 'identity.jwt_header_name')
+      : undefined;
+  const jwtScheme =
+    value['jwt_scheme'] !== undefined
+      ? parseString(value['jwt_scheme'], 'identity.jwt_scheme')
+      : undefined;
+  const jwtClockToleranceMs =
+    value['jwt_clock_tolerance_ms'] !== undefined
+      ? parseNonNegativeNumber(value['jwt_clock_tolerance_ms'], 'identity.jwt_clock_tolerance_ms')
       : undefined;
 
   // jwt_algorithms 不允许为空数组
@@ -479,9 +592,19 @@ function parseIdentity(value: unknown): IdentityConfig {
     provider,
     ...(localUserId !== undefined ? { localUserId } : {}),
     ...(headerName !== undefined ? { headerName } : {}),
+    ...(trustedProxy !== undefined ? { trustedProxy } : {}),
+    ...(proxyHeaderName !== undefined ? { proxyHeaderName } : {}),
+    ...(displayNameHeader !== undefined ? { displayNameHeader } : {}),
+    ...(emailHeader !== undefined ? { emailHeader } : {}),
     ...(jwtIssuer !== undefined ? { jwtIssuer } : {}),
     ...(jwtAudience !== undefined ? { jwtAudience } : {}),
     ...(jwtAlgorithms !== undefined ? { jwtAlgorithms: [...jwtAlgorithms] } : {}),
+    ...(jwtKey !== undefined ? { jwtKey } : {}),
+    ...(jwtKeyFile !== undefined ? { jwtKeyFile } : {}),
+    ...(jwtSubjectClaim !== undefined ? { jwtSubjectClaim } : {}),
+    ...(jwtHeaderName !== undefined ? { jwtHeaderName } : {}),
+    ...(jwtScheme !== undefined ? { jwtScheme } : {}),
+    ...(jwtClockToleranceMs !== undefined ? { jwtClockToleranceMs } : {}),
   };
 }
 
@@ -782,6 +905,54 @@ function parseUsers(value: unknown): Record<string, UserEntryConfig> {
   return result;
 }
 
+/** 解析 storage 配置块。 */
+function parseStorage(value: unknown): StorageConfig {
+  if (value === undefined || value === null) {
+    return { enabled: true };
+  }
+  if (!isObject(value)) {
+    throw new ConfigError('expected object', 'CONFIG_TYPE_ERROR', 'storage');
+  }
+  rejectUnknownKeys(value, STORAGE_FIELDS, 'storage');
+
+  const enabled =
+    value['enabled'] !== undefined ? parseBoolean(value['enabled'], 'storage.enabled') : true;
+  const path =
+    value['path'] !== undefined ? parseNonEmptyString(value['path'], 'storage.path') : undefined;
+
+  return { enabled, ...(path !== undefined ? { path } : {}) };
+}
+
+/** 解析 ui 配置块。 */
+function parseUi(value: unknown): UiConfig {
+  if (value === undefined || value === null) {
+    return { enabled: true, port: 0 };
+  }
+  if (!isObject(value)) {
+    throw new ConfigError('expected object', 'CONFIG_TYPE_ERROR', 'ui');
+  }
+  rejectUnknownKeys(value, UI_FIELDS, 'ui');
+
+  const enabled =
+    value['enabled'] !== undefined ? parseBoolean(value['enabled'], 'ui.enabled') : true;
+  const port =
+    value['port'] !== undefined
+      ? (() => {
+          const p = parsePositiveInteger(value['port'], 'ui.port');
+          if (p > 65535) {
+            throw new ConfigError(
+              `expected port in [1, 65535], got ${p}`,
+              'CONFIG_RANGE_ERROR',
+              'ui.port',
+            );
+          }
+          return p;
+        })()
+      : 0;
+
+  return { enabled, port };
+}
+
 // ===== 主解析器 =====
 
 /**
@@ -808,6 +979,8 @@ export function resolveConfig(raw: unknown): GovernorConfig {
   const fallback = parseFallback(raw['fallback']);
   const models = parseModels(raw['models']);
   const users = parseUsers(raw['users']);
+  const storage = parseStorage(raw['storage']);
+  const ui = parseUi(raw['ui']);
 
   return {
     schemaVersion,
@@ -819,6 +992,8 @@ export function resolveConfig(raw: unknown): GovernorConfig {
     fallback,
     models,
     users,
+    storage,
+    ui,
   };
 }
 

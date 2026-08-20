@@ -3,6 +3,16 @@ schema_version: 1
 identity:
   provider: local
   local_user_id: local
+  # 多用户部署改用 header 或 jwt 模式（无绑定时 fail closed）：
+  # provider: header
+  # header_name: X-Governor-User
+  # trusted_proxy: my-ingress
+  # proxy_header_name: X-Proxy-Id
+  # provider: jwt
+  # jwt_issuer: https://sso.example.com
+  # jwt_audience: governor
+  # jwt_algorithms: [RS256]
+  # jwt_key_file: /etc/governor/pub.pem
 
 credits:
   tokens_per_credit: 1000000
