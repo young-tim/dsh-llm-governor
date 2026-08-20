@@ -127,17 +127,36 @@ describe('config/resolveConfig', () => {
     expect(() => resolveConfig(raw)).toThrow(/header_name is required/);
   });
 
-  it('provider=header 时提供 header_name 合法', () => {
+  it('provider=header 时缺少 trusted_proxy 抛 ConfigError（信任边界必须显式）', () => {
     const raw = {
       schema_version: 1,
       identity: { provider: 'header', header_name: 'X-User' },
     };
+    expect(() => resolveConfig(raw)).toThrow(/trusted_proxy is required/);
+  });
+
+  it('provider=header 时提供 header_name + trusted_proxy 合法', () => {
+    const raw = {
+      schema_version: 1,
+      identity: {
+        provider: 'header',
+        header_name: 'X-User',
+        trusted_proxy: 'my-ingress',
+        proxy_header_name: 'X-Proxy-Id',
+        display_name_header: 'X-Display-Name',
+        email_header: 'X-Email',
+      },
+    };
     const cfg = resolveConfig(raw);
     expect(cfg.identity.provider).toBe('header');
     expect(cfg.identity.headerName).toBe('X-User');
+    expect(cfg.identity.trustedProxy).toBe('my-ingress');
+    expect(cfg.identity.proxyHeaderName).toBe('X-Proxy-Id');
+    expect(cfg.identity.displayNameHeader).toBe('X-Display-Name');
+    expect(cfg.identity.emailHeader).toBe('X-Email');
   });
 
-  it('provider=jwt 时缺少 issuer/audience/algorithms 均抛 ConfigError', () => {
+  it('provider=jwt 时缺少 issuer/audience/algorithms/key 均抛 ConfigError', () => {
     // 全缺
     expect(() => resolveConfig({ schema_version: 1, identity: { provider: 'jwt' } })).toThrow(
       /jwt_issuer is required/,
@@ -160,9 +179,35 @@ describe('config/resolveConfig', () => {
         },
       }),
     ).toThrow(/jwt_algorithms is required/);
+    // 缺签名密钥（禁止无密钥的只 decode 部署）
+    expect(() =>
+      resolveConfig({
+        schema_version: 1,
+        identity: {
+          provider: 'jwt',
+          jwt_issuer: 'iss',
+          jwt_audience: 'aud',
+          jwt_algorithms: ['RS256'],
+        },
+      }),
+    ).toThrow(/jwt_key or jwt_key_file is required/);
+    // jwt_key 与 jwt_key_file 互斥
+    expect(() =>
+      resolveConfig({
+        schema_version: 1,
+        identity: {
+          provider: 'jwt',
+          jwt_issuer: 'iss',
+          jwt_audience: 'aud',
+          jwt_algorithms: ['HS256'],
+          jwt_key: 'secret',
+          jwt_key_file: '/etc/governor/pub.pem',
+        },
+      }),
+    ).toThrow(/mutually exclusive/);
   });
 
-  it('provider=jwt 时提供完整字段合法', () => {
+  it('provider=jwt 时提供完整字段（含密钥与可选项）合法', () => {
     const raw = {
       schema_version: 1,
       identity: {
@@ -170,12 +215,39 @@ describe('config/resolveConfig', () => {
         jwt_issuer: 'iss',
         jwt_audience: 'aud',
         jwt_algorithms: ['RS256', 'ES256'],
+        jwt_key: '-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----',
+        jwt_subject_claim: 'sub',
+        jwt_header_name: 'x-auth-token',
+        jwt_scheme: '',
+        jwt_clock_tolerance_ms: 5000,
       },
     };
     const cfg = resolveConfig(raw);
     expect(cfg.identity.jwtIssuer).toBe('iss');
     expect(cfg.identity.jwtAudience).toBe('aud');
     expect(cfg.identity.jwtAlgorithms).toEqual(['RS256', 'ES256']);
+    expect(cfg.identity.jwtKey).toContain('BEGIN PUBLIC KEY');
+    expect(cfg.identity.jwtSubjectClaim).toBe('sub');
+    expect(cfg.identity.jwtHeaderName).toBe('x-auth-token');
+    expect(cfg.identity.jwtScheme).toBe('');
+    expect(cfg.identity.jwtClockToleranceMs).toBe(5000);
+  });
+
+  it('storage/ui 段解析（默认启用）', () => {
+    const cfg = resolveConfig(minimalRaw());
+    expect(cfg.storage).toEqual({ enabled: true });
+    expect(cfg.ui).toEqual({ enabled: true, port: 0 });
+    const cfg2 = resolveConfig({
+      ...minimalRaw(),
+      storage: { enabled: false, path: '/tmp/gov.db' },
+      ui: { enabled: false, port: 3757 },
+    });
+    expect(cfg2.storage).toEqual({ enabled: false, path: '/tmp/gov.db' });
+    expect(cfg2.ui).toEqual({ enabled: false, port: 3757 });
+    // ui.port 范围校验
+    expect(() => resolveConfig({ ...minimalRaw(), ui: { port: 70000 } })).toThrow(
+      /port in \[1, 65535\]/,
+    );
   });
 });
 

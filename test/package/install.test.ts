@@ -46,6 +46,7 @@ afterAll(() => {
 /** Governor 测试配置（内存策略，不触碰真实 DSH_HOME）。 */
 function governorConfig(): GovernorPluginConfig {
   return {
+    schema_version: 1,
     models: {
       'fake-provider:model-a': { enabled: true, multiplier: 1, quality: { general: 90 } },
     },

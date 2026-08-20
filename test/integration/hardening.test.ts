@@ -151,6 +151,7 @@ describe('并发请求', () => {
         },
         routing: { default: 'quality_first' as const },
         fallback: { enabled: true, max_attempts: 2 },
+        identity: { provider: 'local' as const, local_user_id: 'local' },
       },
     );
     try {
@@ -224,8 +225,13 @@ describe('安全边界', () => {
           'fake-provider:model-a': { enabled: true, multiplier: 1, quality: { general: 90 } },
         },
         fallback: { enabled: true, max_attempts: 2 },
-        // header 模式：身份必须在入站边界绑定，无绑定不得透传
-        identity: { provider: 'header' as const },
+        // header 模式：身份必须在入站边界绑定，无绑定不得透传。
+        // 严格 Schema 要求 header_name 与 trusted_proxy（信任边界显式声明）
+        identity: {
+          provider: 'header' as const,
+          header_name: 'X-Governor-User',
+          trusted_proxy: 'test-ingress',
+        },
       },
     );
     try {
@@ -282,6 +288,7 @@ describe('安全边界', () => {
           'fake-provider:model-a': { enabled: true, multiplier: 1, quality: { general: 90 } },
         },
         fallback: { enabled: true, max_attempts: 2 },
+        identity: { provider: 'local' as const, local_user_id: 'local' },
       },
     );
     try {

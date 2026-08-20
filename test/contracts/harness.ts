@@ -54,13 +54,15 @@ export async function bootFake(
   let governor: GovernorService | undefined;
   let dbDir: string | undefined;
   if (governorConfig) {
-    // 默认使用临时 SQLite 文件，证明运行时持久化接线且不触碰真实 DSH_HOME
+    // 默认使用临时 SQLite 文件，证明运行时持久化接线且不触碰真实 DSH_HOME。
+    // schema_version 由 harness 统一补齐（严格 Schema 校验在插件入口执行）。
     const dbPath =
       opts?.dbPath ??
       join((dbDir = mkdtempSync(join(tmpdir(), 'dsh-gov-harness-'))), 'governor.db');
     govFiber = ctx.plugin(
       GovernorPlugin as never,
       {
+        schema_version: 1,
         ...governorConfig,
         storage: { enabled: true, path: dbPath },
       } as never,

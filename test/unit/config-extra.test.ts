@@ -134,7 +134,20 @@ describe('config/Identity 错误分支', () => {
     expect(() =>
       resolveConfig({
         schema_version: 1,
-        identity: { provider: 'header', header_name: '' },
+        identity: {
+          provider: 'header',
+          header_name: '',
+          trusted_proxy: 'my-ingress',
+        },
+      }),
+    ).toThrow(/expected non-empty string/);
+  });
+
+  it('trusted_proxy 为空字符串抛 ConfigError', () => {
+    expect(() =>
+      resolveConfig({
+        schema_version: 1,
+        identity: { provider: 'header', header_name: 'X-User', trusted_proxy: '' },
       }),
     ).toThrow(/expected non-empty string/);
   });
@@ -148,6 +161,7 @@ describe('config/Identity 错误分支', () => {
           jwt_issuer: '',
           jwt_audience: 'aud',
           jwt_algorithms: ['RS256'],
+          jwt_key: 'k',
         },
       }),
     ).toThrow(/expected non-empty string/);
@@ -162,6 +176,7 @@ describe('config/Identity 错误分支', () => {
           jwt_issuer: 'iss',
           jwt_audience: 'aud',
           jwt_algorithms: 'RS256',
+          jwt_key: 'k',
         },
       }),
     ).toThrow(/expected array/);
@@ -176,6 +191,7 @@ describe('config/Identity 错误分支', () => {
           jwt_issuer: 'iss',
           jwt_audience: 'aud',
           jwt_algorithms: [42],
+          jwt_key: 'k',
         },
       }),
     ).toThrow(/expected string/);
@@ -190,6 +206,7 @@ describe('config/Identity 错误分支', () => {
           jwt_issuer: 'iss',
           jwt_audience: 'aud',
           jwt_algorithms: [],
+          jwt_key: 'k',
         },
       }),
     ).toThrow(/jwt_algorithms must not be empty/);
