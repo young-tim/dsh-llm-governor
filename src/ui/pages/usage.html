@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>Governor · 用量查询</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 24px; color: #222; }
+    nav a { margin-right: 12px; }
+    table { border-collapse: collapse; width: 100%; margin-top: 16px; }
+    th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+    th { background: #f5f5f5; }
+    .filters { margin: 12px 0; }
+    .filters input { padding: 4px; }
+    .filters button { margin-left: 8px; }
+    .msg { color: #666; margin-top: 8px; }
+  </style>
+</head>
+<body>
+  <h1>用量查询</h1>
+  <nav>
+    <a href="/pages/models.html">模型</a>
+    <a href="/pages/users.html">用户</a>
+    <a href="/pages/usage.html">用量</a>
+  </nav>
+  <div class="filters">
+    <label>User ID：<input id="filter-user" placeholder="按用户筛选" /></label>
+    <label>Provider：<input id="filter-provider" placeholder="按 provider 筛选" /></label>
+    <button onclick="loadUsage()">查询</button>
+  </div>
+  <table>
+    <thead>
+      <tr>
+        <th>Request ID</th>
+        <th>Provider</th>
+        <th>Model</th>
+        <th>Input Tokens</th>
+        <th>Output Tokens</th>
+        <th>Credits</th>
+        <th>Success</th>
+        <th>Latency (ms)</th>
+      </tr>
+    </thead>
+    <tbody id="usage-body"></tbody>
+  </table>
+  <div class="msg" id="msg"></div>
+
+  <script>
+    // 用量查询页面：按 userId / provider 筛选，展示 usage 事件列表。
+
+    // 简单 HTML 转义。
+    function esc(s) {
+      var d = document.createElement('div');
+      d.textContent = String(s);
+      return d.innerHTML;
+    }
+
+    // 加载用量事件。
+    async function loadUsage() {
+      var msg = document.getElementById('msg');
+      msg.textContent = '';
+      var params = new URLSearchParams();
+      var user = document.getElementById('filter-user').value.trim();
+      var provider = document.getElementById('filter-provider').value.trim();
+      if (user) params.set('userId', user);
+      if (provider) params.set('provider', provider);
+
+      var res = await fetch('/api/usage?' + params.toString());
+      var data = await res.json();
+      var tbody = document.getElementById('usage-body');
+      tbody.innerHTML = '';
+      var _loop = function (e) {
+        var tr = document.createElement('tr');
+        tr.innerHTML =
+          '<td>' + esc(e.requestId) + '</td>' +
+          '<td>' + esc(e.provider) + '</td>' +
+          '<td>' + esc(e.model) + '</td>' +
+          '<td>' + e.inputTokens + '</td>' +
+          '<td>' + e.outputTokens + '</td>' +
+          '<td>' + (typeof e.credits === 'number' ? e.credits.toFixed(4) : e.credits) + '</td>' +
+          '<td>' + (e.success ? '✓' : '✗') + '</td>' +
+          '<td>' + e.latencyMs + '</td>';
+        tbody.appendChild(tr);
+      };
+      for (var i = 0; i < data.data.length; i++) _loop(data.data[i]);
+      msg.textContent = '共 ' + data.total + ' 条事件';
+    }
+
+    loadUsage();
+  </script>
+</body>
+</html>

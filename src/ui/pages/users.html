@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>Governor · 用户管理</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 24px; color: #222; }
+    nav a { margin-right: 12px; }
+    table { border-collapse: collapse; width: 100%; margin-top: 16px; }
+    th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+    th { background: #f5f5f5; }
+    .toolbar { margin: 12px 0; }
+    .toolbar input { padding: 4px; width: 240px; }
+    .msg { color: #c00; margin-top: 8px; }
+  </style>
+</head>
+<body>
+  <h1>用户管理</h1>
+  <nav>
+    <a href="/pages/models.html">模型</a>
+    <a href="/pages/users.html">用户</a>
+    <a href="/pages/usage.html">用量</a>
+  </nav>
+  <div class="toolbar">
+    <label>管理员令牌：<input id="admin-token" placeholder="远程写入时需要" /></label>
+    <button onclick="loadUsers()">刷新</button>
+  </div>
+  <table>
+    <thead>
+      <tr>
+        <th>User ID</th>
+        <th>允许路由</th>
+        <th>月度额度</th>
+      </tr>
+    </thead>
+    <tbody id="users-body"></tbody>
+  </table>
+  <div class="msg" id="msg"></div>
+
+  <script>
+    // 用户管理页面：加载用户列表、行内编辑 monthlyCredits。
+
+    // 简单 HTML 转义。
+    function esc(s) {
+      var d = document.createElement('div');
+      d.textContent = String(s);
+      return d.innerHTML;
+    }
+
+    // 获取管理员令牌。
+    function token() {
+      var v = document.getElementById('admin-token').value;
+      if (v) localStorage.setItem('governor-admin-token', v);
+      return v || null;
+    }
+
+    // 恢复上次输入的管理员令牌。
+    (function restoreToken() {
+      var saved = localStorage.getItem('governor-admin-token');
+      if (saved) document.getElementById('admin-token').value = saved;
+    })();
+
+    // 加载用户列表。
+    async function loadUsers() {
+      var msg = document.getElementById('msg');
+      msg.textContent = '';
+      var res = await fetch('/api/users');
+      var data = await res.json();
+      var tbody = document.getElementById('users-body');
+      tbody.innerHTML = '';
+      var _loop = function (u) {
+        var tr = document.createElement('tr');
+        tr.setAttribute('data-user', u.userId);
+        tr.innerHTML =
+          '<td>' + esc(u.userId) + '</td>' +
+          '<td>' + esc(u.allow.join(', ')) + '</td>' +
+          '<td><input type="number" class="inp-credits" step="1" value="' +
+            u.monthlyCredits + '"></td>';
+        tbody.appendChild(tr);
+      };
+      for (var i = 0; i < data.data.length; i++) _loop(data.data[i]);
+    }
+
+    // 调用 PATCH 更新用户策略。
+    async function updateUser(userId, patch) {
+      var msg = document.getElementById('msg');
+      var headers = { 'Content-Type': 'application/json' };
+      var t = token();
+      if (t) headers['X-Governor-Admin'] = t;
+      var res = await fetch('/api/users/' + encodeURIComponent(userId), {
+        method: 'PATCH',
+        headers: headers,
+        body: JSON.stringify(patch),
+      });
+      if (!res.ok) {
+        var err = await res.json();
+        msg.textContent = '更新失败：' + err.error;
+      } else {
+        msg.textContent = '已更新 ' + userId;
+      }
+    }
+
+    // 事件委托：处理月度额度编辑。
+    document.getElementById('users-body').addEventListener('change', function (e) {
+      if (!e.target.classList.contains('inp-credits')) return;
+      var tr = e.target.closest('tr[data-user]');
+      if (!tr) return;
+      var userId = tr.getAttribute('data-user');
+      var v = parseInt(e.target.value, 10);
+      if (!isNaN(v)) updateUser(userId, { monthlyCredits: v });
+    });
+
+    loadUsers();
+  </script>
+</body>
+</html>

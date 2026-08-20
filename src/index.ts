@@ -1,24 +1,20 @@
 /** Public, provider-neutral contracts for the implementation scaffold. */
 
-export const name = "dsh-llm-governor";
+export const name = 'dsh-llm-governor';
 
 export const TASK_TYPES = [
-  "general",
-  "coding",
-  "reasoning",
-  "writing",
-  "data_analysis",
-  "vision",
-  "tool_use",
+  'general',
+  'coding',
+  'reasoning',
+  'writing',
+  'data_analysis',
+  'vision',
+  'tool_use',
 ] as const;
 
 export type TaskType = (typeof TASK_TYPES)[number];
-export type Complexity = "low" | "medium" | "high";
-export type RoutingMode =
-  | "manual"
-  | "quality_first"
-  | "credit_first"
-  | "auto";
+export type Complexity = 'low' | 'medium' | 'high';
+export type RoutingMode = 'manual' | 'quality_first' | 'credit_first' | 'auto';
 
 export interface ModelRoute {
   /** Registered DSH provider route. */
@@ -35,18 +31,14 @@ export interface ModelPolicy extends ModelRoute {
   quality: Readonly<Partial<Record<TaskType, number>>>;
 }
 
-export interface GovernorIdentity {
-  userId: string;
-  displayName?: string;
-  email?: string;
-  attributes?: Readonly<Record<string, unknown>>;
-}
+/** GovernorIdentity 的权威定义在 identity 领域模块。 */
+export type { GovernorIdentity } from './identity/types.js';
 
 export interface Classification {
   taskType: TaskType;
   complexity: Complexity;
   confidence: number;
-  source: "hint" | "rule" | "llm";
+  source: 'hint' | 'rule' | 'llm';
 }
 
 export interface RoutingSelection {
