@@ -37,3 +37,10 @@
   - **UI**：插件把 /governor 前缀路由注册到 ctx.webServer（DSH Web 端口下的受信挂载），页面计算 API base 自适配前缀；`pnpm build` 复制 HTML 到 dist/ui/pages（scripts/copy-ui-pages.mjs）。
   - **测试失真修复**：recovery owner 精确断言（=1 而非 >=1，组合层唯一性由 patch+dump-config 证明）；移除全部 --passWithNoTests；lint --max-warnings 0 且 44 条警告清零。
   - 覆盖率 Lines 96.95%/Branches 90.37%；冻结合同零改动。
+- [x] Task 7: 五项功能接线返工（第二轮验收退回意见修复）— 580 tests 全绿。
+  - **Capability/模态检查接线**：pre-step 提取图片信号 → RequestState 存 requiredCapabilities=['vision']/requiredModalities=['image'] → buildFilterInput 传入公共过滤（此前始终空数组）。图片请求对无 vision 能力模型抛 CAPABILITY_NOT_SUPPORTED；advisory 声明不支持 image 模态的模型被排除。
+  - **Header/JWT 真实入站绑定**：Schema 扩展完整参数（header: header_name/trusted_proxy（必填，信任边界显式）/proxy_header_name/display_name_header/email_header；jwt: issuer/audience/algorithms/key|key_file（必填，禁止无密钥部署）/subject_claim/header_name/scheme/clock_tolerance_ms）；mod.ts 从已验证配置构建 HeaderIdentityProvider/JwtIdentityProvider 实例注入 service；service.bindIdentityFromHeaders() 执行可信代理校验与 JWT 验签；webServer 暴露 POST /governor/api/bind（仅本地回环可信）供 companion ingress/反向代理在 session 创建时调用。
+  - **Auto LLM Classifier 启用**：mod.ts 在 auto.llm_classifier.enabled 时创建基于 ctx.llm 的后端（temperature=0、maxTokens=64、10s 超时、严格 JSON 解析、非法输出降级 Quality First）+ InMemoryClassifierCache 注入 service；分类结果（task_type/complexity/confidence/source=llm）落库。
+  - **部分输出保护接线**：observeStream 检测首个语义 chunk（text/reasoning/tool-call delta）→ onPartialOutput 回调（幂等）→ service.markPartialOutput()；流式产出文本后失败不再透明切换模型（此前需手动标记）。
+  - **严格 Schema 接入插件入口**：mod.ts apply() 第一行 resolveConfig()（fail closed）；toRuntimeConfig() 以规范化值构建运行时配置（默认值单一来源）；Schema 新增 storage/ui 段解析；cordis.patch.yml 与测试配置补 schema_version。
+  - 覆盖率 Lines 96.41%/Branches 87.24%；冻结合同零改动。

@@ -7,12 +7,12 @@
 | 1 | `pnpm format:check` | ✅ All files use Prettier code style |
 | 2 | `pnpm lint` | ✅ 0 errors, 0 warnings（`--max-warnings 0`） |
 | 3 | `pnpm typecheck` | ✅ tsc --noEmit 无错误 |
-| 4 | `pnpm test` | ✅ 566 tests passed (27 files) |
+| 4 | `pnpm test` | ✅ 580 tests passed (27 files) |
 | 5 | `pnpm test:contracts` | ✅ 42 tests (rc7+rc8 各 21) |
-| 6 | `pnpm test:integration` | ✅ 24 tests (5 fallback + 13 hardening + 6 runtime-wiring) |
+| 6 | `pnpm test:integration` | ✅ 35 tests (5 fallback + 13 hardening + 17 runtime-wiring) |
 | 7 | `pnpm test:ui` | ✅ 6 tests (Playwright chromium) |
 | 8 | `pnpm test:eval` | ✅ 1 test (70 examples) |
-| 9 | `pnpm test:coverage` | ✅ Lines 96.95%, Statements 96.28%, Functions 97.41%, Branches 90.37% |
+| 9 | `pnpm test:coverage` | ✅ Lines 96.41%, Statements 94.44%, Functions 95.46%, Branches 87.24% |
 | 10 | `pnpm build` | ✅ tsc + 复制 UI 页面到 dist/ui/pages |
 | 11 | `pnpm test:package` | ✅ 19 tests (7 tarball + 9 install smoke + 3 真实安装) |
 | 12 | `pnpm pack --pack-destination <临时目录>` | ✅ Tarball: dsh-llm-governor-0.1.0.tgz（含 cordis.patch.yml 与 dist/ui/pages） |
@@ -43,6 +43,16 @@
 | UI 未集成 DSH Client Remote | 插件把 `/governor` 前缀路由注册到 `ctx.webServer`（DSH Web 端口下的受信挂载）；无 webServer 时可独立监听 | `test/package/install.test.ts > 运行时 UI 挂载` |
 | 构建不复制 HTML 到 dist/ui/pages | `pnpm build` 执行 `scripts/copy-ui-pages.mjs`；tarball 断言包含三页 | `test/package/install.test.ts` tarball 断言 |
 
+## 五项功能接线（第二轮返工新增）
+
+| 阻断项 | 修复 | 证据 |
+|--------|------|------|
+| Capability/模态检查未接线（空数组） | pre-step 提取图片信号 → RequestState 存 requiredCapabilities=['vision'] / requiredModalities=['image'] → buildFilterInput 传入公共过滤 | `test/integration/runtime-wiring.test.ts > Capability/模态检查接线`（无 vision 能力 → CAPABILITY_NOT_SUPPORTED；advisory 不支持 image 模态 → 排除） |
+| Header/JWT 无真实入站绑定与配置参数 | Schema 扩展完整参数（header: header_name/trusted_proxy/proxy_header_name/display_name_header/email_header；jwt: issuer/audience/algorithms/key/key_file/subject_claim/header_name/scheme/clock_tolerance）；mod.ts 构建真实 Provider 实例；service.bindIdentityFromHeaders() 验证（可信代理校验/JWT 验签）；webServer 暴露 POST /governor/api/bind（仅本地回环可信） | `test/integration/runtime-wiring.test.ts > Header/JWT 真实入站绑定`（绑定后请求通过；伪造代理拒绝；篡改 JWT 签名拒绝） |
+| Auto 的 LLM Classifier 未启用 | mod.ts 在 auto.llm_classifier.enabled 时创建基于 ctx.llm 的后端（temperature=0、maxTokens=64、10s 超时、严格 JSON 解析）+ InMemoryClassifierCache 注入 service | `test/integration/runtime-wiring.test.ts > Auto 的 LLM Classifier 接线`（Hint/Rule 未命中 → LLM 分类 source=llm、task_type/complexity/confidence 落库） |
+| 部分输出保护未接线 | observeStream 检测首个语义 chunk（text/reasoning/tool-call delta）→ onPartialOutput 回调 → service.markPartialOutput()（幂等） | `test/integration/runtime-wiring.test.ts > 部分输出保护接线`（流驱动：产出文本后 5xx 不切换；无语义内容仍可 Fallback） |
+| 严格 Schema 未被插件入口调用 | mod.ts apply() 第一行 resolveConfig()（fail closed：未知字段/范围越界/条件必填缺失 → Cordis 拒绝加载）；toRuntimeConfig() 用规范化值构建运行时配置；cordis.patch.yml 补 schema_version | `test/integration/runtime-wiring.test.ts > 严格配置 Schema 在插件入口生效`（未知字段/trusted_proxy 缺失/max_attempts=0 三种拒绝） |
+
 ## 验收测试失真修复（本次返工）
 
 | 失真 | 修复 |
@@ -65,10 +75,10 @@
 
 | 指标 | 覆盖率 | 门槛 |
 |------|--------|------|
-| Lines | 96.95% | ≥90% ✅ |
-| Statements | 96.28% | ≥90% ✅ |
-| Functions | 97.41% | ≥90% ✅ |
-| Branches | 90.37% | ≥85% ✅ |
+| Lines | 96.41% | ≥90% ✅ |
+| Statements | 94.44% | ≥90% ✅ |
+| Functions | 95.46% | ≥90% ✅ |
+| Branches | 87.24% | ≥85% ✅ |
 | skip/todo | 0 | =0 ✅ |
 
 ## 冻结合同零改动
@@ -137,10 +147,10 @@
 
 ## 测试统计
 
-- 总测试数：566
+- 总测试数：580
 - 合同测试：42（rc7 + rc8 各 21）
 - 单元测试：474
-- 集成测试：24（5 fallback + 13 hardening + 6 runtime-wiring）
+- 集成测试：35（5 fallback + 13 hardening + 17 runtime-wiring）
 - UI 测试：6（Playwright chromium）
 - Eval 测试：1（70 examples）
 - 打包测试：19（7 tarball + 9 install smoke + 3 真实安装）
