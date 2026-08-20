@@ -21,7 +21,7 @@ function fakeAgent(id = 'session-1') {
     ctx: {},
     cancel: () => {},
     whenIdle: () => Promise.resolve(),
-    runMaintenance: <T>(t: (s: AbortSignal) => Promise<T>) => Promise.resolve() as Promise<T>,
+    runMaintenance: <T>(_t: (s: AbortSignal) => Promise<T>) => Promise.resolve() as Promise<T>,
     send: () => {},
     followup: () => {},
     steer: () => {},
@@ -214,7 +214,44 @@ describe('月末额度窗口', () => {
 });
 
 describe('安全边界', () => {
-  it('无身份绑定的 session 在 fail closed 模式下不产生有效 usage', async () => {
+  it('header 模式下无绑定的 session 被 fail closed 拒绝（不透传到 Provider）', async () => {
+    const h = await bootFake(
+      ['fake-provider'],
+      [modelInfo('fake-provider', 'model-a')],
+      successScript('hi', { inputTokens: 5, outputTokens: 3 }) as never,
+      {
+        models: {
+          'fake-provider:model-a': { enabled: true, multiplier: 1, quality: { general: 90 } },
+        },
+        fallback: { enabled: true, max_attempts: 2 },
+        // header 模式：身份必须在入站边界绑定，无绑定不得透传
+        identity: { provider: 'header' as const },
+      },
+    );
+    try {
+      const e = h.ctx.events as unknown as {
+        waterfall: (name: string, ...args: unknown[]) => Promise<unknown>;
+      };
+      // 未绑定身份的 session：agent/request 必须拒绝（IDENTITY_REQUIRED），
+      // 而不是以未治理的匿名身份透传
+      await expect(
+        e.waterfall(
+          'agent/request',
+          {
+            agent: fakeAgent('unbound-session'),
+            turn: 1,
+            step: 1,
+            signal: new AbortController().signal,
+          },
+          async () => ({ provider: 'fake-provider', model: 'model-a' }),
+        ),
+      ).rejects.toMatchObject({ code: 'IDENTITY_REQUIRED' });
+    } finally {
+      await h.dispose();
+    }
+  });
+
+  it('local 模式自动绑定进程所有者身份（单用户部署语义）', async () => {
     const h = await bootFake(
       ['fake-provider'],
       [modelInfo('fake-provider', 'model-a')],
@@ -228,9 +265,8 @@ describe('安全边界', () => {
       },
     );
     try {
-      // 未绑定身份的 session
-      const identity = h.governor!.getIdentity('unbound-session');
-      expect(identity).toBeUndefined();
+      // local 模式：无需显式绑定，进程所有者即治理用户
+      expect(h.governor!.getIdentity('any-session')).toMatchObject({ userId: 'local' });
     } finally {
       await h.dispose();
     }

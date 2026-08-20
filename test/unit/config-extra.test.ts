@@ -9,7 +9,6 @@ import {
   multiplierToPpm,
   creditsToNanos,
   withRevision,
-  bumpRevision,
   SCHEMA_VERSION,
 } from '../../src/config/index.js';
 

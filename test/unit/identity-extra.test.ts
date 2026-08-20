@@ -3,13 +3,8 @@
  * 和辅助函数（verifyAudience 数组形式、签名长度不匹配、非对称算法路径）。
  */
 import { describe, it, expect } from 'vitest';
-import { createHmac, generateKeyPairSync, createPublicKey } from 'node:crypto';
-import {
-  JwtIdentityProvider,
-  CustomIdentityProvider,
-  IdentityError,
-} from '../../src/identity/index.js';
-import type { IdentityContext, GovernorIdentity } from '../../src/identity/index.js';
+import { createHmac, generateKeyPairSync } from 'node:crypto';
+import { JwtIdentityProvider } from '../../src/identity/index.js';
 
 const secret = 'test-secret';
 
@@ -20,24 +15,6 @@ function makeJwt(payload: Record<string, unknown>, key: string): string {
   const payloadB64 = enc(payload);
   const signingInput = `${headerB64}.${payloadB64}`;
   const sigB64 = createHmac('sha256', key).update(signingInput).digest().toString('base64url');
-  return `${headerB64}.${payloadB64}.${sigB64}`;
-}
-
-/** 构造指定 header 的 JWT（用于自定义 alg 测试）。 */
-function makeJwtWithHeader(
-  header: Record<string, unknown>,
-  payload: Record<string, unknown>,
-  key: string,
-  alg = 'HS256',
-): string {
-  const enc = (obj: unknown) => Buffer.from(JSON.stringify(obj)).toString('base64url');
-  const headerB64 = enc({ ...header, typ: 'JWT' });
-  const payloadB64 = enc(payload);
-  const signingInput = `${headerB64}.${payloadB64}`;
-  const sigB64 = createHmac(alg === 'HS256' ? 'sha256' : 'sha256', key)
-    .update(signingInput)
-    .digest()
-    .toString('base64url');
   return `${headerB64}.${payloadB64}.${sigB64}`;
 }
 
@@ -351,7 +328,7 @@ describe('JwtIdentityProvider/RSA 算法', () => {
 
   it('RS256 签名错误被拒绝', async () => {
     const { publicKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
-    const { publicKey: otherPub, privateKey } = generateKeyPairSync('rsa', {
+    const { privateKey } = generateKeyPairSync('rsa', {
       modulusLength: 2048,
     });
     const provider = new JwtIdentityProvider({

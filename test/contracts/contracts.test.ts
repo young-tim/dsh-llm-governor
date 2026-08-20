@@ -6,14 +6,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import { bootFake, modelInfo } from './harness.js';
-import {
-  successScript,
-  rateLimitScript,
-  serverErrorScript,
-  timeoutScript,
-  authErrorScript,
-} from '../../src/dsh-adapter/fake-adapter.js';
-import type { FakeStreamScript } from '../../src/dsh-adapter/fake-adapter.js';
+import { successScript } from '../../src/dsh-adapter/fake-adapter.js';
 import type { GovernorIdentity } from '../../src/index.js';
 
 // ===== 辅助构造 =====
@@ -29,7 +22,7 @@ function fakeAgent(id = 'session-1') {
     ctx: {},
     cancel: () => {},
     whenIdle: () => Promise.resolve(),
-    runMaintenance: <T>(t: (s: AbortSignal) => Promise<T>) => Promise.resolve() as Promise<T>,
+    runMaintenance: <T>(_t: (s: AbortSignal) => Promise<T>) => Promise.resolve() as Promise<T>,
     send: () => {},
     followup: () => {},
     steer: () => {},

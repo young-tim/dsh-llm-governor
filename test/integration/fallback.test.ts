@@ -24,7 +24,7 @@ function fakeAgent(id = 'session-1') {
     ctx: {},
     cancel: () => {},
     whenIdle: () => Promise.resolve(),
-    runMaintenance: <T>(t: (s: AbortSignal) => Promise<T>) => Promise.resolve() as Promise<T>,
+    runMaintenance: <T>(_t: (s: AbortSignal) => Promise<T>) => Promise.resolve() as Promise<T>,
     send: () => {},
     followup: () => {},
     steer: () => {},

@@ -1,7 +1,7 @@
 /**
  * Classifier 模块单元测试：覆盖 cache、hint、rule 三个子模块。
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { InMemoryClassifierCache } from '../../src/classifier/cache.js';
 import { classifyByHint } from '../../src/classifier/hint.js';
 import { classifyByRule, complexityByLength } from '../../src/classifier/rule.js';

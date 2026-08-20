@@ -192,7 +192,6 @@ describe('Eval: Quality First vs Auto 路由', () => {
         classification.taskType !== ex.expectedTaskType ||
         classification.complexity !== ex.expectedComplexity
       ) {
-        // eslint-disable-next-line no-console
         console.warn(
           `[mismatch] expected=${ex.expectedTaskType}/${ex.expectedComplexity}, ` +
             `actual=${classification.taskType}/${classification.complexity}, ` +
@@ -232,26 +231,26 @@ describe('Eval: Quality First vs Auto 路由', () => {
     const creditSaving = (qfTotalCredits - autoTotalCredits) / qfTotalCredits;
 
     // 输出汇总
-    // eslint-disable-next-line no-console
+
     console.log('\n===== Eval 结果汇总 =====');
-    // eslint-disable-next-line no-console
+
     console.log(`样例总数: ${EVAL_DATASET.length}`);
-    // eslint-disable-next-line no-console
+
     console.log(`Quality Retention: ${(qualityRetention * 100).toFixed(2)}%`);
-    // eslint-disable-next-line no-console
+
     console.log(`Credit Saving: ${(creditSaving * 100).toFixed(2)}%`);
-    // eslint-disable-next-line no-console
+
     console.log(`QF Total Credits: ${qfTotalCredits}`);
-    // eslint-disable-next-line no-console
+
     console.log(`Auto Total Credits: ${autoTotalCredits}`);
 
     // 输出各任务类型明细
-    // eslint-disable-next-line no-console
+
     console.log('\n----- 各任务类型明细 -----');
     for (const [taskType, m] of taskTypeMetrics) {
       const retention = (m.retentionSum / m.count) * 100;
       const saving = ((m.qfCredits - m.autoCredits) / m.qfCredits) * 100;
-      // eslint-disable-next-line no-console
+
       console.log(
         `${taskType.padEnd(15)} count=${String(m.count).padStart(2)}, ` +
           `retention=${retention.toFixed(2)}%, ` +

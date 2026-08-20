@@ -1,21 +1,21 @@
 /**
- * 安装 smoke 测试：rc.7/rc.8 临时安装、Web/Headless 加载、Governor 独占 recovery、卸载后基础 retry 恢复。
+ * 安装 smoke 测试：rc.7/rc.8 临时加载、Governor recovery 注册、bundle 组合契约、卸载后监听器清理。
  *
  * 验证 Task 5 要求：
- * - 打包后装入临时目录（模拟 DSH_HOME plugin 安装）
- * - Governor 加载后独占 agent/request-error recovery（base llm-retry 被禁用）
- * - 卸载 Governor 后基础 retry 恢复（llm-retry 重新成为唯一 recovery owner）
- * - Web/Headless 加载：GovernorPlugin.apply() 在 Context 中成功执行
+ * - 打包后 tarball 包含 dist/plugin/mod.js、cordis.patch.yml 与 dist/ui/pages 静态页
+ * - package.json 声明 dsh.bundle.patch，cordis.patch.yml 禁用基础 llm-retry
+ *   （Recovery Owner 唯一性在 bundle 组合层强制，真实安装由 install-real.test.ts 验证）
+ * - GovernorPlugin.apply() 在 Context 中成功执行并注册全部核心监听器
+ * - 卸载 Governor 后其监听器全部清理
  *
- * 不触碰真实 DSH_HOME/Profile/凭证/Provider。全程使用临时目录。
+ * 不触碰真实 DSH_HOME/Profile/凭证/Provider。全程使用临时目录与内存策略。
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { execSync } from 'node:child_process';
-import { mkdtempSync, readdirSync, rmSync, existsSync } from 'node:fs';
+import { mkdtempSync, readdirSync, rmSync, existsSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, dirname } from 'node:path';
-import { pathToFileURL } from 'node:url';
-import { Context } from '../../src/dsh-adapter/mod.js';
+import { join } from 'node:path';
+import { Context, Service } from '../../src/dsh-adapter/mod.js';
 import { LlmRuntime } from '../../src/dsh-adapter/mod.js';
 import { GovernorPlugin } from '../../src/plugin/mod.js';
 import type { GovernorPluginConfig } from '../../src/plugin/mod.js';
@@ -30,19 +30,20 @@ let packageDir: string;
 
 beforeAll(() => {
   execSync('npx tsc -p tsconfig.json', { cwd: projectRoot, stdio: 'inherit' });
+  execSync('node scripts/copy-ui-pages.mjs', { cwd: projectRoot, stdio: 'inherit' });
   workDir = mkdtempSync(join(tmpdir(), 'dsh-gov-install-'));
   execSync(`pnpm pack --pack-destination "${workDir}"`, { cwd: projectRoot, stdio: 'inherit' });
   const tgzs = readdirSync(workDir).filter((f) => f.endsWith('.tgz'));
   if (tgzs.length !== 1) throw new Error(`预期一个 tgz，实际：${tgzs.join(', ')}`);
   execSync(`tar -xzf "${join(workDir, tgzs[0]!)}" -C "${workDir}"`, { stdio: 'inherit' });
   packageDir = join(workDir, 'package');
-}, 60000);
+}, 120000);
 
 afterAll(() => {
   if (workDir && existsSync(workDir)) rmSync(workDir, { recursive: true, force: true });
 });
 
-/** Governor 测试配置。 */
+/** Governor 测试配置（内存策略，不触碰真实 DSH_HOME）。 */
 function governorConfig(): GovernorPluginConfig {
   return {
     models: {
@@ -50,6 +51,8 @@ function governorConfig(): GovernorPluginConfig {
     },
     fallback: { enabled: true, max_attempts: 2 },
     identity: { provider: 'local', local_user_id: 'local' },
+    storage: { enabled: false },
+    ui: { enabled: false },
   };
 }
 
@@ -74,53 +77,74 @@ function recoveryOwnerCount(ctx: Context): number {
 }
 
 describe('rc.7 临时安装 smoke', () => {
-  it('tarball 解压后包含 dist/plugin/mod.js', () => {
+  it('tarball 解压后包含 dist/plugin/mod.js、cordis.patch.yml 与 dist/ui/pages 静态页', () => {
     expect(existsSync(join(packageDir, 'dist', 'plugin', 'mod.js'))).toBe(true);
+    expect(existsSync(join(packageDir, 'cordis.patch.yml'))).toBe(true);
+    // 构建必须复制 HTML 页面到 dist/ui/pages，安装后的页面才能被找到
+    for (const page of ['models.html', 'users.html', 'usage.html']) {
+      expect(existsSync(join(packageDir, 'dist', 'ui', 'pages', page))).toBe(true);
+    }
   });
 
-  it('Governor 加载后独占 recovery（base llm-retry 被禁用）', async () => {
+  it('package.json 声明 dsh.bundle.patch（安装后作为 profile layer 激活）', () => {
+    const pkg = JSON.parse(readFileSync(join(packageDir, 'package.json'), 'utf8')) as {
+      dsh?: { bundle?: { patch?: string } };
+      main?: string;
+    };
+    expect(pkg.dsh?.bundle?.patch).toBe('./cordis.patch.yml');
+    // Cordis Loader 通过模块入口加载插件
+    expect(pkg.main).toBe('dist/plugin/mod.js');
+  });
+
+  it('cordis.patch.yml 插入 Governor 行并禁用基础 llm-retry（Recovery Owner 唯一）', () => {
+    const patch = readFileSync(join(packageDir, 'cordis.patch.yml'), 'utf8');
+    // insert Governor host 插件行
+    expect(patch).toMatch(/- id:\s*dsh-llm-governor\b/);
+    expect(patch).toMatch(/name:\s*'?dsh-llm-governor'?/);
+    // 禁用基础 llm-retry 行：同一 bundle 内不能出现两个 Recovery Owner
+    expect(patch).toMatch(/- id:\s*llm-retry\b/);
+    expect(patch).toMatch(/name:\s*'?@deepseek-ai\/dsh-llm-retry'?/);
+    expect(patch).toMatch(/disabled:\s*true/);
+  });
+
+  it('Governor 单独加载时注册恰好 1 个 recovery listener 与全部核心监听器', async () => {
     const ctx = new Context();
     const llmFiber = ctx.plugin(LlmRuntime);
     await llmFiber;
 
-    // 先加载 base llm-retry（1 个 recovery owner）
+    const govFiber = ctx.plugin(GovernorPlugin as never, governorConfig() as never);
+    await (govFiber as unknown as PromiseLike<unknown>);
+
+    // Recovery Owner 数量精确为 1（不是 >= 1：两个重试组件共存必须失败）
+    expect(recoveryOwnerCount(ctx)).toBe(1);
+    // 全部核心事件监听器注册
+    const hooks = (ctx.events as unknown as { _hooks: Record<string, unknown[]> })._hooks;
+    expect(hooks['agent/pre-step']?.length ?? 0).toBe(1);
+    expect(hooks['agent/request']?.length ?? 0).toBe(1);
+    expect(hooks['llm/stream']?.length ?? 0).toBe(1);
+    expect(hooks['agent/request-error']?.length ?? 0).toBe(1);
+
+    await (govFiber as unknown as { dispose: () => Promise<void> }).dispose();
+    await llmFiber.dispose();
+  });
+
+  it('卸载 Governor 后其 recovery listener 全部清理（基础 retry 仍为 1 个 owner）', async () => {
+    const ctx = new Context();
+    const llmFiber = ctx.plugin(LlmRuntime);
+    await llmFiber;
+
+    // 先加载 base llm-retry
     const retryFiber = ctx.plugin(createBaseRetryPlugin() as never);
     await retryFiber;
     expect(recoveryOwnerCount(ctx)).toBe(1);
 
-    // 加载 Governor → 应该禁用 base llm-retry，Governor 成为唯一 owner
+    // 加载 Governor（无 bundle 组合时运行时监听器是叠加的：组合层的禁用由
+    // cordis.patch.yml + install-real.test.ts 的 dump-config 证明）
     const govFiber = ctx.plugin(GovernorPlugin as never, governorConfig() as never);
     await (govFiber as unknown as PromiseLike<unknown>);
 
-    // Governor 加载后，recovery owner 应该只有 Governor（base retry 被卸载或禁用）
-    // 注意：真实 DSH bundle 组合会在 cordis.patch.yml 中禁用 base llm-retry 行
-    // 这里验证 Governor 确实注册了 recovery listener
-    expect(recoveryOwnerCount(ctx)).toBeGreaterThanOrEqual(1);
-
+    // 卸载 Governor：其监听器必须全部清理，回到只有基础 retry 的状态
     await (govFiber as unknown as { dispose: () => Promise<void> }).dispose();
-    await retryFiber.dispose();
-    await llmFiber.dispose();
-  });
-
-  it('卸载 Governor 后基础 retry 恢复（llm-retry 重新成为唯一 recovery owner）', async () => {
-    const ctx = new Context();
-    const llmFiber = ctx.plugin(LlmRuntime);
-    await llmFiber;
-
-    // 加载 base llm-retry
-    const retryFiber = ctx.plugin(createBaseRetryPlugin() as never);
-    await retryFiber;
-    const beforeGov = recoveryOwnerCount(ctx);
-    expect(beforeGov).toBe(1);
-
-    // 加载 Governor
-    const govFiber = ctx.plugin(GovernorPlugin as never, governorConfig() as never);
-    await (govFiber as unknown as PromiseLike<unknown>);
-
-    // 卸载 Governor
-    await (govFiber as unknown as { dispose: () => Promise<void> }).dispose();
-
-    // 卸载后 base llm-retry 仍然注册（恢复为基础 retry）
     expect(recoveryOwnerCount(ctx)).toBe(1);
 
     await retryFiber.dispose();
@@ -171,5 +195,113 @@ describe('rc.8 兼容性验证', () => {
 
     await (govFiber as unknown as { dispose: () => Promise<void> }).dispose();
     await llmFiber.dispose();
+  });
+});
+
+describe('运行时 UI 挂载与默认存储路径', () => {
+  /** 最小 fake webServer：记录注册的前缀路由。 */
+  class FakeWebServer extends Service {
+    readonly registered: Array<{
+      kind: string;
+      path: string;
+      handler: (req: never, res: never) => void;
+    }> = [];
+
+    constructor(ctx: Context) {
+      super(ctx, 'webServer');
+    }
+
+    /** 记录路由注册（真实实现返回注销函数）。 */
+    register(route: { kind: string; path: string; handler: (req: never, res: never) => void }) {
+      this.registered.push(route);
+      return () => {
+        // 测试中无需注销
+      };
+    }
+  }
+
+  it('有 ctx.webServer 时把 /governor 前缀路由注册到 webServer 并处理请求', async () => {
+    const ctx = new Context();
+    const llmFiber = ctx.plugin(LlmRuntime);
+    await llmFiber;
+    const wsFiber = ctx.plugin(FakeWebServer);
+    await wsFiber;
+
+    const govFiber = ctx.plugin(
+      GovernorPlugin as never,
+      {
+        ...governorConfig(),
+        ui: { enabled: true },
+      } as never,
+    );
+    await (govFiber as unknown as PromiseLike<unknown>);
+
+    // 前缀路由已注册到 webServer（DSH Web 端口下的受信挂载点）
+    const webServer = (ctx as unknown as { webServer: FakeWebServer }).webServer;
+    expect(webServer.registered).toHaveLength(1);
+    expect(webServer.registered[0]!.kind).toBe('prefix');
+    expect(webServer.registered[0]!.path).toBe('/governor');
+
+    // 模拟浏览器请求 /governor/api/models：前缀剥离后路由到 JSON API
+    const handler = webServer.registered[0]!.handler;
+    const res = {
+      statusCode: 0,
+      headers: {} as Record<string, string | number>,
+      body: '',
+      writeHead(status: number, headers: Record<string, string | number>) {
+        this.statusCode = status;
+        this.headers = headers;
+      },
+      end(body?: string) {
+        if (body !== undefined) this.body = body;
+      },
+    };
+    await new Promise<void>((resolve) => {
+      handler(
+        { url: '/governor/api/models', method: 'GET', headers: {}, socket: {} } as never,
+        res as never,
+      );
+      resolve();
+    });
+    // 等待异步 JSON 响应
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(res.statusCode).toBe(200);
+    const payload = JSON.parse(res.body) as { data: Array<{ routeId: string }> };
+    expect(payload.data.some((m) => m.routeId === 'fake-provider:model-a')).toBe(true);
+
+    await (govFiber as unknown as { dispose: () => Promise<void> }).dispose();
+    await wsFiber.dispose();
+    await llmFiber.dispose();
+  });
+
+  it('storage 未指定 path 时默认写入 $DSH_HOME/dsh-llm-governor/governor.db', async () => {
+    const tempHome = mkdtempSync(join(tmpdir(), 'dsh-gov-home-'));
+    const prevDshHome = process.env['DSH_HOME'];
+    process.env['DSH_HOME'] = tempHome;
+    try {
+      const ctx = new Context();
+      const llmFiber = ctx.plugin(LlmRuntime);
+      await llmFiber;
+
+      const govFiber = ctx.plugin(
+        GovernorPlugin as never,
+        {
+          ...governorConfig(),
+          storage: { enabled: true },
+        } as never,
+      );
+      await (govFiber as unknown as PromiseLike<unknown>);
+
+      // 默认数据库文件已创建在 DSH_HOME 下（目录 owner-only）
+      const dbPath = join(tempHome, 'dsh-llm-governor', 'governor.db');
+      expect(existsSync(dbPath)).toBe(true);
+
+      await (govFiber as unknown as { dispose: () => Promise<void> }).dispose();
+      await llmFiber.dispose();
+    } finally {
+      if (prevDshHome === undefined) delete process.env['DSH_HOME'];
+      else process.env['DSH_HOME'] = prevDshHome;
+      rmSync(tempHome, { recursive: true, force: true });
+    }
   });
 });
