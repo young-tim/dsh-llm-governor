@@ -50,8 +50,8 @@ Governor → DSH ctx.llm → DSH Provider Adapter → DSH Credentials Service �
 ### 发布后（计划）
 
 ```bash
-dsh plugin --profile headless add github:<owner>/dsh-llm-governor
-dsh plugin --profile web add github:<owner>/dsh-llm-governor
+dsh plugin --profile headless add https://github.com/young-tim/dsh-llm-governor
+dsh plugin --profile web add https://github.com/young-tim/dsh-llm-governor
 ```
 
 ## 开发与验收命令
