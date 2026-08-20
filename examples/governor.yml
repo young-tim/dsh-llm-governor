@@ -31,6 +31,17 @@ fallback:
   max_attempts: 2
   after_partial_output: false
 
+# SQLite 持久化：默认写入 $DSH_HOME/dsh-llm-governor/governor.db（WAL，迁移失败 fail closed）。
+storage:
+  enabled: true
+  # path: /var/lib/governor/governor.db  # 覆盖默认路径
+
+# Web UI：优先挂载到 DSH webServer 的 /governor 前缀（Models/Users/Usage 三页）；
+# 无 webServer 的部署可指定 port 独立监听回环地址。
+ui:
+  enabled: true
+  # port: 3757
+
 models:
   deepseek-official:deepseek-v4-flash:
     enabled: true
