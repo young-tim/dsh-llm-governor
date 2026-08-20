@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>Governor · 模型管理</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 24px; color: #222; }
+    nav a { margin-right: 12px; }
+    table { border-collapse: collapse; width: 100%; margin-top: 16px; }
+    th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+    th { background: #f5f5f5; }
+    .pagination { margin-top: 12px; }
+    .pagination button { margin: 0 4px; }
+    .toolbar { margin: 12px 0; }
+    .toolbar input { padding: 4px; width: 240px; }
+    .msg { color: #c00; margin-top: 8px; }
+  </style>
+</head>
+<body>
+  <h1>模型管理</h1>
+  <nav>
+    <a href="models.html">模型</a>
+    <a href="users.html">用户</a>
+    <a href="usage.html">用量</a>
+  </nav>
+  <div class="toolbar">
+    <label>管理员令牌：<input id="admin-token" placeholder="远程写入时需要" /></label>
+    <button onclick="loadModels()">刷新</button>
+  </div>
+  <table>
+    <thead>
+      <tr>
+        <th>Route ID</th>
+        <th>Provider</th>
+        <th>Model</th>
+        <th>启用</th>
+        <th>倍率</th>
+        <th>质量</th>
+      </tr>
+    </thead>
+    <tbody id="models-body"></tbody>
+  </table>
+  <div class="pagination">
+    <button id="prev-btn" onclick="prevPage()">上一页</button>
+    <span id="page-info"></span>
+    <button id="next-btn" onclick="nextPage()">下一页</button>
+  </div>
+  <div class="msg" id="msg"></div>
+
+  <script>
+    // 模型管理页面：加载模型列表、分页、行内编辑 enabled 和 multiplier。
+    // 计算 API 基础路径：独立服务器为 ''，DSH webServer 挂载时为 '/governor'。
+    var API_BASE = (function () {
+      var m = location.pathname.match(/^(.*)\/pages\/[^/]+$/);
+      return m ? m[1] : '';
+    })();
+    var PAGE_LIMIT = 20;
+    var offset = 0;
+    var total = 0;
+
+    // 简单 HTML 转义，避免 XSS。
+    function esc(s) {
+      var d = document.createElement('div');
+      d.textContent = String(s);
+      return d.innerHTML;
+    }
+
+    // 获取管理员令牌（存于 localStorage）。
+    function token() {
+      var v = document.getElementById('admin-token').value;
+      if (v) localStorage.setItem('governor-admin-token', v);
+      return v || null;
+    }
+
+    // 恢复上次输入的管理员令牌。
+    (function restoreToken() {
+      var saved = localStorage.getItem('governor-admin-token');
+      if (saved) document.getElementById('admin-token').value = saved;
+    })();
+
+    // 加载模型列表。
+    async function loadModels() {
+      var msg = document.getElementById('msg');
+      msg.textContent = '';
+      var res = await fetch(API_BASE + '/api/models?limit=' + PAGE_LIMIT + '&offset=' + offset);
+      var data = await res.json();
+      total = data.total;
+      var tbody = document.getElementById('models-body');
+      tbody.innerHTML = '';
+      var _loop = function (m) {
+        var tr = document.createElement('tr');
+        tr.setAttribute('data-route', m.routeId);
+        tr.innerHTML =
+          '<td>' + esc(m.routeId) + '</td>' +
+          '<td>' + esc(m.provider) + '</td>' +
+          '<td>' + esc(m.model) + '</td>' +
+          '<td><input type="checkbox" class="chk-enabled"' + (m.enabled ? ' checked' : '') + '></td>' +
+          '<td><input type="number" class="inp-multiplier" step="0.1" value="' +
+            (m.multiplierPpm / 1000000).toFixed(2) + '"></td>' +
+          '<td>' + esc(JSON.stringify(m.quality)) + '</td>';
+        tbody.appendChild(tr);
+      };
+      for (var i = 0; i < data.data.length; i++) _loop(data.data[i]);
+
+      document.getElementById('page-info').textContent =
+        '第 ' + (offset + 1) + ' - ' + Math.min(offset + PAGE_LIMIT, total) +
+        ' 条，共 ' + total + ' 条';
+      document.getElementById('prev-btn').disabled = offset === 0;
+      document.getElementById('next-btn').disabled = offset + PAGE_LIMIT >= total;
+    }
+
+    // 调用 PATCH 更新模型策略。
+    async function updateModel(routeId, patch) {
+      var msg = document.getElementById('msg');
+      var headers = { 'Content-Type': 'application/json' };
+      var t = token();
+      if (t) headers['X-Governor-Admin'] = t;
+      var res = await fetch(API_BASE + '/api/models/' + encodeURIComponent(routeId), {
+        method: 'PATCH',
+        headers: headers,
+        body: JSON.stringify(patch),
+      });
+      if (!res.ok) {
+        var err = await res.json();
+        msg.textContent = '更新失败：' + err.error;
+      } else {
+        msg.textContent = '已更新 ' + routeId;
+      }
+    }
+
+    function prevPage() {
+      offset = Math.max(0, offset - PAGE_LIMIT);
+      loadModels();
+    }
+    function nextPage() {
+      if (offset + PAGE_LIMIT < total) {
+        offset += PAGE_LIMIT;
+        loadModels();
+      }
+    }
+
+    // 事件委托：处理行内编辑。
+    document.getElementById('models-body').addEventListener('change', function (e) {
+      var tr = e.target.closest('tr[data-route]');
+      if (!tr) return;
+      var routeId = tr.getAttribute('data-route');
+      if (e.target.classList.contains('chk-enabled')) {
+        updateModel(routeId, { enabled: e.target.checked });
+      } else if (e.target.classList.contains('inp-multiplier')) {
+        var v = parseFloat(e.target.value);
+        if (!isNaN(v)) updateModel(routeId, { multiplier: v });
+      }
+    });
+
+    loadModels();
+  </script>
+</body>
+</html>
