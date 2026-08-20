@@ -4,7 +4,6 @@
  */
 import type { GovernorDatabase } from './database.js';
 import type { TaskType, RoutingMode, Complexity } from '../index.js';
-import type { CanonicalRoute } from '../model/canonical.js';
 import type { DecisionRecord } from '../routing/types.js';
 
 /** 模型策略行。 */
@@ -116,6 +115,13 @@ export class GovernorRepository {
     );
     const row = stmt.get(userId) as { monthly_credit_nanos?: number } | undefined;
     return row?.monthly_credit_nanos !== undefined ? BigInt(row.monthly_credit_nanos) : undefined;
+  }
+
+  /** 获取全部用户 ID（按字典序）。 */
+  listUserIds(): string[] {
+    const stmt = this._db.prepare('SELECT user_id FROM user_policies ORDER BY user_id');
+    const rows = stmt.all() as Array<{ user_id: string }>;
+    return rows.map((r) => r.user_id);
   }
 
   // ===== 用户白名单 =====

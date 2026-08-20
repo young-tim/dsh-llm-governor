@@ -3,7 +3,6 @@
  * 429/Timeout/5xx/Provider Unavailable → 可重试；
  * 401/403/用户取消/非法参数/内容安全/Context Window → 不可重试。
  */
-import type { TaskType, RoutingMode } from '../index.js';
 import type { CanonicalRoute } from '../model/canonical.js';
 
 /** 可重试的失败码。 */

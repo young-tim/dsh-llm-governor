@@ -22,8 +22,7 @@ import type {
   ClassifierCache,
 } from './types.js';
 import { classifyByHint } from './hint.js';
-import { classifyByRule, complexityByLength } from './rule.js';
-import { InMemoryClassifierCache } from './cache.js';
+import { classifyByRule } from './rule.js';
 
 export type {
   Classification,

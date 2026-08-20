@@ -4,22 +4,15 @@
  */
 import { Service } from '../dsh-adapter/mod.js';
 import type { Context } from '../dsh-adapter/mod.js';
-import type {
-  LlmCallConfig,
-  LlmFailure,
-  GenerateOptions,
-  StreamChunk,
-  TokenUsage,
-  LlmModelInfo,
-} from '../dsh-adapter/mod.js';
-import type { GovernorIdentity } from '../index.js';
+import type { LlmCallConfig, LlmFailure, LlmModelInfo } from '../dsh-adapter/mod.js';
 import type { TaskType, RoutingMode } from '../index.js';
 import type { ModelSnapshot, CanonicalRoute } from '../model/canonical.js';
-import { buildModelDirectory, canonicalRoute } from '../model/canonical.js';
+import { buildModelDirectory } from '../model/canonical.js';
 import type { UserAccessPolicy } from '../access/evaluator.js';
-import { filterByAccess } from '../access/evaluator.js';
-import { computeCreditNanos } from '../credits/calc.js';
-import type { FilterInput, RoutingResult, DecisionRecord } from '../routing/types.js';
+import { monthWindow } from '../credits/quota.js';
+import type { GovernorRepository } from '../storage/repository.js';
+import { RoutingError } from '../routing/types.js';
+import type { FilterInput, RoutingResult } from '../routing/types.js';
 import {
   routeManual,
   routeQualityFirst,
@@ -27,9 +20,11 @@ import {
   routeAuto,
 } from '../routing/strategies.js';
 import type { AutoClassification } from '../routing/strategies.js';
+import { createClassifier } from '../classifier/index.js';
+import type { Classifier, ClassifyInput } from '../classifier/index.js';
+import type { GovernorIdentity } from '../identity/types.js';
 import { FallbackState, isRetryable } from '../fallback/mod.js';
 import type { FailureInfo } from '../fallback/mod.js';
-import { observeStream } from '../usage/observer.js';
 import type { UsageEvent } from '../usage/types.js';
 import { UsageAggregator } from '../usage/aggregator.js';
 
@@ -40,6 +35,8 @@ interface RequestState {
   fallback: FallbackState;
   classification?: AutoClassification;
   selectedRoute?: CanonicalRoute;
+  /** 本次请求实际使用的路由模式（Usage 记录使用）。 */
+  mode?: RoutingMode;
   partialOutputDelivered: boolean;
 }
 
@@ -66,6 +63,10 @@ export interface GovernorPluginConfig {
   };
   credits?: { tokens_per_credit?: number; timezone?: string; default_monthly_credits?: number };
   identity?: { provider?: 'local' | 'header' | 'jwt'; local_user_id?: string };
+  /** SQLite 持久化：enabled=false 时纯内存运行；path 默认 $DSH_HOME 下。 */
+  storage?: { enabled?: boolean; path?: string };
+  /** Web UI：挂载到 DSH webServer 的 /governor 前缀（无 webServer 时可独立监听）。 */
+  ui?: { enabled?: boolean; port?: number };
 }
 
 /** 决策记录（简化版，用于内存存储）。 */
@@ -104,9 +105,30 @@ export class GovernorService extends Service {
   private _usedCredits = new Map<string, bigint>();
   private _currentTurnStep = new Map<string, { turn: number; step: number }>();
   private _quotaExceededFor = new Set<string>();
+  /** SQLite 仓库：提供时决策/Usage/身份/策略持久化（运行时权威）。 */
+  private readonly _repository: GovernorRepository | undefined;
+  /** 月度额度时区（IANA），默认 UTC。 */
+  private readonly _timezone: string;
+  /** local 模式的固定身份（进程所有者）。 */
+  private readonly _localIdentity: GovernorIdentity | undefined;
+  /** 身份提供者模式：local 自动绑定；header/jwt 无绑定时 fail closed。 */
+  private readonly _identityKind: 'local' | 'header' | 'jwt';
+  /** 分类器：Hint → Rule（LLM 阶段需显式配置后端，默认不启用）。 */
+  private readonly _classifier: Classifier;
 
-  constructor(ctx: Context, config: GovernorPluginConfig) {
+  constructor(ctx: Context, config: GovernorPluginConfig, repository?: GovernorRepository) {
     super(ctx, 'governor');
+    this._repository = repository;
+    this._timezone = config.credits?.timezone ?? 'UTC';
+    this._identityKind = config.identity?.provider ?? 'local';
+    // local 模式：DSH 进程所有者即治理用户（与 LocalIdentityProvider 同语义）
+    this._localIdentity =
+      this._identityKind === 'local'
+        ? { userId: config.identity?.local_user_id ?? 'local' }
+        : undefined;
+    this._classifier = createClassifier({
+      confidenceThreshold: config.auto?.confidence_threshold ?? 0.7,
+    });
     this._models = new Map(Object.entries(config.models ?? {}));
     this._users = new Map(
       Object.entries(config.users ?? {}).map(([id, u]) => [
@@ -131,8 +153,63 @@ export class GovernorService extends Service {
     };
     this._tokensPerCredit = config.credits?.tokens_per_credit ?? 1_000_000;
     this._defaultMonthlyCredits = config.credits?.default_monthly_credits ?? 100;
+    // DB 是运行时权威：首次启动把 YAML 中的 models/users 导入 DB，之后从 DB 加载
+    if (repository !== undefined) {
+      this._importInitialPolicies(repository);
+      this._loadPoliciesFromRepository(repository);
+    }
     // 从配置构建初始模型目录（DSH advisory 在 refreshModelDirectory 时合并）
     this._modelDirectory = this._buildDirectoryFromConfig();
+  }
+
+  /** 首次启动导入：DB 中无模型/用户策略时，把 YAML 配置写入 DB（§14 启动不覆盖 UI 修改）。 */
+  private _importInitialPolicies(repository: GovernorRepository): void {
+    if (repository.listModelPolicies().length === 0) {
+      for (const [routeId, cfg] of this._models) {
+        const idx = routeId.indexOf(':');
+        if (idx <= 0) continue;
+        repository.upsertModelPolicy({
+          routeId,
+          provider: routeId.slice(0, idx),
+          model: routeId.slice(idx + 1),
+          enabled: cfg.enabled ?? true,
+          multiplierPpm: Math.round((cfg.multiplier ?? 1) * 1_000_000),
+          capabilities: cfg.capabilities ?? [],
+          quality: cfg.quality ?? {},
+        });
+      }
+    }
+    if (repository.listUserIds().length === 0) {
+      for (const [userId, u] of this._users) {
+        repository.upsertUserPolicy(userId, BigInt(u.monthlyCredits) * 1_000_000_000n);
+        for (const routeId of u.allow) {
+          repository.addUserAllow(userId, routeId);
+        }
+      }
+    }
+  }
+
+  /** 从 DB 加载模型与用户策略（DB 优先于 YAML）。 */
+  private _loadPoliciesFromRepository(repository: GovernorRepository): void {
+    const models = new Map<string, ModelConfig>();
+    for (const row of repository.listModelPolicies()) {
+      models.set(row.routeId, {
+        enabled: row.enabled,
+        multiplier: row.multiplierPpm / 1_000_000,
+        capabilities: [...row.capabilities],
+        quality: { ...row.quality },
+      });
+    }
+    if (models.size > 0) this._models = models;
+    const users = new Map<string, { allow: string[]; monthlyCredits: number }>();
+    for (const userId of repository.listUserIds()) {
+      const nanos = repository.getUserQuota(userId) ?? 0n;
+      users.set(userId, {
+        allow: repository.listUserAllow(userId),
+        monthlyCredits: Number(nanos / 1_000_000_000n),
+      });
+    }
+    if (users.size > 0) this._users = users;
   }
 
   /** 从配置构建模型目录（无 DSH advisory 时的初始视图）。 */
@@ -243,15 +320,50 @@ export class GovernorService extends Service {
     }
   }
 
-  /** 绑定身份到 session。 */
+  /** 绑定身份到 session（同时持久化到 SQLite）。 */
   async bindIdentity(sessionId: string, identity: GovernorIdentity): Promise<void> {
     if (!identity.userId) throw new Error('IDENTITY_REQUIRED');
     this._identities.set(sessionId, identity);
+    this._repository?.upsertSessionIdentity(
+      sessionId,
+      identity.userId,
+      this._identityKind,
+      undefined,
+      identity.displayName,
+      identity.email,
+    );
   }
 
-  /** 获取已绑定的身份。 */
+  /**
+   * 获取已绑定的身份。
+   *
+   * 顺序：内存绑定 → local 模式固定身份 → SQLite 持久化绑定（含过期检查）。
+   * header/jwt 模式下无任何绑定返回 undefined，调用方（selectModel）fail closed。
+   */
   getIdentity(sessionId: string): GovernorIdentity | undefined {
-    return this._identities.get(sessionId);
+    const bound = this._identities.get(sessionId);
+    if (bound !== undefined) return bound;
+    if (this._localIdentity !== undefined) return this._localIdentity;
+    if (this._repository === undefined) return undefined;
+    const row = this._repository.getSessionIdentity(sessionId);
+    if (row === undefined) return undefined;
+    if (row.expiresAt !== undefined && row.expiresAt < Date.now()) return undefined;
+    return { userId: row.userId };
+  }
+
+  /**
+   * 对当前步骤输入执行分类（Hint → Rule），并缓存到请求状态。
+   * 被 agent/pre-step 调用；Auto 路由读取该分类，其他模式忽略。
+   */
+  async classifyStep(
+    sessionId: string,
+    turn: number,
+    step: number,
+    input: ClassifyInput,
+  ): Promise<AutoClassification> {
+    const classification = await this._classifier.classify(input);
+    this.setClassification(sessionId, turn, step, classification);
+    return classification;
   }
 
   /** 构建全局默认可用 route 集合。 */
@@ -272,7 +384,7 @@ export class GovernorService extends Service {
     requiredModalities: string[],
   ): FilterInput {
     const state = this.getOrCreateRequestState(sessionId, turn, step);
-    const identity = this._identities.get(sessionId);
+    const identity = this.getIdentity(sessionId);
     const userPolicy = identity ? this._users.get(identity.userId) : undefined;
     const accessPolicy: UserAccessPolicy | undefined = userPolicy
       ? { userId: identity!.userId, allow: userPolicy.allow }
@@ -286,12 +398,39 @@ export class GovernorService extends Service {
       excludedRoutes: state.fallback.excludedRoutes,
       requiredCapabilities,
       requiredModalities,
-      quotaCheck: (routeId: CanonicalRoute) => {
-        const identity = this._identities.get(sessionId);
-        if (identity && this._quotaExceededFor.has(identity.userId)) return false;
-        return true;
+      quotaCheck: (_routeId: CanonicalRoute) => {
+        if (identity === undefined) return true; // 无身份由 selectModel 前置 fail closed
+        return !this._isQuotaExceeded(identity.userId);
       },
     };
+  }
+
+  /** 计算用户本月已提交 Credits（nanos）。优先 SQLite 求和，否则内存聚合。 */
+  private _usedCreditsNanos(userId: string): bigint {
+    const { start, end } = monthWindow(this._timezone);
+    if (this._repository !== undefined) {
+      return this._repository.sumUserCredits(userId, start.toISOString(), end.toISOString());
+    }
+    let total = 0n;
+    for (const e of this._usageAggregator.listEvents({ userId })) {
+      if (!e.success) continue;
+      if (e.createdAt >= start.toISOString() && e.createdAt < end.toISOString()) {
+        total += e.creditNanos;
+      }
+    }
+    return total;
+  }
+
+  /** 用户月度限额（nanos）。未配置用户使用默认额度。 */
+  private _limitNanos(userId: string): bigint {
+    const credits = this._users.get(userId)?.monthlyCredits ?? this._defaultMonthlyCredits;
+    return BigInt(Math.max(0, Math.floor(credits))) * 1_000_000_000n;
+  }
+
+  /** 月度 Quota admission control：used >= limit 即超限（§9.2 语义）。 */
+  private _isQuotaExceeded(userId: string): boolean {
+    if (this._quotaExceededFor.has(userId)) return true; // 测试/审计显式开关
+    return this._usedCreditsNanos(userId) >= this._limitNanos(userId);
   }
 
   /** 执行模型选择（被 agent/request 调用）。 */
@@ -305,10 +444,20 @@ export class GovernorService extends Service {
     state.fallback.recordAttempt();
     this._currentTurnStep.set(sessionId, { turn, step });
 
+    // 身份 fail closed：header/jwt 模式下无绑定（含绑定过期）直接拒绝，
+    // 不允许未治理的匿名请求透传到 Provider
+    if (this.getIdentity(sessionId) === undefined) {
+      throw new RoutingError(
+        'IDENTITY_REQUIRED',
+        `session ${sessionId} has no bound governor identity (provider=${this._identityKind})`,
+      );
+    }
+
     const filterInput = this.buildFilterInput(sessionId, turn, step, [], []);
 
     let result: RoutingResult;
     const mode = this._defaultRouting;
+    state.mode = mode;
 
     if (mode === 'manual') {
       result = routeManual(filterInput, defaultConfig.provider, defaultConfig.model);
@@ -317,7 +466,7 @@ export class GovernorService extends Service {
     } else if (mode === 'credit_first') {
       result = routeCreditFirst(filterInput, 'general', this._minimumQuality, 1, this._onNoMatch);
     } else {
-      // auto — Task 3: 使用分类器（简化版：默认 general/medium/0.5）
+      // auto：使用 agent/pre-step 已缓存的分类结果；未分类时回退默认 general/medium
       const classification: AutoClassification = state.classification ?? {
         taskType: 'general',
         complexity: 'medium',
@@ -346,6 +495,27 @@ export class GovernorService extends Service {
       createdAt: new Date().toISOString(),
     };
     this._decisions.push(decision);
+    // 决策持久化（幂等：request_id + fallback_index）
+    this._repository?.insertDecision({
+      requestId: state.requestId,
+      fallbackIndex: state.fallbackIndex,
+      mode,
+      ...(state.classification !== undefined
+        ? {
+            taskType: state.classification.taskType,
+            complexity: state.classification.complexity,
+            confidence: state.classification.confidence,
+          }
+        : {}),
+      ...(result.decision.minimumQuality !== undefined
+        ? { minimumQuality: result.decision.minimumQuality }
+        : {}),
+      candidates: result.decision.candidates,
+      excluded: result.decision.excluded,
+      selected: result.selected.routeId,
+      configRevision: this.configRevision,
+      createdAt: decision.createdAt,
+    });
 
     return {
       config: {
@@ -419,9 +589,34 @@ export class GovernorService extends Service {
     this.getOrCreateRequestState(sessionId, turn, step).fallback.recordAttempt();
   }
 
-  /** 记录 Usage。 */
+  /** 记录 Usage（内存聚合 + SQLite 幂等落库）。 */
   recordUsage(record: UsageEvent): void {
     this._usageAggregator.record(record);
+    this._repository?.insertUsageEvent({
+      requestId: record.requestId,
+      fallbackIndex: record.fallbackIndex,
+      sessionId: record.sessionId,
+      turn: record.turn,
+      step: record.step,
+      userId: record.userId,
+      provider: record.provider,
+      model: record.model,
+      routingMode: record.routingMode,
+      ...(record.taskType !== undefined ? { taskType: record.taskType } : {}),
+      inputTokens: record.inputTokens,
+      outputTokens: record.outputTokens,
+      cacheReadTokens: record.cacheReadTokens,
+      cacheWriteTokens: record.cacheWriteTokens,
+      creditNanos: record.creditNanos,
+      success: record.success,
+      ...(record.finishKind !== undefined ? { finishKind: record.finishKind } : {}),
+      ...(record.errorCode !== undefined ? { errorCode: record.errorCode } : {}),
+      ...(record.httpStatus !== undefined ? { httpStatus: record.httpStatus } : {}),
+      latencyMs: record.latencyMs,
+      attemptOrigin: record.attemptOrigin,
+      usageMissing: record.usageMissing,
+      createdAt: record.createdAt,
+    });
   }
 
   /** 获取 requestId（用于 stream 观察）。 */
@@ -438,6 +633,42 @@ export class GovernorService extends Service {
   /** 获取当前 session 的 turn/step（用于 stream 观察）。 */
   getCurrentTurnStep(sessionId: string): { turn: number; step: number } | undefined {
     return this._currentTurnStep.get(sessionId);
+  }
+
+  /** 计费参数：每 Credit 对应的 Token 数（来自配置，供 llm/stream 计费使用）。 */
+  get tokensPerCredit(): number {
+    return this._tokensPerCredit;
+  }
+
+  /** 获取请求实际使用的路由模式（Usage 记录使用，不再硬编码）。 */
+  getRoutingMode(sessionId: string, turn: number, step: number): RoutingMode {
+    return (
+      this._requestStates.get(this.reqKey(sessionId, turn, step))?.mode ?? this._defaultRouting
+    );
+  }
+
+  /** 获取模型的计费倍率（ppm）；目录中缺席时返回默认 1x。 */
+  getMultiplierPpm(provider: string, model: string): number {
+    const routeId = `${provider}:${model}` as CanonicalRoute;
+    return this._modelDirectory.find((s) => s.routeId === routeId)?.multiplierPpm ?? 1_000_000;
+  }
+
+  /** 查询用户月度 Quota 状态（UI 与测试使用）。 */
+  getQuotaStatus(userId: string): {
+    usedNanos: bigint;
+    limitNanos: bigint;
+    remainingNanos: bigint;
+    exceeded: boolean;
+  } {
+    const usedNanos = this._usedCreditsNanos(userId);
+    const limitNanos = this._limitNanos(userId);
+    const exceeded = usedNanos >= limitNanos;
+    return {
+      usedNanos,
+      limitNanos,
+      remainingNanos: exceeded ? 0n : limitNanos - usedNanos,
+      exceeded,
+    };
   }
 
   /** 获取配置版本号。 */
@@ -500,6 +731,17 @@ export class GovernorService extends Service {
       s.routeId === routeId ? { ...s, enabled: newEnabled, multiplierPpm: newMultiplierPpm } : s,
     );
 
+    // 管理写入持久化（DB 是运行时权威，重启后不回退到 YAML）
+    this._repository?.upsertModelPolicy({
+      routeId,
+      provider: existingSnap.provider,
+      model: existingSnap.model,
+      enabled: newEnabled,
+      multiplierPpm: newMultiplierPpm,
+      capabilities: [...existingSnap.capabilities],
+      quality: { ...existingSnap.quality },
+    });
+
     // 返回更新后的模型视图
     const updated = this._modelDirectory.find((s) => s.routeId === routeId);
     if (!updated) throw new Error('MODEL_NOT_FOUND');
@@ -534,6 +776,11 @@ export class GovernorService extends Service {
     }
     if (patch.monthlyCredits !== undefined) {
       user.monthlyCredits = patch.monthlyCredits;
+      // 管理写入持久化（DB 是运行时权威）
+      this._repository?.upsertUserPolicy(
+        userId,
+        BigInt(Math.max(0, Math.floor(user.monthlyCredits))) * 1_000_000_000n,
+      );
     }
     return {
       userId,
@@ -542,7 +789,36 @@ export class GovernorService extends Service {
     };
   }
 
-  async queryUsage(query: { userId?: string; provider?: string }) {
+  async queryUsage(query: { userId?: string; provider?: string }): Promise<UsageEvent[]> {
+    // 有仓库时从 SQLite 读取（含历史进程的持久化事件），否则用内存聚合
+    if (this._repository !== undefined) {
+      return this._repository.queryUsage({ ...query, limit: 1000 }).map((r): UsageEvent => ({
+        id: `${r.requestId}:${r.fallbackIndex}`,
+        requestId: r.requestId,
+        sessionId: r.sessionId,
+        turn: r.turn,
+        step: r.step,
+        userId: r.userId,
+        provider: r.provider,
+        model: r.model,
+        routingMode: r.routingMode,
+        ...(r.taskType !== undefined ? { taskType: r.taskType as TaskType } : {}),
+        inputTokens: r.inputTokens,
+        outputTokens: r.outputTokens,
+        cacheReadTokens: r.cacheReadTokens,
+        cacheWriteTokens: r.cacheWriteTokens,
+        creditNanos: r.creditNanos,
+        success: r.success,
+        ...(r.finishKind !== undefined ? { finishKind: r.finishKind } : {}),
+        ...(r.errorCode !== undefined ? { errorCode: r.errorCode } : {}),
+        ...(r.httpStatus !== undefined ? { httpStatus: r.httpStatus } : {}),
+        latencyMs: r.latencyMs,
+        fallbackIndex: r.fallbackIndex,
+        attemptOrigin: r.attemptOrigin,
+        usageMissing: r.usageMissing,
+        createdAt: r.createdAt,
+      }));
+    }
     return this._usageAggregator.listEvents(query);
   }
 
