@@ -1,0 +1,43 @@
+name: verify-dist
+
+# 校验提交的 dist/ 构建产物与源码一致，防止安装者拿到过期产物。
+# 背景：dist/ 已纳入版本控制（见 commit 9155d20），pnpm 据此跳过 git
+# 依赖的构建脚本（ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED），因此 dist 必须
+# 与源码保持同步。
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  verify-dist:
+    name: dist 与源码一致性校验
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 pnpm
+        uses: pnpm/action-setup@v4
+        # pnpm 版本从 package.json 的 packageManager 字段读取
+
+      - name: 安装 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: 安装依赖
+        run: pnpm install --frozen-lockfile
+
+      - name: 构建
+        run: pnpm build
+
+      - name: 校验 dist 与提交的产物一致
+        run: |
+          if ! git diff --exit-code dist; then
+            echo "::error::dist/ 与源码不一致：提交的构建产物已过期。"
+            echo "::error::请本地执行 pnpm build，并将 dist/ 一并提交后重试。"
+            exit 1
+          fi
