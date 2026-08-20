@@ -5,9 +5,11 @@
  * 2. 月度额度由真实已提交 Credits 计算（不再仅靠 setQuotaExceeded 测试开关）
  * 3. 计费参数（multiplier、tokens_per_credit）与路由模式来自配置（不再硬编码）
  * 4. SQLite Repository 接入运行时：决策/Usage/身份/策略落库且重启后恢复
- * 5. Capability/模态检查接线：图片输入拒绝无 vision 能力的模型（红→绿）
+ * 5. Capability/模态检查接线：图片输入拒绝无 vision 能力的模型（红→绿）；
+ *    Tool 上下文拒绝无 tool_use 能力的模型（红→绿）
  * 6. Header/JWT 真实入站绑定：bindIdentityFromHeaders + 严格配置参数
- * 7. Auto 的 LLM Classifier 启用：ctx.llm 后端 + 缓存
+ * 7. Auto 的 LLM Classifier 启用：ctx.llm 后端 + 缓存；流不返回首个 chunk 时
+ *    按 timeout_ms 整体超时降级（不永久等待）
  * 8. 部分输出保护接线：流式产出文本后失败不再透明切换模型
  * 9. 严格配置 Schema 在插件入口生效：非法配置拒绝加载
  */
@@ -17,8 +19,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHmac } from 'node:crypto';
 import { bootFake, modelInfo } from '../contracts/harness.js';
-import { successScript } from '../../src/dsh-adapter/fake-adapter.js';
+import { successScript, FakeLlmAdapter } from '../../src/dsh-adapter/fake-adapter.js';
 import type { FakeStreamScript } from '../../src/dsh-adapter/fake-adapter.js';
+import type { GenerateOptions, StreamChunk } from '../../src/dsh-adapter/mod.js';
 import { GovernorDatabase } from '../../src/storage/database.js';
 import { GovernorRepository } from '../../src/storage/repository.js';
 
@@ -487,6 +490,101 @@ describe('Capability/模态检查接线', () => {
       await h.dispose();
     }
   });
+
+  it('Tool 上下文请求无 tool_use 能力的模型被拒绝（CAPABILITY_NOT_SUPPORTED）', async () => {
+    const h = await bootFake(
+      providers,
+      models,
+      successScript('hi', { inputTokens: 1, outputTokens: 1 }) as never,
+      {
+        models: {
+          // 未声明 tool_use 能力：Tool 调用上下文的请求必须被排除
+          'fake-provider:model-a': {
+            enabled: true,
+            multiplier: 1,
+            capabilities: ['text'],
+            quality: { general: 90 },
+          },
+        },
+        routing: { default: 'manual' as const },
+        fallback: { enabled: true, max_attempts: 2 },
+        identity: { provider: 'local', local_user_id: 'local' },
+      },
+    );
+    try {
+      const e = ev(h.ctx);
+      // pre-step：消息带 tool-call 块（Tool 调用上下文）
+      await e.waterfall(
+        'agent/pre-step',
+        {
+          agent: fakeAgent('session-1'),
+          messages: [
+            {
+              role: 'user',
+              content: [{ type: 'tool-call' }, { type: 'text', text: 'run the tool' }],
+            },
+          ],
+          turn: 1,
+          step: 1,
+          signal: new AbortController().signal,
+        },
+        async () => ({ kind: 'enter', messages: [] }),
+      );
+      // agent/request：唯一模型缺少 tool_use 能力 → 拒绝，不透传
+      await expect(
+        e.waterfall(
+          'agent/request',
+          { agent: fakeAgent('session-1'), turn: 1, step: 1, signal: new AbortController().signal },
+          async () => ({ provider: 'fake-provider', model: 'model-a' }),
+        ),
+      ).rejects.toMatchObject({ code: 'CAPABILITY_NOT_SUPPORTED' });
+    } finally {
+      await h.dispose();
+    }
+  });
+
+  it('声明 tool_use 能力的模型在 Tool 上下文中通过', async () => {
+    const h = await bootFake(
+      providers,
+      models,
+      successScript('hi', { inputTokens: 1, outputTokens: 1 }) as never,
+      {
+        models: {
+          'fake-provider:model-a': {
+            enabled: true,
+            multiplier: 1,
+            capabilities: ['text', 'tool_use'],
+            quality: { general: 90 },
+          },
+        },
+        routing: { default: 'manual' as const },
+        fallback: { enabled: true, max_attempts: 2 },
+        identity: { provider: 'local', local_user_id: 'local' },
+      },
+    );
+    try {
+      const e = ev(h.ctx);
+      await e.waterfall(
+        'agent/pre-step',
+        {
+          agent: fakeAgent('session-1'),
+          messages: [{ role: 'user', content: [{ type: 'tool-result' }] }],
+          turn: 1,
+          step: 1,
+          signal: new AbortController().signal,
+        },
+        async () => ({ kind: 'enter', messages: [] }),
+      );
+      const config = (await e.waterfall(
+        'agent/request',
+        { agent: fakeAgent('session-1'), turn: 1, step: 1, signal: new AbortController().signal },
+        async () => ({ provider: 'fake-provider', model: 'model-a' }),
+      )) as { model: string };
+      expect(config.model).toBe('model-a');
+    } finally {
+      await h.dispose();
+    }
+  });
 });
 
 describe('Header/JWT 真实入站绑定', () => {
@@ -692,6 +790,90 @@ describe('Auto 的 LLM Classifier 接线', () => {
     } finally {
       await h.dispose();
       rmSync(dbDir, { recursive: true, force: true });
+    }
+  });
+
+  it('流一直不返回首个 chunk 时按 timeout_ms 超时降级（不永久等待）', async () => {
+    /** 永不产出任何 chunk 的 fake 适配器：模拟 Provider 无响应。 */
+    class HangingLlmAdapter extends FakeLlmAdapter {
+      override stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+        this.calls.push(options);
+        // next() 永不 resolve：首个 chunk 之前就挂起
+        return {
+          [Symbol.asyncIterator]: () => ({
+            next: () => new Promise<IteratorResult<StreamChunk>>(() => {}),
+          }),
+        };
+      }
+    }
+    const adapter = new HangingLlmAdapter(
+      providers,
+      models,
+      successScript('hi', {
+        inputTokens: 1,
+        outputTokens: 1,
+      }),
+    );
+    const h = await bootFake(
+      providers,
+      models,
+      successScript('hi', { inputTokens: 1, outputTokens: 1 }) as never,
+      {
+        models: {
+          'fake-provider:model-a': {
+            enabled: true,
+            multiplier: 1,
+            quality: { general: 90 },
+          },
+          'fake-provider:model-b': {
+            enabled: true,
+            multiplier: 0.1,
+            quality: { general: 60 },
+          },
+        },
+        routing: { default: 'auto' as const },
+        fallback: { enabled: true, max_attempts: 2 },
+        identity: { provider: 'local', local_user_id: 'local' },
+        auto: {
+          llm_classifier: {
+            enabled: true,
+            provider: 'fake-provider',
+            model: 'model-b',
+            timeout_ms: 100, // 100ms 整体预算
+          },
+        },
+      },
+      { adapter },
+    );
+    try {
+      const e = ev(h.ctx);
+      const start = Date.now();
+      // pre-step：普通文本（不命中 Hint/Rule）→ LLM 分类挂起 → 超时降级
+      await e.waterfall(
+        'agent/pre-step',
+        {
+          agent: fakeAgent('session-1'),
+          messages: [{ role: 'user', content: [{ type: 'text', text: 'Plan a trip to Mars' }] }],
+          turn: 1,
+          step: 1,
+          signal: new AbortController().signal,
+        },
+        async () => ({ kind: 'enter', messages: [] }),
+      );
+      // 超时生效：pre-step 在远小于 vitest 默认超时内完成（旧实现会永久等待）
+      const elapsed = Date.now() - start;
+      expect(elapsed).toBeGreaterThanOrEqual(100);
+      expect(elapsed).toBeLessThan(5_000);
+
+      // 降级分类 confidence=0 → auto 切 Quality First → model-a（质量最高）
+      const config = (await e.waterfall(
+        'agent/request',
+        { agent: fakeAgent('session-1'), turn: 1, step: 1, signal: new AbortController().signal },
+        async () => ({ provider: 'fake-provider', model: 'model-a' }),
+      )) as { model: string };
+      expect(config.model).toBe('model-a');
+    } finally {
+      await h.dispose();
     }
   });
 });

@@ -33,22 +33,25 @@ export interface FakeHarness {
  * @param script - 流脚本。
  * @param governorConfig - Governor 插件配置（提供则加载 Governor）。
  * @param opts.dbPath - SQLite 路径；默认每次创建临时文件（运行时持久化接线）。
+ * @param opts.adapter - 自定义 fake 适配器（如挂起流）；默认构造 FakeLlmAdapter。
  */
 export async function bootFake(
   providers: string[],
   models: LlmModelInfo[],
   script: FakeStreamScript | ((options: never, callIndex: number) => FakeStreamScript),
   governorConfig?: GovernorPluginConfig,
-  opts?: { dbPath?: string },
+  opts?: { dbPath?: string; adapter?: FakeLlmAdapter },
 ): Promise<FakeHarness> {
   const ctx = new Context();
   const llmFiber = ctx.plugin(LlmRuntime);
   await llmFiber;
-  const adapter = new FakeLlmAdapter(
-    providers,
-    models,
-    script as FakeStreamScript | ((options: never, callIndex: number) => FakeStreamScript),
-  );
+  const adapter =
+    opts?.adapter ??
+    new FakeLlmAdapter(
+      providers,
+      models,
+      script as FakeStreamScript | ((options: never, callIndex: number) => FakeStreamScript),
+    );
   const disposeAdapter = ctx.llm.registerAdapter(providers, adapter);
   let govFiber: { dispose: () => Promise<void> } | undefined;
   let governor: GovernorService | undefined;

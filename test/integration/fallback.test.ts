@@ -45,6 +45,19 @@ function qualityFirstConfig(maxAttempts = 2) {
   };
 }
 
+/** Manual 配置（默认路由模式）：A 质量更高，B 次之。 */
+function manualConfig(maxAttempts = 2) {
+  return {
+    models: {
+      'fake-provider:model-a': { enabled: true, multiplier: 1, quality: { general: 90 } },
+      'fake-provider:model-b': { enabled: true, multiplier: 0.5, quality: { general: 80 } },
+    },
+    routing: { default: 'manual' as const },
+    fallback: { enabled: true, max_attempts: maxAttempts },
+    identity: { provider: 'local' as const, local_user_id: 'local' },
+  };
+}
+
 const providers = ['fake-provider'];
 const models = [
   modelInfo('fake-provider', 'model-a', 'Model A'),
@@ -164,6 +177,137 @@ describe('A 失败 → B 成功', () => {
       const succeeded = usage.find((u: { success: boolean }) => u.success);
       expect(failed).toBeDefined();
       expect(succeeded).toBeDefined();
+    } finally {
+      await h.dispose();
+    }
+  });
+});
+
+describe('Manual 模式 Fallback 例外（§10.2）', () => {
+  it('manual 下 A 失败 → retry 重选 B（fallback.strategy 默认 quality_first）', async () => {
+    const h = await bootFake(providers, models, scriptForModel as never, manualConfig());
+    try {
+      const agent = fakeAgent();
+      const e = ev(h.ctx);
+
+      // 1. agent/request → Manual 保留用户选择 model-a
+      const config1 = (await e.waterfall(
+        'agent/request',
+        { agent, turn: 1, step: 1, signal: new AbortController().signal },
+        async () => ({ provider: 'fake-provider', model: 'model-a' }),
+      )) as { provider: string; model: string };
+      expect(config1.model).toBe('model-a');
+
+      // 2. llm/stream → model-a 失败（429）
+      const stream1 = (
+        h.ctx.events as unknown as {
+          waterfall: (name: string, ...args: unknown[]) => AsyncIterable<unknown>;
+        }
+      ).waterfall(
+        'llm/stream',
+        {
+          provider: 'fake-provider',
+          model: 'model-a',
+          messages: [],
+          sessionId: 'session-1' as never,
+        },
+        () =>
+          h.adapter.stream({ provider: 'fake-provider', model: 'model-a', messages: [] } as never),
+      );
+      for await (const _ of stream1) {
+        void _;
+      }
+
+      // 3. agent/request-error → 排除 model-a 并返回 retry
+      const action = await e.waterfall(
+        'agent/request-error',
+        {
+          agent,
+          turn: 1,
+          step: 1,
+          provider: 'fake-provider',
+          failure: { message: '429', code: 'RATE_LIMIT', status: 429 },
+          retryPolicy: undefined,
+          signal: new AbortController().signal,
+        },
+        async () => undefined,
+      );
+      expect(action).toEqual({ kind: 'retry' });
+
+      // 4. agent/request（同一 turn/step 重试）→ 已排除的 A 不再入选，
+      //    按 fallback.strategy（quality_first）对剩余模型重选 → model-b
+      const config2 = (await e.waterfall(
+        'agent/request',
+        { agent, turn: 1, step: 1, signal: new AbortController().signal },
+        async () => ({ provider: 'fake-provider', model: 'model-a' }),
+      )) as { provider: string; model: string };
+      expect(config2.model).toBe('model-b');
+
+      // 5. 验证决策：同一 request_id，两次 attempt 分别选 A 和 B
+      const decisions = await h.governor!.listDecisions();
+      expect(decisions).toHaveLength(2);
+      expect(decisions[0]!.requestId).toBe(decisions[1]!.requestId);
+      expect(decisions[0]!.selectedModel).toBe('model-a');
+      expect(decisions[1]!.selectedModel).toBe('model-b');
+      // 决策的 mode 保持请求的路由模式 manual
+      expect(decisions[1]!.mode).toBe('manual');
+      // 第二次 attempt 的排除集包含 model-a
+      expect([...decisions[1]!.excludedRoutes]).toContain('fake-provider:model-a');
+    } finally {
+      await h.dispose();
+    }
+  });
+
+  it('fallback 禁用时 manual 不切换模型（无 retry）', async () => {
+    const h = await bootFake(providers, models, scriptForModel as never, {
+      ...manualConfig(),
+      fallback: { enabled: false, max_attempts: 2 },
+    });
+    try {
+      const agent = fakeAgent();
+      const e = ev(h.ctx);
+
+      await e.waterfall(
+        'agent/request',
+        { agent, turn: 1, step: 1, signal: new AbortController().signal },
+        async () => ({ provider: 'fake-provider', model: 'model-a' }),
+      );
+
+      // 429 本可重试，但 fallback 显式禁用 → 不返回 retry
+      const action = await e.waterfall(
+        'agent/request-error',
+        {
+          agent,
+          turn: 1,
+          step: 1,
+          provider: 'fake-provider',
+          failure: { message: '429', code: 'RATE_LIMIT', status: 429 },
+          retryPolicy: undefined,
+          signal: new AbortController().signal,
+        },
+        async () => undefined,
+      );
+      expect(action).toBeUndefined();
+    } finally {
+      await h.dispose();
+    }
+  });
+
+  it('manual 首次 attempt 不走 Fallback 例外：请求的模型正常通过', async () => {
+    // 首次 attempt：排除集为空，Manual 直接返回用户选择
+    const h = await bootFake(providers, models, scriptForModel as never, manualConfig());
+    try {
+      const agent = fakeAgent();
+      const e = ev(h.ctx);
+      const config = (await e.waterfall(
+        'agent/request',
+        { agent, turn: 1, step: 1, signal: new AbortController().signal },
+        async () => ({ provider: 'fake-provider', model: 'model-a' }),
+      )) as { model: string };
+      expect(config.model).toBe('model-a');
+      const decisions = await h.governor!.listDecisions();
+      expect(decisions).toHaveLength(1);
+      expect(decisions[0]!.selectedModel).toBe('model-a');
     } finally {
       await h.dispose();
     }

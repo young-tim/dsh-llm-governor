@@ -31,6 +31,8 @@ import { InMemoryClassifierCache } from '../classifier/cache.js';
 import type { GovernorIdentity, IdentityProvider } from '../identity/types.js';
 import { FallbackState, isRetryable } from '../fallback/mod.js';
 import type { FailureInfo } from '../fallback/mod.js';
+import { GovernorExtensionRegistry } from '../extensions/registry.js';
+import type { RoutingContext } from '../extensions/registry.js';
 import type { UsageEvent } from '../usage/types.js';
 import { UsageAggregator } from '../usage/aggregator.js';
 
@@ -62,7 +64,13 @@ interface ModelConfig {
 export interface GovernorPluginConfig {
   models?: Record<string, ModelConfig>;
   users?: Record<string, { allow?: string[]; monthly_credits?: number }>;
-  fallback?: { enabled?: boolean; max_attempts?: number; after_partial_output?: boolean };
+  fallback?: {
+    enabled?: boolean;
+    max_attempts?: number;
+    after_partial_output?: boolean;
+    /** Manual 模式失败后的重选策略（默认 quality_first，§10.2）。 */
+    strategy?: 'quality_first' | 'credit_first' | 'auto';
+  };
   routing?: {
     default?: RoutingMode;
     credit_first?: { minimum_quality?: number; on_no_match?: 'quality_first' | 'none' };
@@ -72,7 +80,10 @@ export interface GovernorPluginConfig {
     quality_threshold?: { low?: number; medium?: number; high?: number };
   };
   credits?: { tokens_per_credit?: number; timezone?: string; default_monthly_credits?: number };
-  identity?: { provider?: 'local' | 'header' | 'jwt'; local_user_id?: string };
+  identity?: {
+    provider?: 'local' | 'header' | 'jwt' | 'custom';
+    local_user_id?: string;
+  };
   /** SQLite 持久化：enabled=false 时纯内存运行；path 默认 $DSH_HOME 下。 */
   storage?: { enabled?: boolean; path?: string };
   /** Web UI：挂载到 DSH webServer 的 /governor 前缀（无 webServer 时可独立监听）。 */
@@ -115,6 +126,7 @@ export class GovernorService extends Service {
   private _maxAttempts: number;
   private _afterPartialOutput: boolean;
   private _fallbackEnabled: boolean;
+  private _fallbackStrategy: 'quality_first' | 'credit_first' | 'auto';
   private _defaultRouting: RoutingMode;
   private _minimumQuality: number;
   private _onNoMatch: 'quality_first' | 'none';
@@ -131,12 +143,14 @@ export class GovernorService extends Service {
   private readonly _timezone: string;
   /** local 模式的固定身份（进程所有者）。 */
   private readonly _localIdentity: GovernorIdentity | undefined;
-  /** 身份提供者模式：local 自动绑定；header/jwt 无绑定时 fail closed。 */
-  private readonly _identityKind: 'local' | 'header' | 'jwt';
+  /** 身份提供者模式：local 自动绑定；header/jwt/custom 无绑定时 fail closed。 */
+  private readonly _identityKind: 'local' | 'header' | 'jwt' | 'custom';
   /** header/jwt 模式的身份提供者实例（入站绑定用）。 */
   private readonly _identityProvider: IdentityProvider | undefined;
   /** 分类器：Hint → Rule → LLM（llmBackend 由 mod.ts 注入时启用）。 */
   private readonly _classifier: Classifier;
+  /** 扩展注册表：四个领域扩展点的运行时注册 API（ctx.governor.extensions）。 */
+  private readonly _extensions = new GovernorExtensionRegistry();
 
   constructor(
     ctx: Context,
@@ -177,6 +191,7 @@ export class GovernorService extends Service {
     this._maxAttempts = config.fallback?.max_attempts ?? 2;
     this._afterPartialOutput = config.fallback?.after_partial_output ?? false;
     this._fallbackEnabled = config.fallback?.enabled ?? true;
+    this._fallbackStrategy = config.fallback?.strategy ?? 'quality_first';
     this._defaultRouting = config.routing?.default ?? 'manual';
     this._minimumQuality = config.routing?.credit_first?.minimum_quality ?? 85;
     this._onNoMatch = config.routing?.credit_first?.on_no_match ?? 'none';
@@ -390,8 +405,10 @@ export class GovernorService extends Service {
 
   /**
    * 对当前步骤输入执行分类（Hint → Rule → LLM），并缓存到请求状态。
+   * 注册自定义 TaskClassifier 扩展时（§6），分类完全由扩展接管。
    * 同时从输入信号提取本请求的能力/模态要求：图片输入要求 vision 能力与
-   * image 模态（advisory 声明不支持时由公共过滤排除，§7.2.5）。
+   * image 模态；Tool 调用上下文要求 tool_use 能力（advisory/治理配置声明
+   * 不支持时由公共过滤排除，§7.2.5）。
    * 被 agent/pre-step 调用；Auto 路由读取该分类，其他模式忽略。
    */
   async classifyStep(
@@ -400,7 +417,8 @@ export class GovernorService extends Service {
     step: number,
     input: ClassifyInput,
   ): Promise<AutoClassification> {
-    const classification = await this._classifier.classify(input);
+    const customClassifier = this._extensions.getTaskClassifier();
+    const classification = await (customClassifier ?? this._classifier).classify(input);
     this.setClassification(sessionId, turn, step, classification);
 
     // 能力/模态要求：图片输入 → vision 能力 + image 模态
@@ -413,16 +431,23 @@ export class GovernorService extends Service {
         state.requiredModalities = [...state.requiredModalities, 'image'];
       }
     }
+    // 能力要求：Tool 调用上下文 → tool_use 能力（缺少该能力的模型不得入选）
+    if (input.hasToolContext === true) {
+      if (!state.requiredCapabilities.includes('tool_use')) {
+        state.requiredCapabilities = [...state.requiredCapabilities, 'tool_use'];
+      }
+    }
     return classification;
   }
 
   /**
-   * 从入站 Header 绑定身份（header/jwt 模式的真实绑定路径）。
+   * 从入站 Header 绑定身份（header/jwt/custom 模式的真实绑定路径）。
    *
    * 由部署方的可信反向代理 / companion ingress 在 session 创建或首条消息提交时，
    * 通过 /governor/api/bind 端点调用。使用配置的 IdentityProvider 验证：
-   * header 模式校验可信代理标识；jwt 模式验签并校验 issuer/audience/exp/nbf。
-   * 无身份提供者（local 模式）或验证失败时抛错（fail closed）。
+   * header 模式校验可信代理标识；jwt 模式验签并校验 issuer/audience/exp/nbf；
+   * custom 模式使用经 ctx.governor.extensions 注册的第三方提供者。
+   * 无身份提供者（local 模式或 custom 未注册）或验证失败时抛错（fail closed）。
    *
    * @param sessionId - 要绑定的 session。
    * @param headers - 入站请求 Header（由可信代理转发）。
@@ -432,10 +457,14 @@ export class GovernorService extends Service {
     sessionId: string,
     headers: Readonly<Record<string, string>>,
   ): Promise<GovernorIdentity> {
-    if (this._identityProvider === undefined) {
+    const provider =
+      this._identityKind === 'custom'
+        ? this._extensions.getIdentityProvider()
+        : this._identityProvider;
+    if (provider === undefined) {
       throw new Error('IDENTITY_PROVIDER_NOT_CONFIGURED');
     }
-    const identity = await this._identityProvider.resolve({ sessionId, headers });
+    const identity = await provider.resolve({ sessionId, headers });
     await this.bindIdentity(sessionId, identity);
     return identity;
   }
@@ -449,7 +478,10 @@ export class GovernorService extends Service {
     return result;
   }
 
-  /** 构建 FilterInput。required capabilities/modalities 来自 pre-step 提取的输入信号。 */
+  /**
+   * 构建 FilterInput。required capabilities/modalities 来自 pre-step 提取的输入信号。
+   * 注册 ModelQualityProvider 扩展时（§6/§20），其提供的维度覆盖治理配置的 Quality。
+   */
   private buildFilterInput(sessionId: string, turn: number, step: number): FilterInput {
     const state = this.getOrCreateRequestState(sessionId, turn, step);
     const identity = this.getIdentity(sessionId);
@@ -458,9 +490,21 @@ export class GovernorService extends Service {
       ? { userId: identity!.userId, allow: userPolicy.allow }
       : undefined;
 
+    // ModelQualityProvider 覆盖：按维度合并到目录快照（仅路由决策视角）
+    const qualityProvider = this._extensions.getModelQualityProvider();
+    const snapshots =
+      qualityProvider === undefined
+        ? this._modelDirectory
+        : this._modelDirectory.map((s) => {
+            const override = qualityProvider.getQuality(s.routeId);
+            const overrideKeys = Object.keys(override);
+            if (overrideKeys.length === 0) return s;
+            return { ...s, quality: { ...s.quality, ...override } };
+          });
+
     return {
-      snapshots: this._modelDirectory,
-      activeProviders: new Set(this._modelDirectory.map((s) => s.provider)),
+      snapshots,
+      activeProviders: new Set(snapshots.map((s) => s.provider)),
       globalDefault: this.globalDefault,
       userPolicy: accessPolicy,
       excludedRoutes: state.fallback.excludedRoutes,
@@ -501,6 +545,56 @@ export class GovernorService extends Service {
     return this._usedCreditsNanos(userId) >= this._limitNanos(userId);
   }
 
+  /** 构建交给自定义 RoutingStrategy 的路由上下文。 */
+  private _buildRoutingContext(
+    mode: 'quality_first' | 'credit_first' | 'auto',
+    classification: AutoClassification,
+  ): RoutingContext {
+    return {
+      mode,
+      classification,
+      minimumQuality: this._minimumQuality,
+      onNoMatch: this._onNoMatch,
+      confidenceThreshold: this._confidenceThreshold,
+      qualityThresholds: { ...this._qualityThresholds },
+    };
+  }
+
+  /**
+   * Manual Fallback 重选（§10.2 唯一例外）：请求的 route 已被本请求排除
+   * （失败重试 attempt）且 Fallback 显式启用时，对剩余允许模型按
+   * fallback.strategy 重新选择（默认 quality_first）。
+   * 注册同名自定义 RoutingStrategy 时由扩展接管。
+   */
+  private _routeManualFallback(input: FilterInput, state: RequestState): RoutingResult {
+    const classification: AutoClassification = state.classification ?? {
+      taskType: 'general',
+      complexity: 'medium',
+      confidence: 0.5,
+      source: 'rule',
+    };
+    const custom = this._extensions.getRoutingStrategy(this._fallbackStrategy);
+    if (custom !== undefined) {
+      return custom.select(
+        input,
+        this._buildRoutingContext(this._fallbackStrategy, classification),
+      );
+    }
+    if (this._fallbackStrategy === 'credit_first') {
+      return routeCreditFirst(
+        input,
+        classification.taskType,
+        this._minimumQuality,
+        1,
+        this._onNoMatch,
+      );
+    }
+    if (this._fallbackStrategy === 'auto') {
+      return routeAuto(input, classification, this._confidenceThreshold, this._qualityThresholds);
+    }
+    return routeQualityFirst(input, classification.taskType);
+  }
+
   /** 执行模型选择（被 agent/request 调用）。 */
   selectModel(
     sessionId: string,
@@ -512,7 +606,7 @@ export class GovernorService extends Service {
     state.fallback.recordAttempt();
     this._currentTurnStep.set(sessionId, { turn, step });
 
-    // 身份 fail closed：header/jwt 模式下无绑定（含绑定过期）直接拒绝，
+    // 身份 fail closed：header/jwt/custom 模式下无绑定（含绑定过期）直接拒绝，
     // 不允许未治理的匿名请求透传到 Provider
     if (this.getIdentity(sessionId) === undefined) {
       throw new RoutingError(
@@ -528,25 +622,45 @@ export class GovernorService extends Service {
     state.mode = mode;
 
     if (mode === 'manual') {
-      result = routeManual(filterInput, defaultConfig.provider, defaultConfig.model);
-    } else if (mode === 'quality_first') {
-      result = routeQualityFirst(filterInput, 'general');
-    } else if (mode === 'credit_first') {
-      result = routeCreditFirst(filterInput, 'general', this._minimumQuality, 1, this._onNoMatch);
+      const requestedRoute = `${defaultConfig.provider}:${defaultConfig.model}` as CanonicalRoute;
+      if (
+        this._fallbackEnabled &&
+        state.fallback.excludedRoutes.size > 0 &&
+        state.fallback.excludedRoutes.has(requestedRoute)
+      ) {
+        // Fallback 例外：请求的模型已失败并被排除，按 fallback.strategy 重选剩余模型
+        result = this._routeManualFallback(filterInput, state);
+      } else {
+        result = routeManual(filterInput, defaultConfig.provider, defaultConfig.model);
+      }
     } else {
-      // auto：使用 agent/pre-step 已缓存的分类结果；未分类时回退默认 general/medium
+      // 非 Manual 模式：使用 agent/pre-step 已缓存的分类结果；未分类时回退默认 general/medium
       const classification: AutoClassification = state.classification ?? {
         taskType: 'general',
         complexity: 'medium',
         confidence: 0.5,
         source: 'rule',
       };
-      result = routeAuto(
-        filterInput,
-        classification,
-        this._confidenceThreshold,
-        this._qualityThresholds,
-      );
+      const customStrategy = this._extensions.getRoutingStrategy(mode);
+      if (customStrategy !== undefined) {
+        // 注册的自定义 RoutingStrategy 接管该模式的路由决策（§6 扩展点）
+        result = customStrategy.select(
+          filterInput,
+          this._buildRoutingContext(mode, classification),
+        );
+      } else if (mode === 'quality_first') {
+        result = routeQualityFirst(filterInput, 'general');
+      } else if (mode === 'credit_first') {
+        result = routeCreditFirst(filterInput, 'general', this._minimumQuality, 1, this._onNoMatch);
+      } else {
+        // auto：置信度低于阈值时切 Quality First，否则按复杂度映射质量门槛
+        result = routeAuto(
+          filterInput,
+          classification,
+          this._confidenceThreshold,
+          this._qualityThresholds,
+        );
+      }
     }
 
     state.selectedRoute = result.selected.routeId;
@@ -618,7 +732,7 @@ export class GovernorService extends Service {
     return state.fallback.canRetry();
   }
 
-  /** 排除失败路由并返回是否应该重试。 */
+  /** 排除失败路由并返回是否应该重试（fallback 禁用时直接不重试）。 */
   excludeRouteAndCheckRetry(
     sessionId: string,
     turn: number,
@@ -626,6 +740,7 @@ export class GovernorService extends Service {
     routeId: string,
     failure: LlmFailure,
   ): boolean {
+    if (!this._fallbackEnabled) return false;
     const state = this.getOrCreateRequestState(sessionId, turn, step);
     if (!state.fallback.shouldRetry(failure as FailureInfo)) return false;
     state.fallback.excludeRoute(routeId);
@@ -748,6 +863,16 @@ export class GovernorService extends Service {
   setQuotaExceeded(userId: string, exceeded: boolean): void {
     if (exceeded) this._quotaExceededFor.add(userId);
     else this._quotaExceededFor.delete(userId);
+  }
+
+  /**
+   * 扩展注册表（§6 四个扩展点的运行时注册 API）。
+   * 第三方插件加载后经 ctx.governor.extensions 注册：
+   * IdentityProvider（identity.provider=custom）、TaskClassifier、
+   * RoutingStrategy（按 name 接管非 Manual 模式）、ModelQualityProvider。
+   */
+  get extensions(): GovernorExtensionRegistry {
+    return this._extensions;
   }
 
   // ===== Client Remote API =====

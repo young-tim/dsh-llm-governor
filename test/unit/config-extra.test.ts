@@ -102,8 +102,13 @@ describe('config/Identity 错误分支', () => {
 
   it('provider 不是合法枚举值抛 ConfigError', () => {
     expect(() => resolveConfig({ schema_version: 1, identity: { provider: 'bogus' } })).toThrow(
-      /provider must be local\|header\|jwt/,
+      /provider must be local\|header\|jwt\|custom/,
     );
+  });
+
+  it('provider=custom 合法（运行时经扩展注册表提供）', () => {
+    const cfg = resolveConfig({ schema_version: 1, identity: { provider: 'custom' } });
+    expect(cfg.identity.provider).toBe('custom');
   });
 
   it('provider 不是字符串抛 ConfigError', () => {
@@ -473,6 +478,26 @@ describe('config/Auto 错误分支', () => {
     expect(cfg.auto.llmClassifier.enabled).toBe(true);
     expect(cfg.auto.llmClassifier.provider).toBe('p');
     expect(cfg.auto.llmClassifier.model).toBe('m');
+    expect(cfg.auto.llmClassifier.timeoutMs).toBe(10_000);
+  });
+
+  it('llm_classifier.timeout_ms 非正整数抛 ConfigError', () => {
+    expect(() =>
+      resolveConfig({
+        schema_version: 1,
+        identity: { provider: 'local' },
+        auto: { llm_classifier: { timeout_ms: 0 } },
+      }),
+    ).toThrow(/expected positive integer/);
+  });
+
+  it('llm_classifier.timeout_ms 指定合法值通过', () => {
+    const cfg = resolveConfig({
+      schema_version: 1,
+      identity: { provider: 'local' },
+      auto: { llm_classifier: { timeout_ms: 250 } },
+    });
+    expect(cfg.auto.llmClassifier.timeoutMs).toBe(250);
   });
 
   it('quality_threshold 全部指定合法', () => {
@@ -524,15 +549,31 @@ describe('config/Fallback 错误分支', () => {
     ).toThrow(/expected boolean/);
   });
 
+  it('fallback.strategy 非法枚举抛 ConfigError', () => {
+    expect(() =>
+      resolveConfig({
+        schema_version: 1,
+        identity: { provider: 'local' },
+        fallback: { strategy: 'cheapest' },
+      }),
+    ).toThrow(/strategy must be quality_first\|credit_first\|auto/);
+  });
+
   it('合法 fallback 配置通过', () => {
     const cfg = resolveConfig({
       schema_version: 1,
       identity: { provider: 'local' },
-      fallback: { enabled: false, max_attempts: 3, after_partial_output: true },
+      fallback: { enabled: false, max_attempts: 3, after_partial_output: true, strategy: 'auto' },
     });
     expect(cfg.fallback.enabled).toBe(false);
     expect(cfg.fallback.maxAttempts).toBe(3);
     expect(cfg.fallback.afterPartialOutput).toBe(true);
+    expect(cfg.fallback.strategy).toBe('auto');
+  });
+
+  it('fallback.strategy 默认 quality_first', () => {
+    const cfg = resolveConfig({ schema_version: 1, identity: { provider: 'local' } });
+    expect(cfg.fallback.strategy).toBe('quality_first');
   });
 });
 

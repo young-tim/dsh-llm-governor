@@ -52,12 +52,14 @@ describe('config/resolveConfig', () => {
       enabled: false,
       provider: '',
       model: '',
+      timeoutMs: 10_000,
     });
     // fallback 默认值
     expect(cfg.fallback).toEqual({
       enabled: true,
       maxAttempts: 2,
       afterPartialOutput: false,
+      strategy: 'quality_first',
     });
     expect(cfg.models).toEqual({});
     expect(cfg.users).toEqual({});

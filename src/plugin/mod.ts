@@ -27,6 +27,15 @@ import type { IdentityProvider } from '../identity/types.js';
 import type { LlmClassifierBackend } from '../classifier/index.js';
 import type { ClassifyInput, Classification } from '../classifier/index.js';
 
+export type {
+  TaskClassifier,
+  RoutingStrategy,
+  RoutingContext,
+  ModelQualityProvider,
+} from '../extensions/registry.js';
+export { GovernorExtensionRegistry } from '../extensions/registry.js';
+export type { IdentityProvider } from '../identity/types.js';
+
 /** Governor UI 在 DSH webServer 上挂载的前缀。 */
 const GOVERNOR_WEB_PREFIX = '/governor';
 
@@ -111,6 +120,8 @@ function buildIdentityProvider(identity: IdentityConfig): IdentityProvider | und
  * 构建基于 ctx.llm 的 LLM 分类后端（DSH 特定，只能进入 plugin 层）。
  *
  * 行为（§10.5）：temperature=0、短输出、严格 JSON 解析、超时保护。
+ * 超时是整体预算（默认 10s）：每次等待下一个 chunk 都与剩余时间竞速，
+ * 因此流一直不返回首个 chunk 也不会永久等待。
  * 非法输出 / 超时 / 网络错误抛错，由 classifier 编排器降级为默认 fallback
  * （confidence=0 → Quality First）。
  */
@@ -118,6 +129,7 @@ function createLlmClassifierBackend(
   ctx: Context,
   provider: string,
   model: string,
+  timeoutMs = 10_000,
 ): LlmClassifierBackend {
   /** 分类 Prompt：要求只输出固定 JSON。 */
   const prompt = [
@@ -184,14 +196,45 @@ function createLlmClassifierBackend(
         temperature: 0,
         maxTokens: 64,
       } as never);
+      const iterator = (stream as AsyncIterable<{ type: string; text?: string }>)[
+        Symbol.asyncIterator
+      ]();
       let out = '';
-      // 超时保护：10s 未完成视为失败
-      const deadline = Date.now() + 10_000;
-      for await (const chunk of stream as AsyncIterable<{ type: string; text?: string }>) {
-        if (Date.now() > deadline) throw new Error('CLASSIFIER_TIMEOUT');
-        if (chunk.type === 'text-delta' && typeof chunk.text === 'string') {
-          out += chunk.text;
+      // 整体超时预算：等待每个 chunk 都与剩余时间竞速（含首个 chunk）
+      const deadline = Date.now() + timeoutMs;
+      try {
+        while (true) {
+          const remaining = deadline - Date.now();
+          if (remaining <= 0) throw new Error('CLASSIFIER_TIMEOUT');
+          let timer: ReturnType<typeof setTimeout> | undefined;
+          try {
+            const next = await Promise.race([
+              iterator.next(),
+              new Promise<never>((_, reject) => {
+                timer = setTimeout(() => reject(new Error('CLASSIFIER_TIMEOUT')), remaining);
+              }),
+            ]);
+            if (next.done) break;
+            if (next.value.type === 'text-delta' && typeof next.value.text === 'string') {
+              out += next.value.text;
+            }
+          } finally {
+            if (timer !== undefined) clearTimeout(timer);
+          }
         }
+      } catch (err) {
+        // 超时/失败时尽力关闭底层流（不 await：挂起的生成器可能永不完成）
+        try {
+          const closed = iterator.return?.();
+          if (closed !== undefined)
+            void closed.then(
+              () => {},
+              () => {},
+            );
+        } catch {
+          // 关闭失败不影响错误传播
+        }
+        throw err;
       }
       return parseClassification(out);
     },
@@ -226,6 +269,7 @@ function toRuntimeConfig(resolved: GovernorConfig): GovernorPluginConfig {
       enabled: resolved.fallback.enabled,
       max_attempts: resolved.fallback.maxAttempts,
       after_partial_output: resolved.fallback.afterPartialOutput,
+      strategy: resolved.fallback.strategy,
     },
     routing: {
       default: resolved.routing.default,
@@ -309,6 +353,7 @@ export const GovernorPlugin = {
         ctx,
         resolved.auto.llmClassifier.provider,
         resolved.auto.llmClassifier.model,
+        resolved.auto.llmClassifier.timeoutMs,
       );
     }
     const service = new GovernorService(ctx, runtimeConfig, repository, serviceOptions);

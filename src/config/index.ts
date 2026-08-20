@@ -4,8 +4,9 @@
 export type {
   MultiplierPpm,
   CreditNanos,
-  IdentityProvider,
+  IdentityProviderKind,
   CreditFirstOnNoMatch,
+  FallbackStrategy,
   IdentityConfig,
   CreditsConfig,
   RoutingConfig,

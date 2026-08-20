@@ -40,9 +40,11 @@ const DEFAULT_QUALITY_HIGH = 92;
 const DEFAULT_LLM_CLASSIFIER_ENABLED = false;
 const DEFAULT_LLM_CLASSIFIER_PROVIDER = '';
 const DEFAULT_LLM_CLASSIFIER_MODEL = '';
+const DEFAULT_LLM_CLASSIFIER_TIMEOUT_MS = 10_000;
 const DEFAULT_FALLBACK_ENABLED = true;
 const DEFAULT_MAX_ATTEMPTS = 2;
 const DEFAULT_AFTER_PARTIAL_OUTPUT = false;
+const DEFAULT_FALLBACK_STRATEGY: FallbackStrategy = 'quality_first';
 const DEFAULT_MODEL_ENABLED = true;
 const DEFAULT_MODEL_MULTIPLIER = 1;
 
@@ -90,8 +92,13 @@ const AUTO_FIELDS: readonly string[] = [
   'llm_classifier',
 ];
 const QUALITY_THRESHOLD_FIELDS: readonly string[] = ['low', 'medium', 'high'];
-const LLM_CLASSIFIER_FIELDS: readonly string[] = ['enabled', 'provider', 'model'];
-const FALLBACK_FIELDS: readonly string[] = ['enabled', 'max_attempts', 'after_partial_output'];
+const LLM_CLASSIFIER_FIELDS: readonly string[] = ['enabled', 'provider', 'model', 'timeout_ms'];
+const FALLBACK_FIELDS: readonly string[] = [
+  'enabled',
+  'max_attempts',
+  'after_partial_output',
+  'strategy',
+];
 const MODEL_FIELDS: readonly string[] = ['enabled', 'multiplier', 'capabilities', 'quality'];
 const USER_FIELDS: readonly string[] = ['allow', 'monthly_credits'];
 const STORAGE_FIELDS: readonly string[] = ['enabled', 'path'];
@@ -108,15 +115,18 @@ export type MultiplierPpm = number;
 /** Credits 的整数纳秒表示；1 Credit = 1_000_000_000 nanos。 */
 export type CreditNanos = bigint;
 
-/** 身份提供者类型。 */
-export type IdentityProvider = 'local' | 'header' | 'jwt';
+/** 身份提供者类型。custom 表示运行时经 ctx.governor.extensions 注册。 */
+export type IdentityProviderKind = 'local' | 'header' | 'jwt' | 'custom';
 
 /** Credit First 无候选时的回退策略。 */
 export type CreditFirstOnNoMatch = 'quality_first' | 'none';
 
+/** Manual Fallback 的重选策略（§10.2：对剩余允许模型重新选择）。 */
+export type FallbackStrategy = 'quality_first' | 'credit_first' | 'auto';
+
 /** 身份配置。 */
 export interface IdentityConfig {
-  readonly provider: IdentityProvider;
+  readonly provider: IdentityProviderKind;
   readonly localUserId?: string;
   readonly headerName?: string;
   /** header 模式：可信代理来源标识（必填，强制声明信任边界）。 */
@@ -172,6 +182,8 @@ export interface AutoConfig {
     readonly enabled: boolean;
     readonly provider: string;
     readonly model: string;
+    /** 单次分类调用的整体超时（毫秒），含等待首个 chunk 的时间。 */
+    readonly timeoutMs: number;
   };
 }
 
@@ -180,6 +192,8 @@ export interface FallbackConfig {
   readonly enabled: boolean;
   readonly maxAttempts: number;
   readonly afterPartialOutput: boolean;
+  /** Manual 模式失败后的重选策略（仅显式启用 Fallback 时生效，§10.2）。 */
+  readonly strategy: FallbackStrategy;
 }
 
 /** SQLite 持久化配置。 */
@@ -348,12 +362,12 @@ function parseTimezone(value: unknown, path: string): string {
   return tz;
 }
 
-/** 解析 IdentityProvider 枚举。 */
-function parseIdentityProvider(value: unknown, path: string): IdentityProvider {
+/** 解析 IdentityProvider 枚举（custom 表示运行时注册的第三方提供者）。 */
+function parseIdentityProvider(value: unknown, path: string): IdentityProviderKind {
   const s = parseString(value, path);
-  if (s !== 'local' && s !== 'header' && s !== 'jwt') {
+  if (s !== 'local' && s !== 'header' && s !== 'jwt' && s !== 'custom') {
     throw new ConfigError(
-      `provider must be local|header|jwt, got "${s}"`,
+      `provider must be local|header|jwt|custom, got "${s}"`,
       'CONFIG_INVALID_PROVIDER',
       path,
     );
@@ -368,6 +382,19 @@ function parseRoutingMode(value: unknown, path: string): RoutingMode {
     throw new ConfigError(
       `routing mode must be manual|quality_first|credit_first|auto, got "${s}"`,
       'CONFIG_INVALID_ROUTING_MODE',
+      path,
+    );
+  }
+  return s;
+}
+
+/** 解析 FallbackStrategy 枚举。 */
+function parseFallbackStrategy(value: unknown, path: string): FallbackStrategy {
+  const s = parseString(value, path);
+  if (s !== 'quality_first' && s !== 'credit_first' && s !== 'auto') {
+    throw new ConfigError(
+      `strategy must be quality_first|credit_first|auto, got "${s}"`,
+      'CONFIG_INVALID_FALLBACK_STRATEGY',
       path,
     );
   }
@@ -730,6 +757,7 @@ function parseLlmClassifier(value: unknown): AutoConfig['llmClassifier'] {
       enabled: DEFAULT_LLM_CLASSIFIER_ENABLED,
       provider: DEFAULT_LLM_CLASSIFIER_PROVIDER,
       model: DEFAULT_LLM_CLASSIFIER_MODEL,
+      timeoutMs: DEFAULT_LLM_CLASSIFIER_TIMEOUT_MS,
     };
   }
   if (!isObject(value)) {
@@ -749,6 +777,10 @@ function parseLlmClassifier(value: unknown): AutoConfig['llmClassifier'] {
     value['model'] !== undefined
       ? parseNonEmptyString(value['model'], 'auto.llm_classifier.model')
       : DEFAULT_LLM_CLASSIFIER_MODEL;
+  const timeoutMs =
+    value['timeout_ms'] !== undefined
+      ? parsePositiveInteger(value['timeout_ms'], 'auto.llm_classifier.timeout_ms')
+      : DEFAULT_LLM_CLASSIFIER_TIMEOUT_MS;
 
   // 启用时 provider 和 model 必填
   if (enabled && (provider.length === 0 || model.length === 0)) {
@@ -759,7 +791,7 @@ function parseLlmClassifier(value: unknown): AutoConfig['llmClassifier'] {
     );
   }
 
-  return { enabled, provider, model };
+  return { enabled, provider, model, timeoutMs };
 }
 
 /** 解析 auto 配置块。 */
@@ -776,6 +808,7 @@ function parseAuto(value: unknown): AutoConfig {
         enabled: DEFAULT_LLM_CLASSIFIER_ENABLED,
         provider: DEFAULT_LLM_CLASSIFIER_PROVIDER,
         model: DEFAULT_LLM_CLASSIFIER_MODEL,
+        timeoutMs: DEFAULT_LLM_CLASSIFIER_TIMEOUT_MS,
       },
     };
   }
@@ -801,6 +834,7 @@ function parseFallback(value: unknown): FallbackConfig {
       enabled: DEFAULT_FALLBACK_ENABLED,
       maxAttempts: DEFAULT_MAX_ATTEMPTS,
       afterPartialOutput: DEFAULT_AFTER_PARTIAL_OUTPUT,
+      strategy: DEFAULT_FALLBACK_STRATEGY,
     };
   }
   if (!isObject(value)) {
@@ -820,8 +854,12 @@ function parseFallback(value: unknown): FallbackConfig {
     value['after_partial_output'] !== undefined
       ? parseBoolean(value['after_partial_output'], 'fallback.after_partial_output')
       : DEFAULT_AFTER_PARTIAL_OUTPUT;
+  const strategy =
+    value['strategy'] !== undefined
+      ? parseFallbackStrategy(value['strategy'], 'fallback.strategy')
+      : DEFAULT_FALLBACK_STRATEGY;
 
-  return { enabled, maxAttempts, afterPartialOutput };
+  return { enabled, maxAttempts, afterPartialOutput, strategy };
 }
 
 /** 解析单个模型条目。 */
