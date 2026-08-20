@@ -19,9 +19,9 @@
 <body>
   <h1>模型管理</h1>
   <nav>
-    <a href="/pages/models.html">模型</a>
-    <a href="/pages/users.html">用户</a>
-    <a href="/pages/usage.html">用量</a>
+    <a href="models.html">模型</a>
+    <a href="users.html">用户</a>
+    <a href="usage.html">用量</a>
   </nav>
   <div class="toolbar">
     <label>管理员令牌：<input id="admin-token" placeholder="远程写入时需要" /></label>
@@ -49,6 +49,11 @@
 
   <script>
     // 模型管理页面：加载模型列表、分页、行内编辑 enabled 和 multiplier。
+    // 计算 API 基础路径：独立服务器为 ''，DSH webServer 挂载时为 '/governor'。
+    var API_BASE = (function () {
+      var m = location.pathname.match(/^(.*)\/pages\/[^/]+$/);
+      return m ? m[1] : '';
+    })();
     var PAGE_LIMIT = 20;
     var offset = 0;
     var total = 0;
@@ -77,7 +82,7 @@
     async function loadModels() {
       var msg = document.getElementById('msg');
       msg.textContent = '';
-      var res = await fetch('/api/models?limit=' + PAGE_LIMIT + '&offset=' + offset);
+      var res = await fetch(API_BASE + '/api/models?limit=' + PAGE_LIMIT + '&offset=' + offset);
       var data = await res.json();
       total = data.total;
       var tbody = document.getElementById('models-body');
@@ -110,7 +115,7 @@
       var headers = { 'Content-Type': 'application/json' };
       var t = token();
       if (t) headers['X-Governor-Admin'] = t;
-      var res = await fetch('/api/models/' + encodeURIComponent(routeId), {
+      var res = await fetch(API_BASE + '/api/models/' + encodeURIComponent(routeId), {
         method: 'PATCH',
         headers: headers,
         body: JSON.stringify(patch),

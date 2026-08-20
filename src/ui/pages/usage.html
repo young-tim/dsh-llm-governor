@@ -18,9 +18,9 @@
 <body>
   <h1>用量查询</h1>
   <nav>
-    <a href="/pages/models.html">模型</a>
-    <a href="/pages/users.html">用户</a>
-    <a href="/pages/usage.html">用量</a>
+    <a href="models.html">模型</a>
+    <a href="users.html">用户</a>
+    <a href="usage.html">用量</a>
   </nav>
   <div class="filters">
     <label>User ID：<input id="filter-user" placeholder="按用户筛选" /></label>
@@ -46,6 +46,11 @@
 
   <script>
     // 用量查询页面：按 userId / provider 筛选，展示 usage 事件列表。
+    // 计算 API 基础路径：独立服务器为 ''，DSH webServer 挂载时为 '/governor'。
+    var API_BASE = (function () {
+      var m = location.pathname.match(/^(.*)\/pages\/[^/]+$/);
+      return m ? m[1] : '';
+    })();
 
     // 简单 HTML 转义。
     function esc(s) {
@@ -64,7 +69,7 @@
       if (user) params.set('userId', user);
       if (provider) params.set('provider', provider);
 
-      var res = await fetch('/api/usage?' + params.toString());
+      var res = await fetch(API_BASE + '/api/usage?' + params.toString());
       var data = await res.json();
       var tbody = document.getElementById('usage-body');
       tbody.innerHTML = '';
