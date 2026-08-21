@@ -289,6 +289,9 @@ describe('rc.8 Trajectory definition seam（发布物取证）', () => {
       expect(exports['inject']).toEqual(
         expect.arrayContaining(['conversationEvents', 'conversationViews', 'slots', 'remote']),
       );
+      // Governor owns this namespace and mounts it during apply; making it a
+      // static dependency would deadlock activation.
+      expect(exports['inject']).not.toContain('remote.governor');
       expect(exports['apply']).toEqual(expect.any(Function));
     } finally {
       await fiber.dispose();

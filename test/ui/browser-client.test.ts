@@ -200,7 +200,6 @@ function browserHarness(slots = new SlotLedger()) {
         unmounts += 1;
       };
     }),
-    governor,
   };
   const store = {
     subscribe: () => () => {},
@@ -216,6 +215,7 @@ function browserHarness(slots = new SlotLedger()) {
   const loadDirectory = vi.fn(async () => {});
   const selectDirectory = vi.fn(async () => {});
   const ctx = {
+    get: vi.fn((name: string) => (name === 'remote.governor' ? governor : undefined)),
     remote,
     slots,
     sessions: { subagentAddress: (_sessionId: SessionId) => undefined as string | undefined },
@@ -313,6 +313,16 @@ describe('dsh.client lifecycle', () => {
     expect(harness.viewDefinitions).toHaveLength(0);
     expect(harness.slots.governor()).toHaveLength(0);
     expect(harness.counts()).toEqual({ mounts: 1, unmounts: 1 });
+  });
+
+  it('missing dynamic Remote namespace fails loud and unwinds its mount', async () => {
+    const harness = browserHarness();
+    harness.ctx.get.mockReturnValue(undefined);
+    await expect(apply(harness.ctx as never)).rejects.toThrow(
+      'Governor Remote namespace did not become available after mount',
+    );
+    expect(harness.counts()).toEqual({ mounts: 1, unmounts: 1 });
+    expect(harness.slots.governor()).toHaveLength(0);
   });
 
   it('registered inject faces keep native directory behavior and slot labels live', async () => {

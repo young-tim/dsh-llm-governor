@@ -15696,7 +15696,11 @@ window.__ModuleLoader__.load({
       try {
         const disposeRemote = await browser.remote.$mount(GOVERNOR_REMOTE_CONTRIBUTION);
         disposers.push(disposeRemote);
-        const api = createGovernorClientApi(browser.remote.governor);
+        const governorRemote = ctx.get("remote.governor");
+        if (governorRemote === void 0) {
+          throw new Error("Governor Remote namespace did not become available after mount");
+        }
+        const api = createGovernorClientApi(governorRemote);
         disposers.push(installStyles());
         disposers.push(browser.conversationEvents.register(governorTrajectoryDefinition));
         disposers.push(browser.conversationViews.register(governorDecisionViewDefinition));

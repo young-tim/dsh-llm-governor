@@ -442,7 +442,17 @@ export async function apply(ctx) {
     try {
         const disposeRemote = await browser.remote.$mount(GOVERNOR_REMOTE_CONTRIBUTION);
         disposers.push(disposeRemote);
-        const api = createGovernorClientApi(browser.remote.governor);
+        // `$mount()` dynamically provides `remote.governor`.  Reading it through
+        // `browser.remote.governor` makes Cordis treat the nested service as an
+        // undeclared static dependency; declaring it in `inject` would instead
+        // create a self-dependency because this plugin is the namespace owner.
+        // `Context#get()` is the supported explicit lookup for a service created
+        // during the current plugin's apply lifecycle.
+        const governorRemote = ctx.get('remote.governor');
+        if (governorRemote === undefined) {
+            throw new Error('Governor Remote namespace did not become available after mount');
+        }
+        const api = createGovernorClientApi(governorRemote);
         disposers.push(installStyles());
         disposers.push(browser.conversationEvents.register(governorTrajectoryDefinition));
         disposers.push(browser.conversationViews.register(governorDecisionViewDefinition));
