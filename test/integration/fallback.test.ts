@@ -160,14 +160,19 @@ describe('A 失败 → B 成功', () => {
         void _;
       }
 
-      // 验证：两个 decisions
-      const decisions = await h.governor!.listDecisions();
+      // 验证：两个 decisions（explainDecision 按 fallbackIndex 升序返回 attempt 集合）
+      const list = await h.governor!.listDecisions();
+      expect(list.items).toHaveLength(2);
+      const decisions = await h.governor!.explainDecision(list.items[0]!.requestId);
       expect(decisions).toHaveLength(2);
       // 同一个 request_id
       expect(decisions[0]!.requestId).toBe(decisions[1]!.requestId);
-      // 第一个选 model-a，第二个选 model-b
-      expect(decisions[0]!.selectedModel).toBe('model-a');
-      expect(decisions[1]!.selectedModel).toBe('model-b');
+      // 首个 attempt 选 model-a，fallback attempt 选 model-b（fallbackIndex 连续递增）
+      expect(decisions[0]!.selectedRoute).toBe('fake-provider:model-a');
+      expect(decisions[1]!.selectedRoute).toBe('fake-provider:model-b');
+      expect(decisions[0]!.fallbackIndex).toBe(0);
+      expect(decisions[1]!.fallbackIndex).toBe(1);
+      expect(decisions[1]!.trigger).toBe('fallback');
 
       // 验证：两个 usage（一个失败，一个成功）
       const usage = await h.governor!.queryUsage({});
@@ -243,16 +248,18 @@ describe('Manual 模式 Fallback 例外（§10.2）', () => {
       )) as { provider: string; model: string };
       expect(config2.model).toBe('model-b');
 
-      // 5. 验证决策：同一 request_id，两次 attempt 分别选 A 和 B
-      const decisions = await h.governor!.listDecisions();
+      // 5. 验证决策：同一 request_id，两次 attempt 分别选 A 和 B（按 fallbackIndex 升序）
+      const list = await h.governor!.listDecisions();
+      expect(list.items).toHaveLength(2);
+      const decisions = await h.governor!.explainDecision(list.items[0]!.requestId);
       expect(decisions).toHaveLength(2);
       expect(decisions[0]!.requestId).toBe(decisions[1]!.requestId);
-      expect(decisions[0]!.selectedModel).toBe('model-a');
-      expect(decisions[1]!.selectedModel).toBe('model-b');
+      expect(decisions[0]!.selectedRoute).toBe('fake-provider:model-a');
+      expect(decisions[1]!.selectedRoute).toBe('fake-provider:model-b');
       // 决策的 mode 保持请求的路由模式 manual
       expect(decisions[1]!.mode).toBe('manual');
-      // 第二次 attempt 的排除集包含 model-a
-      expect([...decisions[1]!.excludedRoutes]).toContain('fake-provider:model-a');
+      // 第二次 attempt 的决策里 fallback trigger 已标记
+      expect(decisions[1]!.trigger).toBe('fallback');
     } finally {
       await h.dispose();
     }
@@ -306,8 +313,8 @@ describe('Manual 模式 Fallback 例外（§10.2）', () => {
       )) as { model: string };
       expect(config.model).toBe('model-a');
       const decisions = await h.governor!.listDecisions();
-      expect(decisions).toHaveLength(1);
-      expect(decisions[0]!.selectedModel).toBe('model-a');
+      expect(decisions.items).toHaveLength(1);
+      expect(decisions.items[0]!.selectedRoute).toBe('fake-provider:model-a');
     } finally {
       await h.dispose();
     }

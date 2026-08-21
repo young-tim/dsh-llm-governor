@@ -488,3 +488,76 @@ Web Remote 权限、七类 Eval Dataset 和 package smoke。
 首版不做 Provider Proxy、Credential 管理、账号/组织系统、通用 RBAC、金额财务、
 审批、跨集群全局 Quota、全局 Provider 健康平台、在线动态 Quality 学习或自动修改
 模型画像。Quality 更新只通过管理员配置或显式 `ModelQualityProvider`。
+
+## 21. 优化阶段实现状态（2026-08-21，对应 docs/OPTIMIZATION_REQUIREMENTS.md）
+
+本节同步优化需求的最终实现；验收明细见 PROGRESS.md 与测试文件。
+
+### 21.1 决策核心与双写审计
+
+- `src/routing/decision.ts`：UUIDv7 requestId、RFC 8785 JCS 规范化的
+  `decisionHash`（SHA-256 小写 hex）、候选 64/排除 128/事件 64 KiB 截断
+  （totalCount/truncated/digest）、trigger 优先级归并
+  （fallback > selection_mode_change > config_change > resume > initial > step）、
+  changedFields 固定枚举校验、`sealDecision` deepFreeze。
+- `src/plugin/audit-pipeline.ts`：固定提交协议
+  `pending → Session Event（durable ack）→ CAS committed`；任一步失败
+  `AUDIT_PERSIST_FAILED` fail closed（fake Provider 调用数为 0）；启动对账
+  `reconcile()`（补 append/补 commit/保留 pending + 告警）。
+  rc.8 SEAM-1/2（Session `ignorable` 写入 API 缺失）下默认
+  `NullSessionEventSink`（不破坏 DSH Session 持久化恢复，SQLite 双阶段照常），
+  内存 Session 场景用 `SessionStoreSink` 验证完整协议。见
+  docs/UPSTREAM_SEAMS.md 与 BLOCKED.md B-1。
+- storage migration v2/v3：`routing_decisions` 重建（decisionId PK、
+  audit_state、trigger/causes/changedFields/selection_mode/effective_strategy/
+  classifier_source/outcome/error_code、截断元数据；v1 备份表保留）、
+  `governor_kv`（configRevision/bootstrap/HMAC key）、`audit_log`、
+  `attempt_states`、`usage_events.usage_kind/parent_request_id`。
+
+### 21.2 配置权威与会话选择模式
+
+- SQLite 是治理策略唯一权威：bootstrap configRevision=1；有效管理写入与
+  新 revision、审计条目同事务提交（no-op 不递增）；expected-revision 冲突
+  返回 `REVISION_CONFLICT`；YAML 仅空库 bootstrap 一次并记录来源。
+- `governor.session.v1` 会话选择状态：`setSessionSelectionMode` 是
+  /model 与 Composer 共用的 Host 方法（selectionRevision 递增、
+  `SELECTION_REVISION_CONFLICT` 多标签页保护）；切换只影响下一 attempt
+  （causes 携带 selection_mode_change）；restore/fork 从事件流重建。
+
+### 21.3 管理面安全（GOV-SEC-001）
+
+- 方法级 capability 矩阵（governor.read/manage/audit），Host 端逐端点复核；
+  Bearer 认证（匿名 UNAUTHORIZED、权限不足 FORBIDDEN）；错误响应仅
+  {code, requestId}；请求体 256 KiB；CORS 默认不发头、显式 allowedOrigin
+  且绝不 `*`。
+- `compat_api` 默认 `enabled=false`（零新增监听端口）；显式开启仅监听
+  IPv4/IPv6 loopback（requireLoopback 拒绝非回环 peer）；token 未配置时
+  生成 256 bit 随机值落盘 owner-only（日志不打印 token）。
+- DSH webServer 前缀通道（受信面）默认授予 read（SEAM-3 阻断下
+  "DSH 登录主体解析"的显式降级，见 BLOCKED.md B-2）；manage/audit 仍需
+  Bearer。
+
+### 21.4 分类缓存与用量种类
+
+- `src/classifier/sqlite-cache.ts`：缓存键
+  `HMAC-SHA256(canonicalInput) + classifierRoute + promptVersion +
+  configRevision + tenantScope`（HMAC key 存 governor_kv 可轮换；整键哈希
+  入库保证任一成分变化即 miss）；TTL 7 天；single-flight 并发去重；
+  低置信度/失败/超时/非法 JSON 不缓存。
+- `usageKind=conversation|classifier` + `parentRequestId`：分类器调用
+  以 `governor-classifier:` 标记 sessionId 分流，关联父 request；
+  Requests（requestId 去重）与 Attempts（行数）双分母统计。
+
+### 21.5 运营（GOV-OPS）
+
+- `src/ops/export.ts`：CSV 注入转义（=+-@ 前缀单引号）、10,000 行/10 MiB
+  上限先到为准、稳定假名。
+- `src/ops/metrics.ts`：Estimated Credit Saving（反事实 BigInt 定点）、
+  Configured Quality Retention（配置分值估算）、Request Success Rate；
+  有效样本 <100 或 usage_missing >5% → insufficientSample（隐藏百分比）。
+
+### 21.6 已知上游阻断
+
+rc.8 公开接缝缺口（Session Event `ignorable` 写入、插件事件类型注册面、
+方法级 Remote capability、浏览器侧注册表的 Node 可测性）及可复现证据见
+docs/UPSTREAM_SEAMS.md；影响与缓解见 BLOCKED.md。

@@ -119,6 +119,15 @@ export interface GovernorConfig {
     readonly users: Readonly<Record<string, UserEntryConfig>>;
     readonly storage: StorageConfig;
     readonly ui: UiConfig;
+    readonly compatApi?: CompatApiConfig;
+}
+/** 兼容 API 配置（GOV-UI-001：默认禁用，显式开启时仅 loopback）。 */
+export interface CompatApiConfig {
+    readonly enabled: boolean;
+    readonly port?: number;
+    readonly listen?: '127.0.0.1' | '[::1]';
+    readonly token?: string;
+    readonly allowedOrigin?: string;
 }
 /** 配置验证错误，携带稳定错误码和配置路径。 */
 export declare class ConfigError extends Error {

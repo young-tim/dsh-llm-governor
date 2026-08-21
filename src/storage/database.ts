@@ -106,6 +106,103 @@ const MIGRATIONS: Migration[] = [
       `CREATE INDEX IF NOT EXISTS idx_decisions_request ON routing_decisions (request_id)`,
     ],
   },
+  {
+    // v2（GOV-DECISION/CONFIG/SEC/ATTEMPT）：统一 Decision 数据模型、配置
+    // revision 权威、管理审计与 attempt 生命周期。重建 routing_decisions 前
+    // 先备份旧表（GOV-STORAGE-001 AC 3），旧行的派生键回填、无法派生的
+    // 新字段保持 NULL（查询层显示 unknown，不伪造值）。
+    version: 2,
+    up: [
+      `ALTER TABLE routing_decisions RENAME TO routing_decisions_v1_backup`,
+      `CREATE TABLE routing_decisions (
+        decision_id TEXT PRIMARY KEY,
+        request_id TEXT NOT NULL,
+        fallback_index INTEGER NOT NULL,
+        session_id TEXT,
+        turn INTEGER,
+        step INTEGER,
+        decision_hash TEXT,
+        trigger TEXT,
+        causes_json TEXT,
+        changed_fields_json TEXT,
+        selection_mode TEXT,
+        effective_strategy TEXT,
+        classifier_source TEXT,
+        mode TEXT NOT NULL,
+        task_type TEXT,
+        complexity TEXT,
+        confidence REAL,
+        minimum_quality INTEGER,
+        candidates_json TEXT NOT NULL DEFAULT '[]',
+        candidates_total_count INTEGER,
+        candidates_truncated INTEGER NOT NULL DEFAULT 0,
+        candidates_truncated_digest TEXT,
+        excluded_json TEXT NOT NULL DEFAULT '[]',
+        excluded_total_count INTEGER,
+        excluded_truncated INTEGER NOT NULL DEFAULT 0,
+        excluded_truncated_digest TEXT,
+        selected_route TEXT,
+        outcome TEXT,
+        error_code TEXT,
+        audit_state TEXT NOT NULL DEFAULT 'committed',
+        config_revision INTEGER NOT NULL,
+        created_at TEXT NOT NULL,
+        UNIQUE (request_id, fallback_index)
+      )`,
+      `INSERT INTO routing_decisions (
+        decision_id, request_id, fallback_index, mode, task_type, complexity,
+        confidence, minimum_quality, candidates_json, excluded_json,
+        selected_route, outcome, audit_state, config_revision, created_at
+      )
+      SELECT
+        request_id || ':' || fallback_index, request_id, fallback_index, mode,
+        task_type, complexity, confidence, minimum_quality, candidates_json,
+        excluded_json, selected_route, 'selected', 'committed', config_revision,
+        created_at
+      FROM routing_decisions_v1_backup`,
+      `CREATE INDEX IF NOT EXISTS idx_decisions_request ON routing_decisions (request_id)`,
+      `CREATE INDEX IF NOT EXISTS idx_decisions_session ON routing_decisions (session_id, created_at)`,
+      `CREATE INDEX IF NOT EXISTS idx_decisions_created ON routing_decisions (created_at, decision_id)`,
+      `CREATE INDEX IF NOT EXISTS idx_decisions_audit_state ON routing_decisions (audit_state)`,
+      `CREATE TABLE IF NOT EXISTS governor_kv (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      )`,
+      `CREATE TABLE IF NOT EXISTS audit_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        actor TEXT NOT NULL,
+        action TEXT NOT NULL,
+        target TEXT NOT NULL,
+        changed_fields_json TEXT,
+        old_revision INTEGER,
+        new_revision INTEGER,
+        result TEXT NOT NULL,
+        error_code TEXT,
+        created_at TEXT NOT NULL
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_log (created_at)`,
+      `CREATE INDEX IF NOT EXISTS idx_audit_actor ON audit_log (actor, created_at)`,
+      `CREATE TABLE IF NOT EXISTS attempt_states (
+        request_id TEXT NOT NULL,
+        fallback_index INTEGER NOT NULL,
+        state TEXT NOT NULL,
+        provider_request_id TEXT,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (request_id, fallback_index)
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_attempt_states_state ON attempt_states (state)`,
+    ],
+  },
+  {
+    // v3（GOV-USAGE-001）：Usage 增加 usage_kind（conversation/classifier）
+    // 与 parent_request_id（分类器调用关联父请求）。
+    version: 3,
+    up: [
+      `ALTER TABLE usage_events ADD COLUMN usage_kind TEXT NOT NULL DEFAULT 'conversation'`,
+      `ALTER TABLE usage_events ADD COLUMN parent_request_id TEXT`,
+      `CREATE INDEX IF NOT EXISTS idx_usage_kind ON usage_events (usage_kind, created_at)`,
+    ],
+  },
 ];
 
 /** Governor SQLite 数据库句柄。 */

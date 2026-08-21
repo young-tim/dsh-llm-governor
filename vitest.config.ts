@@ -1,7 +1,12 @@
 import { defineConfig } from 'vitest/config';
 
-/** Vitest 配置：使用 projects 区分 rc.8 合同测试与单元/集成/UI/Eval 测试。 */
+/**
+ * Vitest 配置：使用 projects 区分 rc.8 合同测试与单元/集成/UI/Eval 测试。
+ * oxc target 固定为 es2022：esnext 下 oxc 不降级 TC39 装饰器语法，
+ * 而 Node 24 尚不支持原生装饰器，会导致含 @Remote() 等装饰器的模块无法加载。
+ */
 export default defineConfig({
+  oxc: { target: 'es2022' },
   test: {
     projects: [
       {

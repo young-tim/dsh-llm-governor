@@ -536,10 +536,11 @@ describe('GovernorService/auto routing + setClassification', () => {
       )) as { provider: string; model: string };
       // auto 路由应返回有效配置
       expect(config.provider).toBe('fake-provider');
-      // 决策记录的 mode 应为 auto
+      // 决策记录：未分类回退 confidence 0.5 < 阈值 0.7 → 实际执行 quality_first
       const decisions = await h.governor!.listDecisions();
-      expect(decisions).toHaveLength(1);
-      expect(decisions[0]!.mode).toBe('auto');
+      expect(decisions.items).toHaveLength(1);
+      expect(decisions.items[0]!.mode).toBe('quality_first');
+      expect(decisions.items[0]!.selectionMode).toBe('auto');
     } finally {
       await h.dispose();
     }
@@ -580,7 +581,7 @@ describe('GovernorService/auto routing + setClassification', () => {
       expect(config.provider).toBe('fake-provider');
       // 决策已记录
       const decisions = await h.governor!.listDecisions();
-      expect(decisions).toHaveLength(1);
+      expect(decisions.items).toHaveLength(1);
     } finally {
       await h.dispose();
     }

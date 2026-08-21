@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { GovernorDatabase } from '../../src/storage/database.js';
 import { GovernorRepository } from '../../src/storage/repository.js';
+import { sealDecision } from '../../src/routing/decision.js';
 import { bootFake, modelInfo } from '../contracts/harness.js';
 import { successScript } from '../../src/dsh-adapter/fake-adapter.js';
 import { monthWindow, monthKey, checkQuota } from '../../src/credits/index.js';
@@ -120,18 +121,23 @@ describe('事件重放幂等', () => {
   it('重复插入相同 request_id+fallback_index 的 decision 被忽略', () => {
     const db = new GovernorDatabase(join(dir, 'replay2.db'));
     const repo = new GovernorRepository(db);
-    const decision = {
+    const decision = sealDecision({
       requestId: 'req-2',
+      turn: 1,
+      step: 1,
       fallbackIndex: 0,
-      mode: 'quality_first' as const,
+      causes: ['initial'],
+      changedFields: [],
+      selectionMode: 'auto',
+      effectiveStrategy: 'quality_first',
       candidates: [{ routeId: 'p:m', quality: 90, multiplierPpm: 1000000 }],
       excluded: [],
-      selected: 'p:m',
+      outcome: 'selected',
+      selectedRoute: 'p:m',
       configRevision: 1,
-      createdAt: '2026-08-20T00:00:00Z',
-    };
-    repo.insertDecision(decision);
-    repo.insertDecision(decision); // 重复
+    });
+    expect(repo.insertSealedDecision(decision, { sessionId: 's1' })).toBe('inserted');
+    expect(repo.insertSealedDecision(decision, { sessionId: 's1' })).toBe('exists');
     const decisions = repo.getDecisions('req-2');
     expect(decisions).toHaveLength(1);
     db.close();
@@ -175,8 +181,8 @@ describe('并发请求', () => {
       expect((r2 as { model: string }).model).toBe('model-a');
       // 两个独立的决策
       const decisions = await h.governor!.listDecisions();
-      expect(decisions).toHaveLength(2);
-      expect(decisions[0]!.requestId).not.toBe(decisions[1]!.requestId);
+      expect(decisions.items).toHaveLength(2);
+      expect(decisions.items[0]!.requestId).not.toBe(decisions.items[1]!.requestId);
     } finally {
       await h.dispose();
     }

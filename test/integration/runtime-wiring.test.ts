@@ -249,7 +249,8 @@ describe('Quality First / Credit First 使用分类任务类型', () => {
 
       // 决策记录确认使用了 coding 任务类型
       const decisions = await h.governor!.listDecisions();
-      expect(decisions[0]!.selectedModel).toBe('model-b');
+      expect(decisions.items[0]!.selectedRoute).toBe('fake-provider:model-b');
+      expect(decisions.items[0]!.taskType).toBe('coding');
     } finally {
       await h.dispose();
     }

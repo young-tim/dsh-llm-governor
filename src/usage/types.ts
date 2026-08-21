@@ -14,6 +14,9 @@ import type { RoutingMode, TaskType } from '../index.js';
 /** Attempt 来源标识。只有确认到达 Provider 才标记 'provider'。 */
 export type AttemptOrigin = 'provider' | 'middleware_or_unknown';
 
+/** GOV-USAGE-001：用量种类（用户对话成本 vs 路由分类成本）。 */
+export type UsageKind = 'conversation' | 'classifier';
+
 /**
  * 完整的 Usage 事件。
  *
@@ -27,6 +30,10 @@ export interface UsageEvent {
   requestId: string;
   /** DSH Session ID。 */
   sessionId: string;
+  /** 用量种类：conversation（用户对话）或 classifier（路由分类，GOV-USAGE-001）。 */
+  usageKind?: UsageKind;
+  /** classifier 用量关联的父 requestId（分类器是父请求的辅助调用）。 */
+  parentRequestId?: string;
   /** 当前对话轮次。 */
   turn: number;
   /** 当前步骤序号。 */

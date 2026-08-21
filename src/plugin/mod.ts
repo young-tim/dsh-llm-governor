@@ -2,7 +2,7 @@
  * Governor Cordis 插件：注册事件监听器，将 DSH 事件路由到 Governor 服务。
  * DSH 专属代码只能进入 src/dsh-adapter/ 与 src/plugin/。
  */
-import { mkdirSync, readFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import type { Context } from '../dsh-adapter/mod.js';
@@ -13,6 +13,7 @@ import type {
   LlmFailure,
 } from '../dsh-adapter/mod.js';
 import { GovernorService } from './service.js';
+import { uuidv7 } from '../routing/decision.js';
 import type { GovernorPluginConfig, GovernorServiceOptions } from './service.js';
 import { observeStream } from '../usage/observer.js';
 import type { UsageEvent } from '../usage/types.js';
@@ -189,6 +190,9 @@ function createLlmClassifierBackend(
       const stream = ctx.llm.stream({
         provider,
         model,
+        // GOV-USAGE-001：分类器调用携带标记 sessionId，llm/stream 观察者据此
+        // 将 usage 记为 classifier 用量（不占用 conversation 的 fallbackIndex）。
+        sessionId: `governor-classifier:${uuidv7()}`,
         messages: [
           { role: 'system', content: [{ type: 'text', text: prompt }] },
           { role: 'user', content: [{ type: 'text', text }] },
@@ -301,6 +305,21 @@ function toRuntimeConfig(resolved: GovernorConfig): GovernorPluginConfig {
       enabled: resolved.ui.enabled,
       ...(resolved.ui.port > 0 ? { port: resolved.ui.port } : {}),
     },
+    ...(resolved.compatApi !== undefined
+      ? {
+          compatApi: {
+            enabled: resolved.compatApi.enabled,
+            ...(resolved.compatApi.port !== undefined ? { port: resolved.compatApi.port } : {}),
+            ...(resolved.compatApi.listen !== undefined
+              ? { listen: resolved.compatApi.listen }
+              : {}),
+            ...(resolved.compatApi.token !== undefined ? { token: resolved.compatApi.token } : {}),
+            ...(resolved.compatApi.allowedOrigin !== undefined
+              ? { allowedOrigin: resolved.compatApi.allowedOrigin }
+              : {}),
+          },
+        }
+      : {}),
   };
 }
 
@@ -315,6 +334,275 @@ function toRuntimeConfig(resolved: GovernorConfig): GovernorPluginConfig {
  * - 注册 agent/pre-step、agent/request、llm/stream、agent/request-error 监听器。
  * - UI 挂载：有 ctx.webServer 时注册 /governor 前缀路由，否则按 ui.port 独立监听。
  */
+/**
+ * 事件接线：把 Governor service 挂到 DSH 事件瀑布（pre-step/request/stream/
+ * request-error/session 生命周期），并执行启动对账。
+ *
+ * 从 apply 提取为独立导出函数：测试可以自组环境（LlmRuntime + FakeAdapter +
+ * SessionStore + 自定义 repository/sink 注入故障）后复用同一接线合同。
+ *
+ * @param ctx - Cordis 上下文。
+ * @param service - 已构造的 Governor 服务实例。
+ */
+export async function wireGovernorEvents(ctx: Context, service: GovernorService): Promise<void> {
+  // 4. llm/adapters-updated：刷新模型目录
+  ctx.on(
+    'llm/adapters-updated' as never,
+    (() => {
+      void service
+        .refreshModelDirectory(
+          () => ctx.llm.listProviders(),
+          (p) => ctx.llm.listModels(p),
+        )
+        .catch(() => {});
+    }) as never,
+    { global: true } as never,
+  );
+
+  // 5. agent/pre-step：读取本步新消息，执行 Hint/Rule/LLM 自动分类，
+  //    并提取能力/模态要求（图片输入 → vision 能力 + image 模态）
+  ctx.on(
+    'agent/pre-step' as never,
+    (async (
+      payload: {
+        agent: { id: string };
+        messages?: ReadonlyArray<{
+          role?: string;
+          content?: ReadonlyArray<{ type?: string; text?: string }>;
+        }>;
+        turn: number;
+        step: number;
+      },
+      next: () => Promise<unknown>,
+    ) => {
+      const sessionId = payload.agent.id;
+      const input = extractClassifyInput((payload.messages ?? []) as readonly unknown[]);
+      await service.classifyStep(sessionId, payload.turn, payload.step, input);
+      return next();
+    }) as never,
+    { global: true } as never,
+  );
+
+  // 6. agent/request：读取下游配置，执行准入并返回 provider/model。
+  //    决策双写协议（pending → Session Event → committed）完成后才返回；
+  //    审计失败时 fail closed（AUDIT_PERSIST_FAILED），不产生 Provider 调用。
+  ctx.on(
+    'agent/request' as never,
+    (async (
+      payload: { agent: { id: string }; turn: number; step: number; signal: AbortSignal },
+      next: () => Promise<LlmCallConfig>,
+    ) => {
+      const sessionId = payload.agent.id;
+      const defaultConfig = await next();
+      const { config } = await service.selectModel(
+        sessionId,
+        payload.turn,
+        payload.step,
+        defaultConfig,
+      );
+      return config;
+    }) as never,
+    { global: true } as never,
+  );
+
+  // 7. llm/stream：观察真实 attempt、Token、finish、时延，不消费流。
+  //    首个语义 chunk 交付时标记部分输出保护（此后不再透明切换模型）。
+  //    attempt 生命周期：调用边界前记录 dispatch_started，结束时收敛 terminal。
+  //    GOV-USAGE-001：sessionId 以 governor-classifier: 开头的调用记为
+  //    classifier 用量（关联父 request，不占 conversation fallbackIndex）。
+  ctx.on(
+    'llm/stream' as never,
+    ((options: GenerateOptions, next: () => AsyncIterable<StreamChunk>) => {
+      const inner = next();
+      const sessionId = (options.sessionId as string | undefined) ?? 'unknown';
+      const isClassifierCall = sessionId.startsWith('governor-classifier:');
+      if (isClassifierCall) {
+        // 分类器调用：观察 usage 但不进入请求状态机（独立 requestId 关联父请求）
+        const parentId = service.getCurrentParentRequestId(sessionId);
+        return observeStream(
+          {
+            provider: options.provider,
+            model: options.model,
+            sessionId,
+            turn: 0,
+            step: 0,
+            requestId: sessionId.slice('governor-classifier:'.length),
+            fallbackIndex: 0,
+            userId:
+              service.getIdentity(sessionId.slice('governor-classifier:'.length))?.userId ??
+              'unknown',
+            routingMode: 'auto',
+          },
+          inner as AsyncIterable<{
+            type: string;
+            usage?: {
+              inputTokens: number;
+              outputTokens: number;
+              cacheReadTokens?: number;
+              cacheWriteTokens?: number;
+            };
+            reason?: { kind: string; failure?: { code: string; status?: number } };
+          }>,
+          (event: UsageEvent) => {
+            const enriched: UsageEvent = {
+              ...event,
+              usageKind: 'classifier',
+              ...(parentId !== undefined ? { parentRequestId: parentId } : {}),
+              creditNanos: computeCreditNanos(
+                {
+                  inputTokens: event.inputTokens,
+                  outputTokens: event.outputTokens,
+                  ...(event.cacheReadTokens ? { cacheReadTokens: event.cacheReadTokens } : {}),
+                  ...(event.cacheWriteTokens ? { cacheWriteTokens: event.cacheWriteTokens } : {}),
+                },
+                service.getMultiplierPpm(options.provider, options.model),
+                service.tokensPerCredit,
+              ),
+            };
+            service.recordUsage(enriched);
+          },
+        ) as unknown as AsyncIterable<StreamChunk>;
+      }
+      const ts = service.getCurrentTurnStep(sessionId);
+      const turn = ts?.turn ?? 0;
+      const step = ts?.step ?? 0;
+      const requestId = service.getRequestId(sessionId, turn, step) ?? 'unknown';
+      const fallbackIndex = service.getFallbackIndex(sessionId, turn, step);
+      const identity = service.getIdentity(sessionId);
+      // 计费参数与路由模式来自服务配置，不再硬编码
+      const tokensPerCredit = service.tokensPerCredit;
+      const multiplierPpm = service.getMultiplierPpm(options.provider, options.model);
+      const routingMode = service.getRoutingMode(sessionId, turn, step);
+      // Provider 调用边界前记录 dispatch_started（GOV-ATTEMPT-001 AC 1）
+      service.markDispatchStarted(sessionId, turn, step);
+
+      return observeStream(
+        {
+          provider: options.provider,
+          model: options.model,
+          sessionId,
+          turn,
+          step,
+          requestId,
+          fallbackIndex,
+          userId: identity?.userId ?? 'unknown',
+          routingMode,
+          // 部分输出保护接线：首个语义 chunk 交付后禁止透明 Fallback（§11）
+          onPartialOutput: () => service.markPartialOutput(sessionId, turn, step),
+        },
+        inner as AsyncIterable<{
+          type: string;
+          usage?: {
+            inputTokens: number;
+            outputTokens: number;
+            cacheReadTokens?: number;
+            cacheWriteTokens?: number;
+          };
+          reason?: { kind: string; failure?: { code: string; status?: number } };
+        }>,
+        (event: UsageEvent) => {
+          // 按模型策略倍率计算 credits
+          const enriched: UsageEvent = {
+            ...event,
+            creditNanos: computeCreditNanos(
+              {
+                inputTokens: event.inputTokens,
+                outputTokens: event.outputTokens,
+                ...(event.cacheReadTokens ? { cacheReadTokens: event.cacheReadTokens } : {}),
+                ...(event.cacheWriteTokens ? { cacheWriteTokens: event.cacheWriteTokens } : {}),
+              },
+              multiplierPpm,
+              tokensPerCredit,
+            ),
+          };
+          service.recordUsage(enriched);
+          // attempt 收敛 terminal 状态（completed/failed；重复回调幂等）
+          service.markAttemptTerminal(
+            sessionId,
+            turn,
+            step,
+            enriched.success ? 'completed' : 'failed',
+          );
+        },
+      ) as unknown as AsyncIterable<StreamChunk>;
+    }) as never,
+    { global: true } as never,
+  );
+
+  // 8. agent/request-error：判断失败能否 Fallback，排除失败路由并返回 retry。
+  //    Recovery Owner 唯一性由 bundle 组合保证（cordis.patch.yml 禁用基础 llm-retry）。
+  ctx.on(
+    'agent/request-error' as never,
+    (async (
+      payload: {
+        agent: { id: string };
+        turn: number;
+        step: number;
+        provider: string;
+        failure: LlmFailure;
+      },
+      next: () => Promise<unknown>,
+    ) => {
+      const sessionId = payload.agent.id;
+      const routeId =
+        service.getSelectedRoute(sessionId, payload.turn, payload.step) ?? payload.provider;
+      const shouldRetry = service.excludeRouteAndCheckRetry(
+        sessionId,
+        payload.turn,
+        payload.step,
+        routeId,
+        payload.failure,
+      );
+      if (shouldRetry) {
+        return { kind: 'retry' as const };
+      }
+      return next();
+    }) as never,
+    { global: true } as never,
+  );
+
+  // 8.5 session/event：请求状态生命周期清理（GOV-STATE-001）。
+  //     step/end 清理已完成 request state；turn/end 兜底清理该 turn；
+  //     session dispose 兜底清理会话级状态。清理不删除已提交的
+  //     Decision/Usage；重复/乱序通知幂等。
+  ctx.on(
+    'session/event' as never,
+    ((
+      session: { id: string },
+      event: { type: string; data?: { turn?: number; step?: number } },
+    ) => {
+      if (
+        event.type === 'step/end' &&
+        event.data?.turn !== undefined &&
+        event.data?.step !== undefined
+      ) {
+        service.handleStepEnd(session.id, event.data.turn, event.data.step);
+      } else if (event.type === 'turn/end' && event.data?.turn !== undefined) {
+        service.handleTurnEnd(session.id, event.data.turn);
+      }
+    }) as never,
+    { global: true } as never,
+  );
+  ctx.on(
+    'session/disposed' as never,
+    ((session: { id: string }) => {
+      service.handleSessionDispose(session.id);
+    }) as never,
+    { global: true } as never,
+  );
+
+  // 8.6 启动对账：扫描 pending 决策并补齐/告警（GOV-TRACE-001 §3.1）。
+  //     Session Event 已存在且 hash 一致 → 补 commit；不存在且可写 → 补
+  //     append 后 commit；不可写或 hash 冲突 → 保留 pending（诊断告警）。
+  const reconcile = await service.reconcileAudit();
+  if (reconcile.pending > 0) {
+    ctx.logger?.warn?.(
+      `governor audit reconcile: ${reconcile.committed} committed, ${reconcile.pending} left pending` +
+        (reconcile.conflicts.length > 0 ? `, conflicts: ${reconcile.conflicts.join(', ')}` : ''),
+    );
+  }
+}
+
 export const GovernorPlugin = {
   name: 'dsh-llm-governor',
   inject: ['llm'],
@@ -368,163 +656,30 @@ export const GovernorPlugin = {
       // DSH 未就绪时保留配置构建的初始目录
     }
 
-    // 4. llm/adapters-updated：刷新模型目录
-    ctx.on(
-      'llm/adapters-updated' as never,
-      (() => {
-        void service
-          .refreshModelDirectory(
-            () => ctx.llm.listProviders(),
-            (p) => ctx.llm.listModels(p),
-          )
-          .catch(() => {});
-      }) as never,
-      { global: true } as never,
-    );
+    // 4-8.6 事件接线与启动对账（提取为可复用函数，测试可自组环境注入故障）
+    await wireGovernorEvents(ctx, service);
 
-    // 5. agent/pre-step：读取本步新消息，执行 Hint/Rule/LLM 自动分类，
-    //    并提取能力/模态要求（图片输入 → vision 能力 + image 模态）
-    ctx.on(
-      'agent/pre-step' as never,
-      (async (
-        payload: {
-          agent: { id: string };
-          messages?: ReadonlyArray<{
-            role?: string;
-            content?: ReadonlyArray<{ type?: string; text?: string }>;
-          }>;
-          turn: number;
-          step: number;
-        },
-        next: () => Promise<unknown>,
-      ) => {
-        const sessionId = payload.agent.id;
-        const input = extractClassifyInput((payload.messages ?? []) as readonly unknown[]);
-        await service.classifyStep(sessionId, payload.turn, payload.step, input);
-        return next();
-      }) as never,
-      { global: true } as never,
-    );
-
-    // 6. agent/request：读取下游配置，执行准入并返回 provider/model
-    ctx.on(
-      'agent/request' as never,
-      (async (
-        payload: { agent: { id: string }; turn: number; step: number; signal: AbortSignal },
-        next: () => Promise<LlmCallConfig>,
-      ) => {
-        const sessionId = payload.agent.id;
-        const defaultConfig = await next();
-        const { config } = service.selectModel(
-          sessionId,
-          payload.turn,
-          payload.step,
-          defaultConfig,
-        );
-        return config;
-      }) as never,
-      { global: true } as never,
-    );
-
-    // 7. llm/stream：观察真实 attempt、Token、finish、时延，不消费流。
-    //    首个语义 chunk 交付时标记部分输出保护（此后不再透明切换模型）。
-    ctx.on(
-      'llm/stream' as never,
-      ((options: GenerateOptions, next: () => AsyncIterable<StreamChunk>) => {
-        const inner = next();
-        const sessionId = (options.sessionId as string | undefined) ?? 'unknown';
-        const ts = service.getCurrentTurnStep(sessionId);
-        const turn = ts?.turn ?? 0;
-        const step = ts?.step ?? 0;
-        const requestId = service.getRequestId(sessionId, turn, step) ?? 'unknown';
-        const fallbackIndex = service.getFallbackIndex(sessionId, turn, step);
-        const identity = service.getIdentity(sessionId);
-        // 计费参数与路由模式来自服务配置，不再硬编码
-        const tokensPerCredit = service.tokensPerCredit;
-        const multiplierPpm = service.getMultiplierPpm(options.provider, options.model);
-        const routingMode = service.getRoutingMode(sessionId, turn, step);
-
-        return observeStream(
-          {
-            provider: options.provider,
-            model: options.model,
-            sessionId,
-            turn,
-            step,
-            requestId,
-            fallbackIndex,
-            userId: identity?.userId ?? 'unknown',
-            routingMode,
-            // 部分输出保护接线：首个语义 chunk 交付后禁止透明 Fallback（§11）
-            onPartialOutput: () => service.markPartialOutput(sessionId, turn, step),
-          },
-          inner as AsyncIterable<{
-            type: string;
-            usage?: {
-              inputTokens: number;
-              outputTokens: number;
-              cacheReadTokens?: number;
-              cacheWriteTokens?: number;
-            };
-            reason?: { kind: string; failure?: { code: string; status?: number } };
-          }>,
-          (event: UsageEvent) => {
-            // 按模型策略倍率计算 credits
-            const enriched: UsageEvent = {
-              ...event,
-              creditNanos: computeCreditNanos(
-                {
-                  inputTokens: event.inputTokens,
-                  outputTokens: event.outputTokens,
-                  ...(event.cacheReadTokens ? { cacheReadTokens: event.cacheReadTokens } : {}),
-                  ...(event.cacheWriteTokens ? { cacheWriteTokens: event.cacheWriteTokens } : {}),
-                },
-                multiplierPpm,
-                tokensPerCredit,
-              ),
-            };
-            service.recordUsage(enriched);
-          },
-        ) as unknown as AsyncIterable<StreamChunk>;
-      }) as never,
-      { global: true } as never,
-    );
-
-    // 8. agent/request-error：判断失败能否 Fallback，排除失败路由并返回 retry。
-    //    Recovery Owner 唯一性由 bundle 组合保证（cordis.patch.yml 禁用基础 llm-retry）。
-    ctx.on(
-      'agent/request-error' as never,
-      (async (
-        payload: {
-          agent: { id: string };
-          turn: number;
-          step: number;
-          provider: string;
-          failure: LlmFailure;
-        },
-        next: () => Promise<unknown>,
-      ) => {
-        const sessionId = payload.agent.id;
-        const routeId =
-          service.getSelectedRoute(sessionId, payload.turn, payload.step) ?? payload.provider;
-        const shouldRetry = service.excludeRouteAndCheckRetry(
-          sessionId,
-          payload.turn,
-          payload.step,
-          routeId,
-          payload.failure,
-        );
-        if (shouldRetry) {
-          return { kind: 'retry' as const };
-        }
-        return next();
-      }) as never,
-      { global: true } as never,
-    );
-
-    // 9. UI 与入站绑定挂载：优先注册到 DSH webServer（受信 Host 面），
-    //    无 webServer 且配置了 ui.port 时回退为独立本地服务器。
-    const handle = createGovernorRequestHandler(service, {});
+    // 9. UI 与入站绑定挂载（GOV-UI-001）：
+    //    - 默认只注册到 DSH webServer 的 /governor 前缀（受信 Host 通道），
+    //      不新增任何监听端口。
+    //    - 独立监听仅在显式 compatApi.enabled=true 时启动，且只监听
+    //      IPv4/IPv6 loopback；Bearer token 未配置时自动生成 256 bit 随机值
+    //      写入 $DSH_HOME/dsh-llm-governor/compat-token（owner-only，日志不打印）。
+    const handle = createGovernorRequestHandler(service, {
+      ...(runtimeConfig.compatApi?.token !== undefined
+        ? {
+            actors: [
+              {
+                token: runtimeConfig.compatApi.token,
+                capabilities: ['governor.read', 'governor.manage', 'governor.audit'],
+              },
+            ],
+          }
+        : {}),
+      ...(runtimeConfig.compatApi?.allowedOrigin !== undefined
+        ? { allowedOrigin: runtimeConfig.compatApi.allowedOrigin }
+        : {}),
+    });
     if (runtimeConfig.ui?.enabled !== false) {
       const webServer = (
         ctx as unknown as {
@@ -540,24 +695,65 @@ export const GovernorPlugin = {
         }
       ).get?.('webServer');
       if (webServer !== undefined) {
+        // DSH webServer 受信前缀通道：无凭证请求授予默认 read（原生页面可读；
+        // manage/audit 仍需 Bearer token——GOV-UI-001 AC 5 / SEAM-3 降级，B-2）。
+        const trustedHandle = createGovernorRequestHandler(service, {
+          ...(runtimeConfig.compatApi?.token !== undefined
+            ? {
+                actors: [
+                  {
+                    token: runtimeConfig.compatApi.token,
+                    capabilities: ['governor.read', 'governor.manage', 'governor.audit'],
+                  },
+                ],
+              }
+            : {}),
+          defaultCapabilities: ['governor.read'],
+        });
         const dispose = webServer.register({
           kind: 'prefix',
           path: GOVERNOR_WEB_PREFIX,
           handler: (req: never, res: never) => {
-            void handleGovernorWeb(req, res, service, identityProvider).catch(() => {});
+            void handleGovernorWeb(req, res, service, identityProvider, trustedHandle).catch(
+              () => {},
+            );
           },
         });
         ctx.effect(() => dispose);
-      } else if (runtimeConfig.ui?.port !== undefined) {
-        const { createGovernorApiServer } = await import('../ui/api.js');
-        const server = createGovernorApiServer(service, {});
-        server.listen(runtimeConfig.ui.port, '127.0.0.1');
+      } else if (runtimeConfig.compatApi?.enabled === true) {
+        // 兼容 API：显式开启，仅 loopback（GOV-UI-001 AC 4）。
+        const { createGovernorApiServer, generateCompatToken } = await import('../ui/api.js');
+        const token = runtimeConfig.compatApi.token ?? generateCompatToken();
+        if (runtimeConfig.compatApi.token === undefined) {
+          // 自动生成的 token 落盘（owner-only），启动日志只提示已启用、不打印 token。
+          const tokenPath = join(dirname(defaultDbPath()), 'compat-token');
+          mkdirSync(dirname(tokenPath), { recursive: true, mode: 0o700 });
+          writeFileSync(tokenPath, token, { mode: 0o600 });
+          ctx.logger?.info?.(
+            `governor compat API enabled (loopback only); token written to ${tokenPath}`,
+          );
+        } else {
+          ctx.logger?.info?.('governor compat API enabled (loopback only)');
+        }
+        const server = createGovernorApiServer(service, {
+          actors: [{ token, capabilities: ['governor.read', 'governor.manage', 'governor.audit'] }],
+          ...(runtimeConfig.compatApi.allowedOrigin !== undefined
+            ? { allowedOrigin: runtimeConfig.compatApi.allowedOrigin }
+            : {}),
+        });
+        // Node listen 的 host 参数不接受带方括号的 IPv6 字面量（配置沿用 [::1] 表示法）
+        const listen = runtimeConfig.compatApi.listen === '[::1]' ? '::1' : '127.0.0.1';
+        server.listen(runtimeConfig.compatApi.port ?? 0, listen);
+        const address = server.address();
+        ctx.logger?.info?.(
+          `governor compat API listening on ${listen}:${typeof address === 'object' && address !== null ? address.port : (runtimeConfig.compatApi.port ?? 0)}`,
+        );
         ctx.effect(() => () => void server.close(() => {}));
       }
     }
 
     /**
-     * webServer 前缀路由处理器：常规请求交给 API 处理器；
+     * webServer 前缀路由处理器：常规请求交给 API 处理器（受信通道默认 read）；
      * POST /api/bind 是 header/jwt 模式的入站身份绑定端点（仅本地回环可信）。
      */
     async function handleGovernorWeb(
@@ -565,6 +761,7 @@ export const GovernorPlugin = {
       res: unknown,
       svc: GovernorService,
       provider: IdentityProvider | undefined,
+      trustedHandle?: (req: never, res: never, basePath?: string) => Promise<void>,
     ): Promise<void> {
       const request = req as {
         method?: string;
@@ -639,8 +836,9 @@ export const GovernorPlugin = {
         return;
       }
 
-      // 其余请求交给通用 API 处理器（剥离 /governor 前缀）
-      await handle(request as never, response as never, GOVERNOR_WEB_PREFIX);
+      // 其余请求交给通用 API 处理器（剥离 /governor 前缀；受信通道默认 read）
+      const delegate = trustedHandle ?? handle;
+      await delegate(request as never, response as never, GOVERNOR_WEB_PREFIX);
     }
   },
 };

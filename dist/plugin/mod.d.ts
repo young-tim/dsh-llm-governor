@@ -1,4 +1,5 @@
 import type { Context } from '../dsh-adapter/mod.js';
+import { GovernorService } from './service.js';
 import type { GovernorPluginConfig } from './service.js';
 export type { TaskClassifier, RoutingStrategy, RoutingContext, ModelQualityProvider, } from '../extensions/registry.js';
 export { GovernorExtensionRegistry } from '../extensions/registry.js';
@@ -14,6 +15,17 @@ export type { IdentityProvider } from '../identity/types.js';
  * - 注册 agent/pre-step、agent/request、llm/stream、agent/request-error 监听器。
  * - UI 挂载：有 ctx.webServer 时注册 /governor 前缀路由，否则按 ui.port 独立监听。
  */
+/**
+ * 事件接线：把 Governor service 挂到 DSH 事件瀑布（pre-step/request/stream/
+ * request-error/session 生命周期），并执行启动对账。
+ *
+ * 从 apply 提取为独立导出函数：测试可以自组环境（LlmRuntime + FakeAdapter +
+ * SessionStore + 自定义 repository/sink 注入故障）后复用同一接线合同。
+ *
+ * @param ctx - Cordis 上下文。
+ * @param service - 已构造的 Governor 服务实例。
+ */
+export declare function wireGovernorEvents(ctx: Context, service: GovernorService): Promise<void>;
 export declare const GovernorPlugin: {
     name: string;
     inject: string[];

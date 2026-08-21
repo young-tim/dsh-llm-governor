@@ -1,6 +1,8 @@
 /**
- * UI 浏览器测试：验证 Models/Users/Usage 三页加载、编辑、筛选、未授权拒绝，且 console error=0。
+ * UI 浏览器测试（GOV-SEC-001 收敛版）：验证 Models/Users/Usage 三页加载、
+ * 编辑、筛选、未授权拒绝（401/403 capability 矩阵），且 console error=0。
  * 使用 Playwright chromium。不直连 SQLite（只通过 GovernorService API）。
+ * Bearer token 通过 localStorage（governor-token）注入页面。
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { chromium } from 'playwright';
@@ -9,6 +11,9 @@ import { bootFake, modelInfo } from '../contracts/harness.js';
 import type { FakeHarness } from '../contracts/harness.js';
 import { createGovernorApiServer } from '../../src/ui/api.js';
 import type { Server } from 'node:http';
+
+/** 管理员 Bearer token（read+manage+audit）。 */
+const ADMIN_TOKEN = 'admin-token-0123456789abcdef0123456789abcdef';
 
 let browser: Browser;
 let harness: FakeHarness;
@@ -32,11 +37,13 @@ beforeAll(async () => {
         local: { allow: [], monthly_credits: 100 },
       },
       fallback: { enabled: true, max_attempts: 2 },
-      identity: { provider: 'local', local_user_id: 'local' },
+      identity: { provider: 'local' as const, local_user_id: 'local' },
     },
   );
   await harness.governor!.bindIdentity('session-1', { userId: 'user-1' });
-  server = createGovernorApiServer(harness.governor!, { adminToken: 'test-admin-token' });
+  server = createGovernorApiServer(harness.governor!, {
+    actors: [{ token: ADMIN_TOKEN, capabilities: ['governor.read', 'governor.manage', 'governor.audit'] }],
+  });
   await new Promise<void>((resolve) => {
     server.listen(0, '127.0.0.1', () => {
       const addr = server.address();
@@ -53,7 +60,7 @@ afterAll(async () => {
   await harness?.dispose().catch(() => {});
 });
 
-/** 新建页面并收集 console 错误。 */
+/** 新建页面并收集 console 错误；注入 Bearer token 到 localStorage。 */
 async function newPage(): Promise<{ page: Page; errors: string[] }> {
   const page = await browser.newPage();
   const errors: string[] = [];
@@ -61,6 +68,9 @@ async function newPage(): Promise<{ page: Page; errors: string[] }> {
     if (msg.type() === 'error') errors.push(msg.text());
   });
   page.on('pageerror', (err) => errors.push(err.message));
+  await page.addInitScript((token) => {
+    localStorage.setItem('governor-token', token);
+  }, ADMIN_TOKEN);
   return { page, errors };
 }
 
@@ -115,8 +125,8 @@ describe('Usage 页面', () => {
   });
 });
 
-describe('未授权拒绝', () => {
-  it('无 admin token 的 PATCH 请求被拒绝（403）', async () => {
+describe('未授权拒绝（GOV-SEC-001 capability 矩阵）', () => {
+  it('无 token 的 PATCH 请求被拒绝（401 UNAUTHORIZED）', async () => {
     const { page, errors } = await apiPage();
     try {
       const res = await page.request.fetch(
@@ -127,21 +137,21 @@ describe('未授权拒绝', () => {
           data: { enabled: false },
         },
       );
-      expect(res.status()).toBe(403);
+      expect(res.status()).toBe(401);
     } finally {
       await page.close();
     }
     expect(errors).toHaveLength(0);
   });
 
-  it('有 admin token 的 PATCH 请求成功（200）', async () => {
+  it('有 Bearer token 的 PATCH 请求成功（200）', async () => {
     const { page, errors } = await apiPage();
     try {
       const res = await page.request.fetch(
         `${baseUrl}/api/models/${encodeURIComponent('fake-provider:model-a')}`,
         {
           method: 'PATCH',
-          headers: { 'Content-Type': 'application/json', 'X-Governor-Admin': 'test-admin-token' },
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${ADMIN_TOKEN}` },
           data: { enabled: true },
         },
       );
@@ -152,7 +162,7 @@ describe('未授权拒绝', () => {
     expect(errors).toHaveLength(0);
   });
 
-  it('普通 user_id 不能获得管理写权限', async () => {
+  it('普通 user_id 不能获得管理写权限（401）', async () => {
     const { page, errors } = await apiPage();
     try {
       const res = await page.request.fetch(`${baseUrl}/api/users/${encodeURIComponent('local')}`, {
@@ -160,7 +170,7 @@ describe('未授权拒绝', () => {
         headers: { 'Content-Type': 'application/json' },
         data: { monthlyCredits: 999999 },
       });
-      expect(res.status()).toBe(403);
+      expect(res.status()).toBe(401);
     } finally {
       await page.close();
     }

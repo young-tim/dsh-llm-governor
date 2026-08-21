@@ -5,9 +5,10 @@
 import { Service } from '../dsh-adapter/mod.js';
 import type { Context } from '../dsh-adapter/mod.js';
 import type { LlmCallConfig, LlmFailure, LlmModelInfo } from '../dsh-adapter/mod.js';
-import type { RoutingMode } from '../index.js';
-import type { GovernorRepository } from '../storage/repository.js';
+import type { TaskType, RoutingMode } from '../index.js';
+import type { GovernorRepository, DecisionQueryResult, AuditEntry } from '../storage/repository.js';
 import type { AutoClassification } from '../routing/strategies.js';
+import type { SessionEventSink, ReconcileResult } from './audit-pipeline.js';
 import type { ClassifyInput, LlmClassifierBackend, ClassifierCache } from '../classifier/index.js';
 import type { GovernorIdentity, IdentityProvider } from '../identity/types.js';
 import { GovernorExtensionRegistry } from '../extensions/registry.js';
@@ -67,6 +68,14 @@ export interface GovernorPluginConfig {
         enabled?: boolean;
         port?: number;
     };
+    /** 兼容 API：默认 enabled=false（零新增监听端口）；显式开启时仅监听 loopback。 */
+    compatApi?: {
+        enabled?: boolean;
+        port?: number;
+        listen?: '127.0.0.1' | '[::1]';
+        token?: string;
+        allowedOrigin?: string;
+    };
 }
 /** 决策记录（简化版，用于内存存储）。 */
 interface DecisionRecordMem {
@@ -87,6 +96,8 @@ export interface GovernorServiceOptions {
     classifierBackend?: LlmClassifierBackend;
     /** 分类结果缓存（默认 InMemoryClassifierCache）。 */
     classifierCache?: ClassifierCache;
+    /** Session Event 写入端（默认 Null：SEAM-1/2 阻断下的 fail safe 降级）。 */
+    sessionEventSink?: SessionEventSink;
 }
 /**
  * Governor 核心服务。集成全部领域模块，提供事件监听器所需的方法和 Client Remote API。
@@ -127,7 +138,11 @@ export declare class GovernorService extends Service {
     private readonly _classifier;
     /** 扩展注册表：四个领域扩展点的运行时注册 API（ctx.governor.extensions）。 */
     private readonly _extensions;
+    /** 双写审计管线：pending → Session Event → committed（GOV-TRACE-001）。 */
+    private readonly _audit;
     constructor(ctx: Context, config: GovernorPluginConfig, repository?: GovernorRepository, options?: GovernorServiceOptions);
+    /** bootstrap configRevision：空库初始化为 1 并记录来源；已有库不覆盖（GOV-CONFIG-001）。 */
+    private _bootstrapConfigRevision;
     /** 首次启动导入：DB 中无模型/用户策略时，把 YAML 配置写入 DB（§14 启动不覆盖 UI 修改）。 */
     private _importInitialPolicies;
     /** 从 DB 加载模型与用户策略（DB 优先于 YAML）。 */
@@ -196,11 +211,13 @@ export declare class GovernorService extends Service {
      * 注册同名自定义 RoutingStrategy 时由扩展接管。
      */
     private _routeManualFallback;
-    /** 执行模型选择（被 agent/request 调用）。 */
-    selectModel(sessionId: string, turn: number, step: number, defaultConfig: LlmCallConfig): {
+    /** 执行模型选择（被 agent/request 调用）。双写协议完成后才返回；fail closed。 */
+    selectModel(sessionId: string, turn: number, step: number, defaultConfig: LlmCallConfig): Promise<{
         config: LlmCallConfig;
         decision: DecisionRecordMem;
-    };
+    }>;
+    /** 计算本 attempt 的 causes（baseCauses + selection_mode_change + fallback + config_change + step）。 */
+    private _computeCauses;
     /** 设置分类结果（被 agent/pre-step 调用）。 */
     setClassification(sessionId: string, turn: number, step: number, classification: AutoClassification): void;
     /** 判断失败能否 Fallback（被 agent/request-error 调用）。 */
@@ -228,6 +245,13 @@ export declare class GovernorService extends Service {
         turn: number;
         step: number;
     } | undefined;
+    /**
+     * 获取 classifier 调用应关联的父 requestId（GOV-USAGE-001）。
+     *
+     * @param classifierSessionId - 形如 `governor-classifier:<uuid>` 的标记会话。
+     * @returns 当前正在分类的会话的 requestId；无在途请求时 undefined。
+     */
+    getCurrentParentRequestId(classifierSessionId: string): string | undefined;
     /** 计费参数：每 Credit 对应的 Token 数（来自配置，供 llm/stream 计费使用）。 */
     get tokensPerCredit(): number;
     /** 获取请求实际使用的路由模式（Usage 记录使用，不再硬编码）。 */
@@ -241,7 +265,7 @@ export declare class GovernorService extends Service {
         remainingNanos: bigint;
         exceeded: boolean;
     };
-    /** 获取配置版本号。 */
+    /** 获取配置版本号（GOV-CONFIG-001：SQLite 单调递增权威；无仓库时固定 1）。 */
     get configRevision(): number;
     /** 设置用户额度耗尽（测试与审计用）。 */
     setQuotaExceeded(userId: string, exceeded: boolean): void;
@@ -262,15 +286,19 @@ export declare class GovernorService extends Service {
         quality: Readonly<Partial<Record<"general" | "coding" | "reasoning" | "writing" | "data_analysis" | "vision" | "tool_use", number>>>;
     }[]>;
     /**
-     * 更新模型策略（管理员写入）。
+     * 更新模型策略（管理员写入；GOV-CONFIG-001：数据与新 revision 同事务提交）。
      *
      * 接受 enabled 和 multiplier（人类可读倍率，1.5 = 1.5x）。
      * 内部将 multiplier 转换为 multiplierPpm 存储。
      * 若 routeId 在目录中但不在配置 Map，则自动创建配置项。
+     * expectedRevision 提供时做 compare-and-set，不匹配抛 REVISION_CONFLICT。
      */
     updateModel(routeId: string, patch: {
         enabled?: boolean;
         multiplier?: number;
+    }, options?: {
+        expectedRevision?: number;
+        actor?: string;
     }): Promise<{
         routeId: string;
         provider: string;
@@ -278,7 +306,8 @@ export declare class GovernorService extends Service {
         enabled: boolean;
         multiplierPpm: number;
         capabilities: string[];
-        quality: Readonly<Partial<Record<"general" | "coding" | "reasoning" | "writing" | "data_analysis" | "vision" | "tool_use", number>>>;
+        quality: Partial<Record<TaskType, number>>;
+        configRevision: number;
     }>;
     listUsers(): Promise<{
         userId: string;
@@ -286,22 +315,103 @@ export declare class GovernorService extends Service {
         monthlyCredits: number;
     }[]>;
     /**
-     * 更新用户策略（管理员写入）。
+     * 更新用户策略（管理员写入；GOV-CONFIG-001：数据与新 revision 同事务提交）。
      *
      * 目前支持修改 monthlyCredits。userId 不存在时抛 USER_NOT_FOUND。
+     * expectedRevision 提供时做 compare-and-set，不匹配抛 REVISION_CONFLICT。
      */
     updateUser(userId: string, patch: {
         monthlyCredits?: number;
+    }, options?: {
+        expectedRevision?: number;
+        actor?: string;
     }): Promise<{
         userId: string;
         allow: string[];
         monthlyCredits: number;
+        configRevision: number;
     }>;
     queryUsage(query: {
         userId?: string;
         provider?: string;
     }): Promise<UsageEvent[]>;
-    explainDecision(requestId: string): Promise<DecisionRecordMem[]>;
-    listDecisions(): Promise<DecisionRecordMem[]>;
+    /**
+     * 按 requestId 查询完整 attempt 集合（GOV-DECISION-001：优先读 Repository，
+     * 进程重启后仍可查询；指定 fallbackIndex 时只返回一个 attempt）。
+     */
+    explainDecision(requestId: string, fallbackIndex?: number): Promise<DecisionQueryResult[]>;
+    /** 列表查询决策（分页：默认 50、最大 200、31 天窗口；GOV-DECISION-001 AC 3）。 */
+    listDecisions(opts?: {
+        sessionId?: string;
+        from?: string;
+        to?: string;
+        limit?: number;
+        cursor?: {
+            createdAt: string;
+            decisionId: string;
+        };
+    }): Promise<{
+        items: DecisionQueryResult[];
+        nextCursor?: {
+            createdAt: string;
+            decisionId: string;
+        };
+    }>;
+    /** step/end 后清理已完成 request state（幂等；重复通知安全）。 */
+    handleStepEnd(sessionId: string, turn: number, step: number): void;
+    /** turn/end 兜底清理该 turn 的全部 request state。 */
+    handleTurnEnd(sessionId: string, turn: number): void;
+    /** session dispose 兜底清理（不删除已提交的 Decision/Usage）。 */
+    handleSessionDispose(sessionId: string): void;
+    /** 记录 dispatch_started（Provider 调用边界前；GOV-ATTEMPT-001 AC 1）。 */
+    markDispatchStarted(sessionId: string, turn: number, step: number): void;
+    /** 记录 terminal attempt 状态（completed/failed/cancelled；重复回调幂等）。 */
+    markAttemptTerminal(sessionId: string, turn: number, step: number, terminal: 'completed' | 'failed' | 'cancelled'): void;
+    /** 读取 attempt 状态（诊断/测试）。 */
+    getAttemptState(sessionId: string, turn: number, step: number): 'not_dispatched' | 'dispatch_started' | 'completed' | 'failed' | 'cancelled' | 'indeterminate' | undefined;
+    /** 启动对账（GOV-TRACE-001 §3.1：扫描 pending 并补齐/告警）。 */
+    reconcileAudit(): Promise<ReconcileResult>;
+    /** 读取审计条目（GOV-SEC-001）。 */
+    listAuditEntries(limit?: number): Promise<AuditEntry[]>;
+    /** 待对账（pending）决策数量（健康摘要）。 */
+    listPendingAuditCount(): Promise<number>;
+    /** 会话选择状态（governor.session.v1 语义）。 */
+    private _selectionStates;
+    /** 已发生模式切换、待下一 attempt 消费 selection_mode_change cause 的会话。 */
+    private _pendingModeChange;
+    /**
+     * 读取会话选择模式：显式状态优先；无状态时返回全局默认（首次创建无显式
+     * 选择使用全局默认，之后以会话状态为准）。
+     */
+    getSessionSelectionMode(sessionId: string): {
+        mode: 'auto' | 'manual';
+        lastManualRoute?: string;
+        selectionRevision: number;
+        isDefault: boolean;
+    };
+    /**
+     * 切换会话选择模式（/model 与 Composer 共用的同一 Host 方法）。
+     *
+     * 持久化确认（状态写入 + selection-mode 事件 durable ack）成功后才生效；
+     * expectedRevision 不匹配抛 SELECTION_REVISION_CONFLICT（多标签页并发切换，
+     * 只有 expected revision 匹配的一方成功）。切换只影响下一个 attempt。
+     *
+     * @param sessionId - 会话 ID。
+     * @param mode - 目标模式。
+     * @param options - expectedRevision 冲突保护与 lastManualRoute 记录。
+     */
+    setSessionSelectionMode(sessionId: string, mode: 'auto' | 'manual', options?: {
+        expectedRevision?: number;
+        lastManualRoute?: string;
+    }): Promise<{
+        mode: 'auto' | 'manual';
+        selectionRevision: number;
+    }>;
+    /** 从 Session 事件流恢复会话选择状态（restore/fork 路径）。 */
+    restoreSessionSelection(sessionId: string, events: readonly {
+        type: string;
+    }[]): void;
+    /** 会话 dispose 时清理选择状态（与请求状态清理同生命周期）。 */
+    clearSessionSelection(sessionId: string): void;
 }
 export {};

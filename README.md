@@ -95,9 +95,10 @@ src/
 ├── fallback/     # 失败重试与重路由状态机
 ├── identity/     # Local/Header/JWT 身份绑定
 ├── model/        # Canonical 路由与模型目录合并
-├── plugin/       # Cordis 插件入口与 GovernorService
-├── routing/      # Manual/Quality First/Credit First 策略
-├── storage/      # SQLite Repository（WAL、迁移、幂等）
+├── ops/          # 运营导出（CSV 注入防护/限额/假名）与路由指标
+├── plugin/       # Cordis 插件入口、GovernorService 与双写审计管道
+├── routing/      # Manual/Quality First/Credit First 策略与不可变 Decision
+├── storage/      # SQLite Repository（WAL、迁移、幂等、审计状态）
 ├── ui/           # Models/Users/Usage 页面与 host API
 └── usage/        # Usage 计量与聚合
 
@@ -114,6 +115,11 @@ test/
 
 1. Fail closed：身份、权限、额度或能力无法确认时不发起模型请求。
 2. One recovery owner：Governor 启用时统一负责模型调用失败后的重试/重路由。
-3. Explain every route：每次决策都记录结构化原因，不记录 Prompt 正文。
-4. Attempt-level accounting：Fallback 的每次真实模型尝试都单独计量。
+3. Explain every route：每次决策都记录结构化原因，不记录 Prompt 正文；
+   决策先 `pending` → Session Event → `committed`，任何 Provider 调用前
+   都存在已提交的不可变 Decision（decisionId + JCS hash 可追溯）。
+4. Attempt-level accounting：Fallback 的每次真实模型尝试都单独计量
+   （conversation/classifier 双类 Usage，classifier 关联父请求）。
 5. No provider proxy：真实模型调用仍由 DSH 的 `ctx.llm` 和 Provider Adapter 完成。
+6. Default no extra socket：默认零新增监听端口；兼容 API 仅在显式
+   `compatApi.enabled=true` 时监听 loopback（Bearer 鉴权 + capability 矩阵）。

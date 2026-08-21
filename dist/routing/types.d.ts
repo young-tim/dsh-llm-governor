@@ -4,8 +4,8 @@
 import type { TaskType, Complexity, RoutingMode } from '../index.js';
 import type { ModelSnapshot, CanonicalRoute } from '../model/canonical.js';
 import type { UserAccessPolicy } from '../access/evaluator.js';
-/** 稳定错误码。 */
-export type RoutingErrorCode = 'MODEL_NOT_FOUND' | 'AMBIGUOUS_MODEL_ROUTE' | 'MODEL_DISABLED' | 'MODEL_ACCESS_DENIED' | 'CAPABILITY_NOT_SUPPORTED' | 'QUOTA_EXCEEDED' | 'NO_MODEL_MATCHED' | 'FALLBACK_EXHAUSTED' | 'PARTIAL_OUTPUT_NOT_RETRYABLE' | 'IDENTITY_REQUIRED';
+/** 稳定错误码（Routing + Audit/State + Revision/Auth + Recovery，见优化文档 7.2）。 */
+export type RoutingErrorCode = 'MODEL_NOT_FOUND' | 'AMBIGUOUS_MODEL_ROUTE' | 'MODEL_DISABLED' | 'MODEL_ACCESS_DENIED' | 'CAPABILITY_NOT_SUPPORTED' | 'QUOTA_EXCEEDED' | 'NO_MODEL_MATCHED' | 'FALLBACK_EXHAUSTED' | 'PARTIAL_OUTPUT_NOT_RETRYABLE' | 'IDENTITY_REQUIRED' | 'AUDIT_PERSIST_FAILED' | 'DECISION_CONFLICT' | 'STORAGE_UNAVAILABLE' | 'PLUGIN_RELOADING' | 'RECOVERY_OWNER_CONFLICT' | 'REVISION_CONFLICT' | 'SELECTION_REVISION_CONFLICT' | 'UNAUTHORIZED' | 'FORBIDDEN';
 /** Routing 错误。 */
 export declare class RoutingError extends Error {
     readonly code: RoutingErrorCode;

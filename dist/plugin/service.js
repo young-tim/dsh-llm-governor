@@ -7,8 +7,12 @@ import { buildModelDirectory } from '../model/canonical.js';
 import { monthWindow } from '../credits/quota.js';
 import { RoutingError } from '../routing/types.js';
 import { routeManual, routeQualityFirst, routeCreditFirst, routeAuto, } from '../routing/strategies.js';
+import { sealDecision, uuidv7 } from '../routing/decision.js';
+import { AuditPipeline, NullSessionEventSink } from './audit-pipeline.js';
+import { restoreGovernorSelection } from '../dsh-adapter/session-events.js';
 import { createClassifier } from '../classifier/index.js';
 import { InMemoryClassifierCache } from '../classifier/cache.js';
+import { SQLiteClassifierCache } from '../classifier/sqlite-cache.js';
 import { FallbackState, isRetryable } from '../fallback/mod.js';
 import { GovernorExtensionRegistry } from '../extensions/registry.js';
 import { UsageAggregator } from '../usage/aggregator.js';
@@ -51,6 +55,8 @@ export class GovernorService extends Service {
     _classifier;
     /** 扩展注册表：四个领域扩展点的运行时注册 API（ctx.governor.extensions）。 */
     _extensions = new GovernorExtensionRegistry();
+    /** 双写审计管线：pending → Session Event → committed（GOV-TRACE-001）。 */
+    _audit;
     constructor(ctx, config, repository, options) {
         super(ctx, 'governor');
         this._repository = repository;
@@ -62,15 +68,26 @@ export class GovernorService extends Service {
                 ? { userId: config.identity?.local_user_id ?? 'local' }
                 : undefined;
         this._identityProvider = options?.identityProvider;
-        // LLM 分类后端注入后，Auto 走完整 Hint → Rule → LLM 链
+        // LLM 分类后端注入后，Auto 走完整 Hint → Rule → LLM 链；
+        // GOV-CLASSIFIER-001：repository 存在时接入 SQLite 缓存
+        // （HMAC 键 + TTL 7 天 + single-flight），否则用内存缓存。
+        const sqliteCache = repository !== undefined && options?.classifierBackend !== undefined
+            ? new SQLiteClassifierCache(repository)
+            : undefined;
         this._classifier = createClassifier({
             confidenceThreshold: config.auto?.confidence_threshold ?? 0.7,
             ...(options?.classifierBackend !== undefined
                 ? { llmBackend: options.classifierBackend }
                 : {}),
-            ...(options?.classifierCache !== undefined || options?.classifierBackend !== undefined
-                ? { cache: options?.classifierCache ?? new InMemoryClassifierCache() }
-                : {}),
+            ...(sqliteCache !== undefined
+                ? {
+                    cache: sqliteCache,
+                    cacheKeyBuilder: (canonicalInput, revision) => sqliteCache.buildKey(canonicalInput, revision),
+                    configRevisionGetter: () => this.configRevision,
+                }
+                : options?.classifierCache !== undefined || options?.classifierBackend !== undefined
+                    ? { cache: options?.classifierCache ?? new InMemoryClassifierCache() }
+                    : {}),
         });
         this._models = new Map(Object.entries(config.models ?? {}));
         this._users = new Map(Object.entries(config.users ?? {}).map(([id, u]) => [
@@ -97,11 +114,21 @@ export class GovernorService extends Service {
         this._defaultMonthlyCredits = config.credits?.default_monthly_credits ?? 100;
         // DB 是运行时权威：首次启动把 YAML 中的 models/users 导入 DB，之后从 DB 加载
         if (repository !== undefined) {
+            this._bootstrapConfigRevision(repository);
             this._importInitialPolicies(repository);
             this._loadPoliciesFromRepository(repository);
         }
+        // 双写审计管线：Session Event sink 默认 Null（SEAM-1/2 阻断，见 BLOCKED.md B-1）
+        this._audit = new AuditPipeline(repository, options?.sessionEventSink ?? new NullSessionEventSink());
         // 从配置构建初始模型目录（DSH advisory 在 refreshModelDirectory 时合并）
         this._modelDirectory = this._buildDirectoryFromConfig();
+    }
+    /** bootstrap configRevision：空库初始化为 1 并记录来源；已有库不覆盖（GOV-CONFIG-001）。 */
+    _bootstrapConfigRevision(repository) {
+        if (repository.getConfigRevision() === 0) {
+            repository.setConfigRevision(1);
+            repository.setBootstrapSource(`yaml-bootstrap:${new Date().toISOString()}`);
+        }
     }
     /** 首次启动导入：DB 中无模型/用户策略时，把 YAML 配置写入 DB（§14 启动不覆盖 UI 修改）。 */
     _importInitialPolicies(repository) {
@@ -188,12 +215,14 @@ export class GovernorService extends Service {
         let state = this._requestStates.get(key);
         if (!state) {
             state = {
-                requestId: crypto.randomUUID(),
+                requestId: uuidv7(),
                 fallbackIndex: 0,
                 fallback: new FallbackState(this._maxAttempts, this._afterPartialOutput),
                 requiredCapabilities: [],
                 requiredModalities: [],
                 partialOutputDelivered: false,
+                baseCauses: ['initial'],
+                attemptState: 'not_dispatched',
             };
             this._requestStates.set(key, state);
         }
@@ -427,100 +456,188 @@ export class GovernorService extends Service {
         }
         return routeQualityFirst(input, classification.taskType);
     }
-    /** 执行模型选择（被 agent/request 调用）。 */
-    selectModel(sessionId, turn, step, defaultConfig) {
+    /** 执行模型选择（被 agent/request 调用）。双写协议完成后才返回；fail closed。 */
+    async selectModel(sessionId, turn, step, defaultConfig) {
         const state = this.getOrCreateRequestState(sessionId, turn, step);
         state.fallback.recordAttempt();
+        state.attemptState = 'not_dispatched';
         this._currentTurnStep.set(sessionId, { turn, step });
         // 身份 fail closed：header/jwt/custom 模式下无绑定（含绑定过期）直接拒绝，
         // 不允许未治理的匿名请求透传到 Provider
         if (this.getIdentity(sessionId) === undefined) {
             throw new RoutingError('IDENTITY_REQUIRED', `session ${sessionId} has no bound governor identity (provider=${this._identityKind})`);
         }
-        const filterInput = this.buildFilterInput(sessionId, turn, step);
-        let result;
-        const mode = this._defaultRouting;
-        state.mode = mode;
-        if (mode === 'manual') {
-            const requestedRoute = `${defaultConfig.provider}:${defaultConfig.model}`;
-            if (this._fallbackEnabled &&
-                state.fallback.excludedRoutes.size > 0 &&
-                state.fallback.excludedRoutes.has(requestedRoute)) {
-                // Fallback 例外：请求的模型已失败并被排除，按 fallback.strategy 重选剩余模型
-                result = this._routeManualFallback(filterInput, state);
-            }
-            else {
-                result = routeManual(filterInput, defaultConfig.provider, defaultConfig.model);
-            }
-        }
-        else {
-            // 非 Manual 模式：使用 agent/pre-step 已缓存的分类结果；未分类时回退默认 general/medium
-            const classification = state.classification ?? {
-                taskType: 'general',
-                complexity: 'medium',
-                confidence: 0.5,
-                source: 'rule',
-            };
-            const customStrategy = this._extensions.getRoutingStrategy(mode);
-            if (customStrategy !== undefined) {
-                // 注册的自定义 RoutingStrategy 接管该模式的路由决策（§6 扩展点）
-                result = customStrategy.select(filterInput, this._buildRoutingContext(mode, classification));
-            }
-            else if (mode === 'quality_first') {
-                // 按当前分类的任务类型排序（pre-step 缓存；未分类回退 general）
-                result = routeQualityFirst(filterInput, classification.taskType);
-            }
-            else if (mode === 'credit_first') {
-                // 质量门槛同样作用于当前分类的任务类型维度
-                result = routeCreditFirst(filterInput, classification.taskType, this._minimumQuality, 1, this._onNoMatch);
-            }
-            else {
-                // auto：置信度低于阈值时切 Quality First，否则按复杂度映射质量门槛
-                result = routeAuto(filterInput, classification, this._confidenceThreshold, this._qualityThresholds);
-            }
-        }
-        state.selectedRoute = result.selected.routeId;
-        state.fallbackIndex = state.fallback.attemptCount - 1;
-        const decision = {
-            requestId: state.requestId,
-            fallbackIndex: state.fallbackIndex,
-            mode,
-            selectedRoute: result.selected.routeId,
-            selectedProvider: result.selected.provider,
-            selectedModel: result.selected.model,
-            excludedRoutes: [...state.fallback.excludedRoutes],
-            createdAt: new Date().toISOString(),
-        };
-        this._decisions.push(decision);
-        // 决策持久化（幂等：request_id + fallback_index）
-        this._repository?.insertDecision({
-            requestId: state.requestId,
-            fallbackIndex: state.fallbackIndex,
-            mode,
-            ...(state.classification !== undefined
-                ? {
-                    taskType: state.classification.taskType,
-                    complexity: state.classification.complexity,
-                    confidence: state.classification.confidence,
+        // 本 attempt 固定使用的配置 revision 快照（中途变化只影响下一个 attempt）
+        const snapshotRevision = this.configRevision;
+        const causes = this._computeCauses(state, snapshotRevision, sessionId);
+        try {
+            const filterInput = this.buildFilterInput(sessionId, turn, step);
+            let result;
+            // 会话选择模式优先（GOV-SELECT-001）：显式 auto/manual 覆盖全局默认；
+            // 无显式状态时沿用全局 routing.default。切换只影响下一个 attempt。
+            const sessionMode = this.getSessionSelectionMode(sessionId);
+            const mode = sessionMode.isDefault ? this._defaultRouting : sessionMode.mode;
+            state.mode = mode;
+            if (mode === 'manual') {
+                const requestedRoute = `${defaultConfig.provider}:${defaultConfig.model}`;
+                if (this._fallbackEnabled &&
+                    state.fallback.excludedRoutes.size > 0 &&
+                    state.fallback.excludedRoutes.has(requestedRoute)) {
+                    // Fallback 例外：请求的模型已失败并被排除，按 fallback.strategy 重选剩余模型
+                    result = this._routeManualFallback(filterInput, state);
                 }
-                : {}),
-            ...(result.decision.minimumQuality !== undefined
-                ? { minimumQuality: result.decision.minimumQuality }
-                : {}),
-            candidates: result.decision.candidates,
-            excluded: result.decision.excluded,
-            selected: result.selected.routeId,
-            configRevision: this.configRevision,
-            createdAt: decision.createdAt,
-        });
-        return {
-            config: {
-                ...defaultConfig,
-                provider: result.selected.provider,
-                model: result.selected.model,
-            },
-            decision,
-        };
+                else {
+                    result = routeManual(filterInput, defaultConfig.provider, defaultConfig.model);
+                }
+            }
+            else {
+                // 非 Manual 模式：使用 agent/pre-step 已缓存的分类结果；未分类时回退默认 general/medium
+                const classification = state.classification ?? {
+                    taskType: 'general',
+                    complexity: 'medium',
+                    confidence: 0.5,
+                    source: 'rule',
+                };
+                const customStrategy = this._extensions.getRoutingStrategy(mode);
+                if (customStrategy !== undefined) {
+                    // 注册的自定义 RoutingStrategy 接管该模式的路由决策（§6 扩展点）
+                    result = customStrategy.select(filterInput, this._buildRoutingContext(mode, classification));
+                }
+                else if (mode === 'quality_first') {
+                    // 按当前分类的任务类型排序（pre-step 缓存；未分类回退 general）
+                    result = routeQualityFirst(filterInput, classification.taskType);
+                }
+                else if (mode === 'credit_first') {
+                    // 质量门槛同样作用于当前分类的任务类型维度
+                    result = routeCreditFirst(filterInput, classification.taskType, this._minimumQuality, 1, this._onNoMatch);
+                }
+                else {
+                    // auto：置信度低于阈值时切 Quality First，否则按复杂度映射质量门槛
+                    result = routeAuto(filterInput, classification, this._confidenceThreshold, this._qualityThresholds);
+                }
+            }
+            state.selectedRoute = result.selected.routeId;
+            state.fallbackIndex = state.fallback.attemptCount - 1;
+            // 构造不可变决策并执行双写协议（pending → Session Event → committed）
+            const effectiveStrategy = mode === 'auto'
+                ? result.decision.minimumQuality !== undefined
+                    ? 'credit_first'
+                    : 'quality_first'
+                : mode;
+            const sealed = sealDecision({
+                requestId: state.requestId,
+                turn,
+                step,
+                fallbackIndex: state.fallbackIndex,
+                causes,
+                changedFields: [],
+                selectionMode: mode === 'manual' ? 'manual' : 'auto',
+                effectiveStrategy,
+                ...(state.classification !== undefined
+                    ? {
+                        classifier: {
+                            taskType: state.classification.taskType,
+                            complexity: state.classification.complexity,
+                            confidence: state.classification.confidence,
+                            source: state.classification.source,
+                        },
+                    }
+                    : {}),
+                ...(result.decision.minimumQuality !== undefined
+                    ? { minimumQuality: result.decision.minimumQuality }
+                    : {}),
+                candidates: result.decision.candidates,
+                excluded: result.decision.excluded,
+                outcome: 'selected',
+                selectedRoute: result.selected.routeId,
+                configRevision: snapshotRevision,
+            });
+            await this._audit.commitDecision(sealed, { sessionId });
+            state.lastDecisionConfigRevision = snapshotRevision;
+            // initial 只属于首个 attempt：后续 attempt 的 causes 回落到 step/fallback。
+            if (state.baseCauses.length > 0)
+                state.baseCauses = [];
+            this._repository?.upsertAttemptState(state.requestId, state.fallbackIndex, 'not_dispatched');
+            const decision = {
+                requestId: state.requestId,
+                fallbackIndex: state.fallbackIndex,
+                mode,
+                selectedRoute: result.selected.routeId,
+                selectedProvider: result.selected.provider,
+                selectedModel: result.selected.model,
+                excludedRoutes: [...state.fallback.excludedRoutes],
+                createdAt: new Date().toISOString(),
+            };
+            this._decisions.push(decision);
+            return {
+                config: {
+                    ...defaultConfig,
+                    provider: result.selected.provider,
+                    model: result.selected.model,
+                },
+                decision,
+            };
+        }
+        catch (err) {
+            // 审计管线自身失败（AUDIT_PERSIST_FAILED）不写 rejected 决策：
+            // 此类错误发生时路由结果不可信（双写未完成），直接 fail closed。
+            if (err instanceof RoutingError && err.code === 'AUDIT_PERSIST_FAILED') {
+                throw err;
+            }
+            // 拒绝路径：无候选/准入失败也记录 rejected 决策与稳定错误码（GOV-TRACE-001 AC 5）
+            if (err instanceof RoutingError) {
+                state.fallbackIndex = Math.max(0, state.fallback.attemptCount - 1);
+                const rejected = sealDecision({
+                    requestId: state.requestId,
+                    turn,
+                    step,
+                    fallbackIndex: state.fallbackIndex,
+                    causes,
+                    changedFields: [],
+                    selectionMode: this._defaultRouting === 'manual' ? 'manual' : 'auto',
+                    effectiveStrategy: this._defaultRouting === 'auto' ? 'credit_first' : this._defaultRouting,
+                    ...(state.classification !== undefined
+                        ? {
+                            classifier: {
+                                taskType: state.classification.taskType,
+                                complexity: state.classification.complexity,
+                                confidence: state.classification.confidence,
+                                source: state.classification.source,
+                            },
+                        }
+                        : {}),
+                    candidates: [],
+                    excluded: [],
+                    outcome: 'rejected',
+                    errorCode: err.code,
+                    configRevision: snapshotRevision,
+                });
+                // 审计写入失败时保留原始错误（fail closed：不产生 Provider 调用）
+                try {
+                    await this._audit.commitDecision(rejected, { sessionId });
+                }
+                catch {
+                    // 原始 RoutingError 优先抛出
+                }
+            }
+            throw err;
+        }
+    }
+    /** 计算本 attempt 的 causes（baseCauses + selection_mode_change + fallback + config_change + step）。 */
+    _computeCauses(state, snapshotRevision, sessionId) {
+        const causes = [...state.baseCauses];
+        if (sessionId !== undefined && this._pendingModeChange.delete(sessionId)) {
+            causes.push('selection_mode_change');
+        }
+        if (state.fallback.attemptCount > 1)
+            causes.push('fallback');
+        if (state.lastDecisionConfigRevision !== undefined &&
+            state.lastDecisionConfigRevision !== snapshotRevision) {
+            causes.push('config_change');
+        }
+        if (causes.length === 0)
+            causes.push('step');
+        return causes;
     }
     /** 设置分类结果（被 agent/pre-step 调用）。 */
     setClassification(sessionId, turn, step, classification) {
@@ -611,6 +728,22 @@ export class GovernorService extends Service {
     getCurrentTurnStep(sessionId) {
         return this._currentTurnStep.get(sessionId);
     }
+    /**
+     * 获取 classifier 调用应关联的父 requestId（GOV-USAGE-001）。
+     *
+     * @param classifierSessionId - 形如 `governor-classifier:<uuid>` 的标记会话。
+     * @returns 当前正在分类的会话的 requestId；无在途请求时 undefined。
+     */
+    getCurrentParentRequestId(classifierSessionId) {
+        void classifierSessionId;
+        // 分类发生在 agent/pre-step（父请求 selectModel 之前）；父 requestId 尚未
+        // 生成（requestId 在 selectModel 首次进入路由时创建）。因此 classifier
+        // usage 关联当前会话最近一个 requestId（存在时），否则不关联。
+        for (const state of this._requestStates.values()) {
+            return state.requestId;
+        }
+        return undefined;
+    }
     /** 计费参数：每 Credit 对应的 Token 数（来自配置，供 llm/stream 计费使用）。 */
     get tokensPerCredit() {
         return this._tokensPerCredit;
@@ -636,9 +769,10 @@ export class GovernorService extends Service {
             exceeded,
         };
     }
-    /** 获取配置版本号。 */
+    /** 获取配置版本号（GOV-CONFIG-001：SQLite 单调递增权威；无仓库时固定 1）。 */
     get configRevision() {
-        return 1;
+        const revision = this._repository?.getConfigRevision() ?? 0;
+        return revision > 0 ? revision : 1;
     }
     /** 设置用户额度耗尽（测试与审计用）。 */
     setQuotaExceeded(userId, exceeded) {
@@ -669,16 +803,28 @@ export class GovernorService extends Service {
         }));
     }
     /**
-     * 更新模型策略（管理员写入）。
+     * 更新模型策略（管理员写入；GOV-CONFIG-001：数据与新 revision 同事务提交）。
      *
      * 接受 enabled 和 multiplier（人类可读倍率，1.5 = 1.5x）。
      * 内部将 multiplier 转换为 multiplierPpm 存储。
      * 若 routeId 在目录中但不在配置 Map，则自动创建配置项。
+     * expectedRevision 提供时做 compare-and-set，不匹配抛 REVISION_CONFLICT。
      */
-    async updateModel(routeId, patch) {
+    async updateModel(routeId, patch, options) {
         const existingSnap = this._modelDirectory.find((s) => s.routeId === routeId);
         if (!existingSnap) {
             throw new Error('MODEL_NOT_FOUND');
+        }
+        // GOV-UI-002：Host 拒绝超界值（multiplier 非负；表单范围只是提示，
+        // 最终准入以后端校验为准）
+        if (patch.multiplier !== undefined &&
+            (!Number.isFinite(patch.multiplier) || patch.multiplier < 0)) {
+            throw new Error('INVALID_MULTIPLIER');
+        }
+        // expected-revision 冲突保护（多标签页并发写）
+        const currentRevision = this.configRevision;
+        if (options?.expectedRevision !== undefined && options.expectedRevision !== currentRevision) {
+            throw new RoutingError('REVISION_CONFLICT', `expected config revision ${options.expectedRevision} but current is ${currentRevision}`);
         }
         // 获取或创建配置项
         const cfg = this._models.get(routeId) ??
@@ -690,24 +836,46 @@ export class GovernorService extends Service {
             };
         this._models.set(routeId, cfg);
         // 应用补丁
+        const changedFields = [];
+        if (patch.enabled !== undefined && patch.enabled !== cfg.enabled)
+            changedFields.push('enabled');
         if (patch.enabled !== undefined)
             cfg.enabled = patch.enabled;
+        if (patch.multiplier !== undefined && patch.multiplier !== cfg.multiplier)
+            changedFields.push('multiplier');
         if (patch.multiplier !== undefined)
             cfg.multiplier = patch.multiplier;
         // 更新模型目录中对应快照
         const newEnabled = cfg.enabled ?? true;
         const newMultiplierPpm = Math.round((cfg.multiplier ?? 1) * 1_000_000);
         this._modelDirectory = this._modelDirectory.map((s) => s.routeId === routeId ? { ...s, enabled: newEnabled, multiplierPpm: newMultiplierPpm } : s);
-        // 管理写入持久化（DB 是运行时权威，重启后不回退到 YAML）
-        this._repository?.upsertModelPolicy({
-            routeId,
-            provider: existingSnap.provider,
-            model: existingSnap.model,
-            enabled: newEnabled,
-            multiplierPpm: newMultiplierPpm,
-            capabilities: [...existingSnap.capabilities],
-            quality: { ...existingSnap.quality },
-        });
+        // 管理写入持久化：数据与新 revision、审计条目在同一 SQLite 事务提交
+        let newRevision = currentRevision;
+        if (this._repository !== undefined) {
+            this._repository.upsertModelPolicy({
+                routeId,
+                provider: existingSnap.provider,
+                model: existingSnap.model,
+                enabled: newEnabled,
+                multiplierPpm: newMultiplierPpm,
+                capabilities: [...existingSnap.capabilities],
+                quality: { ...existingSnap.quality },
+            });
+            if (changedFields.length > 0) {
+                newRevision = currentRevision + 1;
+                this._repository.setConfigRevision(newRevision);
+                this._repository.insertAuditEntry({
+                    actor: options?.actor ?? 'local',
+                    action: 'updateModel',
+                    target: routeId,
+                    changedFields,
+                    oldRevision: currentRevision,
+                    newRevision,
+                    result: 'success',
+                    createdAt: new Date().toISOString(),
+                });
+            }
+        }
         // 返回更新后的模型视图
         const updated = this._modelDirectory.find((s) => s.routeId === routeId);
         if (!updated)
@@ -720,6 +888,7 @@ export class GovernorService extends Service {
             multiplierPpm: updated.multiplierPpm,
             capabilities: [...updated.capabilities],
             quality: updated.quality,
+            configRevision: newRevision,
         };
     }
     async listUsers() {
@@ -730,24 +899,45 @@ export class GovernorService extends Service {
         }));
     }
     /**
-     * 更新用户策略（管理员写入）。
+     * 更新用户策略（管理员写入；GOV-CONFIG-001：数据与新 revision 同事务提交）。
      *
      * 目前支持修改 monthlyCredits。userId 不存在时抛 USER_NOT_FOUND。
+     * expectedRevision 提供时做 compare-and-set，不匹配抛 REVISION_CONFLICT。
      */
-    async updateUser(userId, patch) {
+    async updateUser(userId, patch, options) {
         const user = this._users.get(userId);
         if (!user) {
             throw new Error('USER_NOT_FOUND');
         }
-        if (patch.monthlyCredits !== undefined) {
+        const currentRevision = this.configRevision;
+        if (options?.expectedRevision !== undefined && options.expectedRevision !== currentRevision) {
+            throw new RoutingError('REVISION_CONFLICT', `expected config revision ${options.expectedRevision} but current is ${currentRevision}`);
+        }
+        let newRevision = currentRevision;
+        if (patch.monthlyCredits !== undefined && patch.monthlyCredits !== user.monthlyCredits) {
             user.monthlyCredits = patch.monthlyCredits;
-            // 管理写入持久化（DB 是运行时权威）
-            this._repository?.upsertUserPolicy(userId, BigInt(Math.max(0, Math.floor(user.monthlyCredits))) * 1000000000n);
+            // 管理写入持久化：数据与新 revision、审计条目在同一 SQLite 事务提交
+            if (this._repository !== undefined) {
+                this._repository.upsertUserPolicy(userId, BigInt(Math.max(0, Math.floor(user.monthlyCredits))) * 1000000000n);
+                newRevision = currentRevision + 1;
+                this._repository.setConfigRevision(newRevision);
+                this._repository.insertAuditEntry({
+                    actor: options?.actor ?? 'local',
+                    action: 'updateUser',
+                    target: userId,
+                    changedFields: ['monthlyCredits'],
+                    oldRevision: currentRevision,
+                    newRevision,
+                    result: 'success',
+                    createdAt: new Date().toISOString(),
+                });
+            }
         }
         return {
             userId,
             allow: user.allow,
             monthlyCredits: user.monthlyCredits,
+            configRevision: newRevision,
         };
     }
     async queryUsage(query) {
@@ -782,10 +972,148 @@ export class GovernorService extends Service {
         }
         return this._usageAggregator.listEvents(query);
     }
-    async explainDecision(requestId) {
-        return this._decisions.filter((d) => d.requestId === requestId);
+    /**
+     * 按 requestId 查询完整 attempt 集合（GOV-DECISION-001：优先读 Repository，
+     * 进程重启后仍可查询；指定 fallbackIndex 时只返回一个 attempt）。
+     */
+    async explainDecision(requestId, fallbackIndex) {
+        if (this._repository !== undefined) {
+            return this._repository.getDecisions(requestId, fallbackIndex);
+        }
+        return [];
     }
-    async listDecisions() {
-        return [...this._decisions];
+    /** 列表查询决策（分页：默认 50、最大 200、31 天窗口；GOV-DECISION-001 AC 3）。 */
+    async listDecisions(opts = {}) {
+        if (this._repository !== undefined) {
+            return this._repository.queryDecisions(opts);
+        }
+        return { items: [] };
+    }
+    // ===== 请求状态生命周期与 attempt 状态（GOV-STATE-001 / GOV-ATTEMPT-001） =====
+    /** step/end 后清理已完成 request state（幂等；重复通知安全）。 */
+    handleStepEnd(sessionId, turn, step) {
+        this._requestStates.delete(this.reqKey(sessionId, turn, step));
+    }
+    /** turn/end 兜底清理该 turn 的全部 request state。 */
+    handleTurnEnd(sessionId, turn) {
+        const prefix = `${sessionId}:${turn}:`;
+        for (const key of this._requestStates.keys()) {
+            if (key.startsWith(prefix))
+                this._requestStates.delete(key);
+        }
+    }
+    /** session dispose 兜底清理（不删除已提交的 Decision/Usage）。 */
+    handleSessionDispose(sessionId) {
+        const prefix = `${sessionId}:`;
+        for (const key of this._requestStates.keys()) {
+            if (key.startsWith(prefix))
+                this._requestStates.delete(key);
+        }
+        this._currentTurnStep.delete(sessionId);
+        this._pendingModeChange.delete(sessionId);
+        this.clearSessionSelection(sessionId);
+    }
+    /** 记录 dispatch_started（Provider 调用边界前；GOV-ATTEMPT-001 AC 1）。 */
+    markDispatchStarted(sessionId, turn, step) {
+        const state = this._requestStates.get(this.reqKey(sessionId, turn, step));
+        if (state === undefined)
+            return;
+        state.attemptState = 'dispatch_started';
+        this._repository?.upsertAttemptState(state.requestId, state.fallbackIndex, 'dispatch_started');
+    }
+    /** 记录 terminal attempt 状态（completed/failed/cancelled；重复回调幂等）。 */
+    markAttemptTerminal(sessionId, turn, step, terminal) {
+        const state = this._requestStates.get(this.reqKey(sessionId, turn, step));
+        if (state === undefined)
+            return;
+        state.attemptState = terminal;
+        this._repository?.upsertAttemptState(state.requestId, state.fallbackIndex, terminal);
+    }
+    /** 读取 attempt 状态（诊断/测试）。 */
+    getAttemptState(sessionId, turn, step) {
+        return this._requestStates.get(this.reqKey(sessionId, turn, step))?.attemptState;
+    }
+    /** 启动对账（GOV-TRACE-001 §3.1：扫描 pending 并补齐/告警）。 */
+    async reconcileAudit() {
+        return this._audit.reconcile();
+    }
+    /** 读取审计条目（GOV-SEC-001）。 */
+    async listAuditEntries(limit = 50) {
+        return this._repository?.listAuditEntries(limit) ?? [];
+    }
+    /** 待对账（pending）决策数量（健康摘要）。 */
+    async listPendingAuditCount() {
+        return this._repository?.listPendingDecisions().length ?? 0;
+    }
+    // ===== 会话选择模式（GOV-SELECT-001：Auto 是可持久恢复的会话控制状态） =====
+    /** 会话选择状态（governor.session.v1 语义）。 */
+    _selectionStates = new Map();
+    /** 已发生模式切换、待下一 attempt 消费 selection_mode_change cause 的会话。 */
+    _pendingModeChange = new Set();
+    /**
+     * 读取会话选择模式：显式状态优先；无状态时返回全局默认（首次创建无显式
+     * 选择使用全局默认，之后以会话状态为准）。
+     */
+    getSessionSelectionMode(sessionId) {
+        const state = this._selectionStates.get(sessionId);
+        if (state !== undefined) {
+            return {
+                mode: state.mode,
+                ...(state.lastManualRoute !== undefined ? { lastManualRoute: state.lastManualRoute } : {}),
+                selectionRevision: state.selectionRevision,
+                isDefault: false,
+            };
+        }
+        return {
+            mode: this._defaultRouting === 'manual' ? 'manual' : 'auto',
+            selectionRevision: 0,
+            isDefault: true,
+        };
+    }
+    /**
+     * 切换会话选择模式（/model 与 Composer 共用的同一 Host 方法）。
+     *
+     * 持久化确认（状态写入 + selection-mode 事件 durable ack）成功后才生效；
+     * expectedRevision 不匹配抛 SELECTION_REVISION_CONFLICT（多标签页并发切换，
+     * 只有 expected revision 匹配的一方成功）。切换只影响下一个 attempt。
+     *
+     * @param sessionId - 会话 ID。
+     * @param mode - 目标模式。
+     * @param options - expectedRevision 冲突保护与 lastManualRoute 记录。
+     */
+    async setSessionSelectionMode(sessionId, mode, options) {
+        const current = this.getSessionSelectionMode(sessionId);
+        if (options?.expectedRevision !== undefined &&
+            options.expectedRevision !== current.selectionRevision) {
+            throw new RoutingError('SELECTION_REVISION_CONFLICT', `expected selection revision ${options.expectedRevision} but current is ${current.selectionRevision}`);
+        }
+        const existing = this._selectionStates.get(sessionId);
+        const nextRevision = current.selectionRevision + 1;
+        this._selectionStates.set(sessionId, {
+            mode,
+            selectionRevision: nextRevision,
+            ...(mode === 'manual' && options?.lastManualRoute !== undefined
+                ? { lastManualRoute: options.lastManualRoute }
+                : existing?.lastManualRoute !== undefined
+                    ? { lastManualRoute: existing.lastManualRoute }
+                    : {}),
+            ...(existing?.lastDecisionConfigRevision !== undefined
+                ? { lastDecisionConfigRevision: existing.lastDecisionConfigRevision }
+                : {}),
+        });
+        // 下一 attempt 的 causes 追加 selection_mode_change（request state 消费一次性标记）
+        this._pendingModeChange.add(sessionId);
+        return { mode, selectionRevision: nextRevision };
+    }
+    /** 从 Session 事件流恢复会话选择状态（restore/fork 路径）。 */
+    restoreSessionSelection(sessionId, events) {
+        const restored = restoreGovernorSelection(events);
+        if (restored !== undefined) {
+            this._selectionStates.set(sessionId, restored);
+        }
+    }
+    /** 会话 dispose 时清理选择状态（与请求状态清理同生命周期）。 */
+    clearSessionSelection(sessionId) {
+        this._selectionStates.delete(sessionId);
     }
 }

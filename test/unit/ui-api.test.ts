@@ -1,11 +1,9 @@
 /**
- * UI HTTP API 单元测试：覆盖所有 API 端点与错误分支。
+ * UI HTTP API 单元测试（GOV-SEC-001 收敛版）：覆盖所有 API 端点、
+ * 方法级 capability 矩阵（匿名/read/manage/audit）、Bearer 认证、
+ * CORS 收敛（默认无 CORS 头、显式 origin 不返回 *）与错误分支。
  *
  * 使用 Node 内置 http 服务器 + fetch 客户端，不依赖 Playwright。
- * 覆盖：GET / 重定向、静态页面、GET /api/models（含分页）、
- * PATCH /api/models/:routeId（含 403/400/404）、GET /api/users、
- * PATCH /api/users/:userId（含 403/400/404）、GET /api/usage（含过滤）、
- * GET /api/decisions/:requestId、未知路由 404。
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { createGovernorApiServer } from '../../src/ui/api.js';
@@ -15,7 +13,10 @@ import type { FakeHarness } from '../contracts/harness.js';
 import type { Server } from 'node:http';
 import type { UsageEvent } from '../../src/usage/types.js';
 
-const ADMIN_TOKEN = 'test-admin-token';
+/** 全能力管理员 token（read+manage+audit）。 */
+const ADMIN_TOKEN = 'admin-token-0123456789abcdef0123456789abcdef';
+/** 只读 token（仅 governor.read）。 */
+const READER_TOKEN = 'reader-token-0123456789abcdef0123456789abcd';
 const ROUTE_A = 'fake-provider:model-a';
 
 let harness: FakeHarness;
@@ -43,7 +44,12 @@ beforeAll(async () => {
       identity: { provider: 'local' as const, local_user_id: 'local' },
     },
   );
-  server = createGovernorApiServer(harness.governor!, { adminToken: ADMIN_TOKEN });
+  server = createGovernorApiServer(harness.governor!, {
+    actors: [
+      { token: ADMIN_TOKEN, capabilities: ['governor.read', 'governor.manage', 'governor.audit'] },
+      { token: READER_TOKEN, capabilities: ['governor.read'] },
+    ],
+  });
   await new Promise<void>((resolve) => {
     server.listen(0, '127.0.0.1', () => {
       const addr = server.address();
@@ -59,13 +65,29 @@ afterAll(async () => {
   await harness?.dispose().catch(() => {});
 });
 
-/** 发送 HTTP 请求并返回 {status, body}。 */
+/**
+ * 发送 HTTP 请求并返回 {status, body}。
+ *
+ * @param path - 请求路径。
+ * @param init - method/body/headers/auth（'admin'|'reader'|'none'，默认 admin）。
+ */
 async function request(
   path: string,
-  init?: { method?: string; body?: unknown; headers?: Record<string, string> },
+  init?: {
+    method?: string;
+    body?: unknown;
+    headers?: Record<string, string>;
+    auth?: 'admin' | 'reader' | 'none';
+  },
 ): Promise<{ status: number; body: unknown; headers: Headers }> {
   const method = init?.method ?? 'GET';
   const headers: Record<string, string> = { ...init?.headers };
+  const auth = init?.auth ?? 'admin';
+  // 显式传入的 Authorization header 优先（测试错误 token 场景）。
+  if (headers['Authorization'] === undefined) {
+    if (auth === 'admin') headers['Authorization'] = `Bearer ${ADMIN_TOKEN}`;
+    else if (auth === 'reader') headers['Authorization'] = `Bearer ${READER_TOKEN}`;
+  }
   let bodyText: string | undefined;
   if (init?.body !== undefined) {
     bodyText = JSON.stringify(init.body);
@@ -178,39 +200,58 @@ describe('GET /api/models', () => {
     expect(body.offset).toBe(0);
   });
 
-  it('响应包含 CORS 头', async () => {
+  it('GOV-SEC-001：默认不返回 CORS 头（不返回通配 *）', async () => {
     const res = await request('/api/models');
-    expect(res.headers.get('Access-Control-Allow-Origin')).toBe('*');
-    expect(res.headers.get('Access-Control-Allow-Methods')).toContain('GET');
-    expect(res.headers.get('Access-Control-Allow-Methods')).toContain('PATCH');
+    expect(res.headers.get('Access-Control-Allow-Origin')).toBeNull();
+  });
+
+  it('GOV-SEC-001：匿名访问受保护资源 → 401 UNAUTHORIZED', async () => {
+    const res = await request('/api/models', { auth: 'none' });
+    expect(res.status).toBe(401);
+    expect((res.body as { code: string }).code).toBe('UNAUTHORIZED');
+  });
+
+  it('GOV-SEC-001：只读 token 可读（200）', async () => {
+    const res = await request('/api/models', { auth: 'reader' });
+    expect(res.status).toBe(200);
   });
 });
 
 // ===== PATCH /api/models/:routeId =====
 
 describe('PATCH /api/models/:routeId', () => {
-  it('无 admin token → 403 FORBIDDEN', async () => {
+  it('匿名 → 401 UNAUTHORIZED', async () => {
     const res = await request(`/api/models/${encodeURIComponent(ROUTE_A)}`, {
       method: 'PATCH',
       body: { enabled: false },
+      auth: 'none',
+    });
+    expect(res.status).toBe(401);
+    expect((res.body as { code: string }).code).toBe('UNAUTHORIZED');
+  });
+
+  it('GOV-SEC-001：只读 token 写入 → 403 FORBIDDEN', async () => {
+    const res = await request(`/api/models/${encodeURIComponent(ROUTE_A)}`, {
+      method: 'PATCH',
+      body: { enabled: false },
+      auth: 'reader',
     });
     expect(res.status).toBe(403);
     expect((res.body as { code: string }).code).toBe('FORBIDDEN');
   });
 
-  it('错误的 admin token → 403', async () => {
+  it('错误 token → 401', async () => {
     const res = await request(`/api/models/${encodeURIComponent(ROUTE_A)}`, {
       method: 'PATCH',
-      headers: { 'X-Governor-Admin': 'wrong-token' },
+      headers: { Authorization: 'Bearer wrong-token' },
       body: { enabled: false },
     });
-    expect(res.status).toBe(403);
+    expect(res.status).toBe(401);
   });
 
-  it('正确 admin token + 合法 patch → 200', async () => {
+  it('manage token + 合法 patch → 200', async () => {
     const res = await request(`/api/models/${encodeURIComponent(ROUTE_A)}`, {
       method: 'PATCH',
-      headers: { 'X-Governor-Admin': ADMIN_TOKEN },
       body: { enabled: true, multiplier: 1.5 },
     });
     expect(res.status).toBe(200);
@@ -226,7 +267,7 @@ describe('PATCH /api/models/:routeId', () => {
       method: 'PATCH',
       headers: {
         'Content-Type': 'application/json',
-        'X-Governor-Admin': ADMIN_TOKEN,
+        Authorization: `Bearer ${ADMIN_TOKEN}`,
       },
       body: 'not-valid-json',
     });
@@ -238,7 +279,6 @@ describe('PATCH /api/models/:routeId', () => {
   it('空 body → 视为 {} → 200（空 patch）', async () => {
     const res = await request(`/api/models/${encodeURIComponent(ROUTE_A)}`, {
       method: 'PATCH',
-      headers: { 'X-Governor-Admin': ADMIN_TOKEN },
     });
     expect(res.status).toBe(200);
   });
@@ -246,7 +286,6 @@ describe('PATCH /api/models/:routeId', () => {
   it('不存在的 routeId → 404 MODEL_NOT_FOUND', async () => {
     const res = await request('/api/models/fake-provider:no-such-model', {
       method: 'PATCH',
-      headers: { 'X-Governor-Admin': ADMIN_TOKEN },
       body: { enabled: false },
     });
     expect(res.status).toBe(404);
@@ -269,19 +308,29 @@ describe('GET /api/users', () => {
 // ===== PATCH /api/users/:userId =====
 
 describe('PATCH /api/users/:userId', () => {
-  it('无 admin token → 403 FORBIDDEN', async () => {
+  it('GOV-SEC-001：匿名 → 401 UNAUTHORIZED', async () => {
     const res = await request('/api/users/local', {
       method: 'PATCH',
       body: { monthlyCredits: 999 },
+      auth: 'none',
+    });
+    expect(res.status).toBe(401);
+    expect((res.body as { code: string }).code).toBe('UNAUTHORIZED');
+  });
+
+  it('GOV-SEC-001：只读 token 写入 → 403 FORBIDDEN', async () => {
+    const res = await request('/api/users/local', {
+      method: 'PATCH',
+      body: { monthlyCredits: 999 },
+      auth: 'reader',
     });
     expect(res.status).toBe(403);
     expect((res.body as { code: string }).code).toBe('FORBIDDEN');
   });
 
-  it('正确 admin token + 合法 patch → 200', async () => {
+  it('manage token + 合法 patch → 200', async () => {
     const res = await request('/api/users/local', {
       method: 'PATCH',
-      headers: { 'X-Governor-Admin': ADMIN_TOKEN },
       body: { monthlyCredits: 555 },
     });
     expect(res.status).toBe(200);
@@ -295,7 +344,7 @@ describe('PATCH /api/users/:userId', () => {
       method: 'PATCH',
       headers: {
         'Content-Type': 'application/json',
-        'X-Governor-Admin': ADMIN_TOKEN,
+        Authorization: `Bearer ${ADMIN_TOKEN}`,
       },
       body: '{invalid',
     });
@@ -307,7 +356,6 @@ describe('PATCH /api/users/:userId', () => {
   it('空 body → 视为 {} → 200（空 patch）', async () => {
     const res = await request('/api/users/alice', {
       method: 'PATCH',
-      headers: { 'X-Governor-Admin': ADMIN_TOKEN },
     });
     expect(res.status).toBe(200);
     const body = res.body as { userId: string; monthlyCredits: number };
@@ -317,7 +365,6 @@ describe('PATCH /api/users/:userId', () => {
   it('不存在的 userId → 404 USER_NOT_FOUND', async () => {
     const res = await request('/api/users/nobody', {
       method: 'PATCH',
-      headers: { 'X-Governor-Admin': ADMIN_TOKEN },
       body: { monthlyCredits: 1 },
     });
     expect(res.status).toBe(404);
@@ -437,17 +484,17 @@ describe('GET /api/decisions/:requestId', () => {
       async () => ({ provider: 'fake-provider', model: 'model-a' }),
     );
     const decisions = await harness.governor!.listDecisions();
-    const found = decisions.find((d) => d.selectedModel === 'model-a');
+    const found = decisions.items.find((d) => d.selectedRoute === 'fake-provider:model-a');
     requestId = found!.requestId;
   });
 
   it('返回指定 requestId 的决策记录', async () => {
     const res = await request(`/api/decisions/${encodeURIComponent(requestId)}`);
     expect(res.status).toBe(200);
-    const body = res.body as { data: Array<{ requestId: string; selectedModel: string }> };
+    const body = res.body as { data: Array<{ requestId: string; selectedRoute: string }> };
     expect(body.data).toHaveLength(1);
     expect(body.data[0]!.requestId).toBe(requestId);
-    expect(body.data[0]!.selectedModel).toBe('model-a');
+    expect(body.data[0]!.selectedRoute).toBe('fake-provider:model-a');
   });
 
   it('不存在的 requestId 返回空数组', async () => {
@@ -471,5 +518,144 @@ describe('未知路由', () => {
     const res = await request('/some/random/path');
     expect(res.status).toBe(404);
     expect((res.body as { code: string }).code).toBe('NOT_FOUND');
+  });
+});
+
+// ===== GOV-SEC-001 capability 矩阵（匿名 / read / manage / audit 及组合） =====
+
+describe('GOV-SEC-001 capability 矩阵', () => {  it('audit 端点：read-only token → 403 FORBIDDEN；audit token → 200', async () => {
+    const reader = await request('/api/audit', { auth: 'reader' });
+    expect(reader.status).toBe(403);
+    expect((reader.body as { code: string }).code).toBe('FORBIDDEN');
+    const admin = await request('/api/audit');
+    expect(admin.status).toBe(200);
+    const body = admin.body as { data: Array<{ action: string }> };
+    // 管理写入产生了审计条目（updateModel/updateUser）
+    expect(body.data.length).toBeGreaterThan(0);
+  });
+
+  it('audit 端点：匿名 → 401 UNAUTHORIZED', async () => {
+    const res = await request('/api/audit', { auth: 'none' });
+    expect(res.status).toBe(401);
+    expect((res.body as { code: string }).code).toBe('UNAUTHORIZED');
+  });
+
+  it('health 端点：read token 返回存储/对账健康摘要', async () => {
+    const res = await request('/api/health', { auth: 'reader' });
+    expect(res.status).toBe(200);
+    const body = res.body as { storage: string; pendingDecisions: number; configRevision: number };
+    expect(body.storage).toBe('available');
+    expect(body.pendingDecisions).toBe(0);
+    expect(body.configRevision).toBeGreaterThanOrEqual(1);
+  });
+
+  it('错误响应只包含 code/requestId（安全摘要，无内部细节）', async () => {
+    const res = await request('/api/models', { auth: 'none' });
+    const body = res.body as Record<string, unknown>;
+    expect(Object.keys(body).sort()).toEqual(['code', 'requestId']);
+  });
+
+  it('请求体超过 256 KiB → 413 PAYLOAD_TOO_LARGE', async () => {
+    const big = { multiplier: 1, filler: 'x'.repeat(300 * 1024) };
+    const res = await fetch(`${baseUrl}/api/models/${encodeURIComponent(ROUTE_A)}`, {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${ADMIN_TOKEN}`,
+      },
+      body: JSON.stringify(big),
+    });
+    expect(res.status).toBe(413);
+  });
+
+  it('OPTIONS 预检：默认无 CORS 头（204）', async () => {
+    const res = await fetch(`${baseUrl}/api/models`, { method: 'OPTIONS' });
+    expect(res.status).toBe(204);
+    expect(res.headers.get('Access-Control-Allow-Origin')).toBeNull();
+  });
+
+  it('usage 过滤参数传递（provider+userId 组合）', async () => {
+    const res = await request('/api/usage?userId=user-1&provider=fake-provider');
+    expect(res.status).toBe(200);
+    const body = res.body as { data: unknown[] };
+    expect(Array.isArray(body.data)).toBe(true);
+  });
+
+  it('REVISION_CONFLICT 映射为 409', async () => {
+    // 用过期 expectedRevision 触发冲突
+    const res = await request(
+      `/api/models/${encodeURIComponent(ROUTE_A)}?expectedRevision=99999`,
+      { method: 'PATCH', body: { multiplier: 2 } },
+    );
+    expect(res.status).toBe(409);
+    expect((res.body as { code: string }).code).toBe('REVISION_CONFLICT');
+  });
+
+  it('INVALID_MULTIPLIER 映射为 400（Host 拒绝超界值）', async () => {
+    const res = await request(`/api/models/${encodeURIComponent(ROUTE_A)}`, {
+      method: 'PATCH',
+      body: { multiplier: -1 },
+    });
+    expect(res.status).toBe(400);
+    expect((res.body as { code: string }).code).toBe('INVALID_MULTIPLIER');
+  });
+
+  it('audit limit 参数钳制（>200 → 200）', async () => {
+    const res = await request('/api/audit?limit=99999');
+    expect(res.status).toBe(200);
+  });
+
+  it('decisions 端点：匿名 401 / 只读 token 200', async () => {
+    const anon = await request('/api/decisions/some-req', { auth: 'none' });
+    expect(anon.status).toBe(401);
+    const reader = await request('/api/decisions/some-req', { auth: 'reader' });
+    expect(reader.status).toBe(200);
+    const body = reader.body as { data: unknown[] };
+    expect(Array.isArray(body.data)).toBe(true);
+  });
+
+  it('health 端点：匿名 401；usage 端点：匿名 401 / reader 200', async () => {
+    const healthAnon = await request('/api/health', { auth: 'none' });
+    expect(healthAnon.status).toBe(401);
+    const usageAnon = await request('/api/usage', { auth: 'none' });
+    expect(usageAnon.status).toBe(401);
+    const usageReader = await request('/api/usage', { auth: 'reader' });
+    expect(usageReader.status).toBe(200);
+  });
+
+  it('users 端点：匿名 401；models 分页 limit 超上限钳制 200', async () => {
+    const usersAnon = await request('/api/users', { auth: 'none' });
+    expect(usersAnon.status).toBe(401);
+    const res = await request('/api/models?limit=99999');
+    expect(res.status).toBe(200);
+    const body = res.body as { limit: number };
+    expect(body.limit).toBe(200);
+  });
+});
+
+describe('GOV-SEC-001 显式 allowedOrigin（CORS 收敛）', () => {
+  it('配置 allowedOrigin 时返回该 origin（不返回 *）；OPTIONS 返回预检头', async () => {
+    const { createGovernorApiServer } = await import('../../src/ui/api.js');
+    const origin = 'https://dsh-web.example.com';
+    const server2 = createGovernorApiServer(harness.governor!, {
+      actors: [{ token: ADMIN_TOKEN, capabilities: ['governor.read'] }],
+      allowedOrigin: origin,
+    });
+    await new Promise<void>((resolve) => server2.listen(0, '127.0.0.1', () => resolve()));
+    const addr = server2.address();
+    const port = typeof addr === 'object' && addr ? addr.port : 0;
+    try {
+      const res = await fetch(`http://127.0.0.1:${port}/api/models`, {
+        headers: { Authorization: `Bearer ${ADMIN_TOKEN}`, Origin: origin },
+      });
+      expect(res.status).toBe(200);
+      expect(res.headers.get('Access-Control-Allow-Origin')).toBe(origin);
+      expect(res.headers.get('Access-Control-Allow-Origin')).not.toBe('*');
+      const preflight = await fetch(`http://127.0.0.1:${port}/api/models`, { method: 'OPTIONS' });
+      expect(preflight.status).toBe(204);
+      expect(preflight.headers.get('Access-Control-Allow-Origin')).toBe(origin);
+    } finally {
+      await new Promise<void>((resolve) => server2.close(() => resolve()));
+    }
   });
 });

@@ -1,5 +1,19 @@
 # DSH LLM Governor 实施与验收计划
 
+> **状态更新（2026-08-21）**：Phase 0–5 全部完成（见 §9 基线验收），并完成
+> `docs/OPTIMIZATION_REQUIREMENTS.md` 的 P0/P1/P2 优化实现：
+>
+> - 任务交付与逐项 AC 证据见 `PROGRESS.md`；上游接缝缺口与可复现证据见
+>   `docs/UPSTREAM_SEAMS.md`（SEAM-1~5）；受阻断项及缓解见 `BLOCKED.md`。
+> - 测试矩阵新增：决策核心（`test/unit/decision.test.ts`）、双写审计与
+>   故障注入（`test/integration/audit-pipeline.test.ts`，含 fail-closed
+>   反向验证红→绿）、状态压测（`state-lifecycle.test.ts`，10k 请求/并发 100）、
+>   会话选择模式（`selection-mode.test.ts`）、compatApi（`compat-api.test.ts`
+>   + `plugin-apply.test.ts`）、P1/P2 运营（`ops-p1p2.test.ts`，全部含 GOV ID）。
+> - 全量 40 files / 717 tests 全过、skipped 0；coverage
+>   stmts 95.89% / branches 87.84% / funcs 96.67% / lines 96.85%
+>   （四项均高于优化前基线）。
+
 ## 1. 交付策略
 
 分六个可独立验收的阶段推进。每个阶段结束时必须通过其测试，不把兼容性风险推到

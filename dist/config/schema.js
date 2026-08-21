@@ -50,6 +50,7 @@ const TOP_LEVEL_FIELDS = [
     'users',
     'storage',
     'ui',
+    'compat_api',
 ];
 const IDENTITY_FIELDS = [
     'provider',
@@ -657,6 +658,56 @@ function parseUi(value) {
         : 0;
     return { enabled, port };
 }
+// 允许的 compat_api 字段名。
+const COMPAT_API_FIELDS = [
+    'enabled',
+    'port',
+    'listen',
+    'token',
+    'allowed_origin',
+];
+/** 解析 compat_api 配置块（GOV-UI-001：默认 enabled=false，仅 loopback）。 */
+function parseCompatApi(value) {
+    if (value === undefined || value === null) {
+        return { enabled: false };
+    }
+    if (!isObject(value)) {
+        throw new ConfigError('expected object', 'CONFIG_TYPE_ERROR', 'compat_api');
+    }
+    rejectUnknownKeys(value, COMPAT_API_FIELDS, 'compat_api');
+    const enabled = value['enabled'] !== undefined ? parseBoolean(value['enabled'], 'compat_api.enabled') : false;
+    const port = value['port'] !== undefined
+        ? (() => {
+            const p = parsePositiveInteger(value['port'], 'compat_api.port');
+            if (p > 65535) {
+                throw new ConfigError(`expected port in [1, 65535], got ${p}`, 'CONFIG_RANGE_ERROR', 'compat_api.port');
+            }
+            return p;
+        })()
+        : undefined;
+    const listen = value['listen'] !== undefined
+        ? (() => {
+            const l = value['listen'];
+            if (l !== '127.0.0.1' && l !== '[::1]') {
+                throw new ConfigError("expected '127.0.0.1' or '[::1]'", 'CONFIG_VALUE_ERROR', 'compat_api.listen');
+            }
+            return l;
+        })()
+        : undefined;
+    const token = value['token'] !== undefined
+        ? parseNonEmptyString(value['token'], 'compat_api.token')
+        : undefined;
+    const allowedOrigin = value['allowed_origin'] !== undefined
+        ? parseNonEmptyString(value['allowed_origin'], 'compat_api.allowed_origin')
+        : undefined;
+    return {
+        enabled,
+        ...(port !== undefined ? { port } : {}),
+        ...(listen !== undefined ? { listen } : {}),
+        ...(token !== undefined ? { token } : {}),
+        ...(allowedOrigin !== undefined ? { allowedOrigin } : {}),
+    };
+}
 // ===== 主解析器 =====
 /**
  * 验证并规范化配置。
@@ -682,6 +733,7 @@ export function resolveConfig(raw) {
     const users = parseUsers(raw['users']);
     const storage = parseStorage(raw['storage']);
     const ui = parseUi(raw['ui']);
+    const compatApi = parseCompatApi(raw['compat_api']);
     return {
         schemaVersion,
         revision: INITIAL_REVISION,
@@ -694,6 +746,9 @@ export function resolveConfig(raw) {
         users,
         storage,
         ui,
+        ...(compatApi.enabled || compatApi.token !== undefined || compatApi.port !== undefined
+            ? { compatApi }
+            : {}),
     };
 }
 // ===== 转换函数 =====

@@ -582,13 +582,13 @@ describe('client remote', () => {
         provider: 'fake-provider',
         model: 'model-a',
       }));
-      // 通过 listDecisions 获取 requestId
+      // 通过 listDecisions 获取 requestId（Repository 权威视图）
       const all = await h.governor!.listDecisions();
-      expect(all).toHaveLength(1);
-      const explained = await h.governor!.explainDecision(all[0]!.requestId);
+      expect(all.items).toHaveLength(1);
+      const explained = await h.governor!.explainDecision(all.items[0]!.requestId);
       expect(explained).toHaveLength(1);
-      expect(explained[0]!.selectedProvider).toBe('fake-provider');
-      expect(explained[0]!.selectedModel).toBe('model-a');
+      expect(explained[0]!.selectedRoute).toBe('fake-provider:model-a');
+      expect(explained[0]!.auditState).toBe('committed');
     } finally {
       await h.dispose();
     }

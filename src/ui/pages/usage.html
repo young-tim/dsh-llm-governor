@@ -69,7 +69,10 @@
       if (user) params.set('userId', user);
       if (provider) params.set('provider', provider);
 
-      var res = await fetch(API_BASE + '/api/usage?' + params.toString());
+      var savedToken = localStorage.getItem('governor-token');
+      var res = await fetch(API_BASE + '/api/usage?' + params.toString(), {
+        headers: savedToken ? { Authorization: 'Bearer ' + savedToken } : {},
+      });
       var data = await res.json();
       var tbody = document.getElementById('usage-body');
       tbody.innerHTML = '';

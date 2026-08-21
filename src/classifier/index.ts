@@ -23,6 +23,7 @@ import type {
 } from './types.js';
 import { classifyByHint } from './hint.js';
 import { classifyByRule } from './rule.js';
+import { createSingleFlight } from './sqlite-cache.js';
 
 export type {
   Classification,
@@ -34,6 +35,13 @@ export { classifyByHint } from './hint.js';
 export { classifyByRule, complexityByLength } from './rule.js';
 export { InMemoryClassifierCache } from './cache.js';
 export type { InMemoryClassifierCacheOptions } from './cache.js';
+export {
+  SQLiteClassifierCache,
+  createSingleFlight,
+  hmacInputHash,
+  buildClassifierCacheKey,
+  CLASSIFIER_CACHE_TTL_MS,
+} from './sqlite-cache.js';
 
 /** 默认 fallback 分类结果：低置信度让路由层切 Quality First。 */
 const DEFAULT_FALLBACK: Classification = {
@@ -60,6 +68,13 @@ export interface ClassifierConfig {
   llmBackend?: LlmClassifierBackend;
   /** 可选缓存；不提供则不缓存 LLM 结果。 */
   cache?: ClassifierCache;
+  /**
+   * 缓存键构造器（GOV-CLASSIFIER-001：HMAC 键 + route + promptVersion +
+   * configRevision + tenantScope）。提供时优先使用；否则用旧式 sha256 键。
+   */
+  cacheKeyBuilder?: (canonicalInput: string, configRevision: number) => string;
+  /** 当前配置 revision 的读取器（缓存键组成；缺省为 1）。 */
+  configRevisionGetter?: () => number;
 }
 
 /** Classifier 实例。 */
@@ -69,47 +84,62 @@ export interface Classifier {
 }
 
 /**
- * 规范化分类输入并生成 sha256 哈希，用作缓存键的输入部分。
+ * 规范化分类输入（缓存键的输入部分）。
  * @param input - 分类输入。
- * @returns 输入哈希（hex）。
+ * @returns 规范化 JSON 文本。
  */
-function hashInput(input: ClassifyInput): string {
+function canonicalInputOf(input: ClassifyInput): string {
   const normalized = {
     messages: input.messages.map((m) => ({ type: m.type, text: m.text ?? '' })),
     hasImage: input.hasImage ?? false,
     hasToolContext: input.hasToolContext ?? false,
     explicitHint: input.explicitHint ?? '',
   };
-  return createHash('sha256').update(JSON.stringify(normalized)).digest('hex');
+  return JSON.stringify(normalized);
 }
 
 /**
- * 构造 LLM 阶段的缓存键。
+ * 规范化分类输入并生成 sha256 哈希，用作缓存键的输入部分。
+ * @param input - 分类输入。
+ * @returns 输入哈希（hex）。
+ */
+function hashInput(input: ClassifyInput): string {
+  return createHash('sha256').update(canonicalInputOf(input)).digest('hex');
+}
+
+/**
+ * 构造 LLM 阶段的缓存键（旧式；cacheKeyBuilder 存在时优先）。
  *
  * 键组成：inputHash : classifierRoute : promptVersion : configRevision
  * 保证同一输入+配置下决策稳定可复用。
  * @param input - 分类输入。
+ * @param configRevision - 当前配置 revision。
  */
-function buildCacheKey(input: ClassifyInput): string {
-  return `${hashInput(input)}:${CLASSIFIER_ROUTE}:${PROMPT_VERSION}:${DEFAULT_CONFIG_REVISION}`;
+function buildCacheKey(input: ClassifyInput, configRevision: number): string {
+  return `${hashInput(input)}:${CLASSIFIER_ROUTE}:${PROMPT_VERSION}:${configRevision}`;
 }
 
 /**
  * 创建分类器实例。
  *
- * @param config - 配置：置信度阈值、可选 LLM 后端、可选缓存。
+ * @param config - 配置：置信度阈值、可选 LLM 后端、可选缓存、缓存键构造器。
  * @returns Classifier 实例，提供 async classify(input)。
  */
 export function createClassifier(config: ClassifierConfig): Classifier {
   const cache: ClassifierCache | undefined = config.cache;
   const llmBackend: LlmClassifierBackend | undefined = config.llmBackend;
+  const cacheKeyBuilder = config.cacheKeyBuilder;
+  const configRevisionGetter = config.configRevisionGetter ?? (() => DEFAULT_CONFIG_REVISION);
+  // GOV-CLASSIFIER-001：同一缓存键并发请求 single-flight，只产生一次 classifier 调用
+  const singleFlight = createSingleFlight();
 
   return {
     /**
      * 执行分类。
      *
-     * 顺序：Hint → Rule → LLM（带缓存）→ 默认 fallback。
-     * LLM 抛错或非法输出时降级为默认 fallback。
+     * 顺序：Hint → Rule → LLM（带缓存 + single-flight）→ 默认 fallback。
+     * LLM 抛错或非法输出时降级为默认 fallback；低置信度结果不缓存
+     * （GOV-CLASSIFIER-001 AC 3）。
      */
     async classify(input: ClassifyInput): Promise<Classification> {
       // 1. Hint：上下文确定性信号
@@ -120,25 +150,33 @@ export function createClassifier(config: ClassifierConfig): Classifier {
       const ruleResult = classifyByRule(input);
       if (ruleResult !== undefined) return ruleResult;
 
-      // 3. LLM：轻量模型分类（带缓存）
+      // 3. LLM：轻量模型分类（带缓存 + single-flight）
       if (llmBackend !== undefined) {
-        const cacheKey = buildCacheKey(input);
+        const configRevision = configRevisionGetter();
+        const cacheKey =
+          cacheKeyBuilder !== undefined
+            ? cacheKeyBuilder(canonicalInputOf(input), configRevision)
+            : buildCacheKey(input, configRevision);
         if (cache !== undefined) {
           const cached = cache.get(cacheKey);
           if (cached !== undefined) return cached;
         }
 
-        try {
-          const llmResult = await llmBackend.classify(input);
-          if (cache !== undefined) {
-            cache.set(cacheKey, llmResult);
+        const result = await singleFlight.run(cacheKey, async () => {
+          try {
+            const llmResult = await llmBackend.classify(input);
+            // 低置信度结果不缓存（GOV-CLASSIFIER-001 AC 3）
+            if (cache !== undefined && llmResult.confidence >= config.confidenceThreshold) {
+              cache.set(cacheKey, llmResult);
+            }
+            return llmResult;
+          } catch {
+            // 非法输出 / 超时 / 网络错误：降级为默认 fallback，不缓存
+            // confidence=0 < threshold，路由层会切 Quality First
+            return { ...DEFAULT_FALLBACK };
           }
-          return llmResult;
-        } catch {
-          // 非法输出 / 超时 / 网络错误：降级为默认 fallback
-          // confidence=0 < threshold，路由层会切 Quality First
-          return { ...DEFAULT_FALLBACK };
-        }
+        });
+        return result;
       }
 
       // 4. 默认 fallback：general, medium, 0, 'rule'

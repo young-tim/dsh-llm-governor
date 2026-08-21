@@ -55,13 +55,13 @@
     // 获取管理员令牌。
     function token() {
       var v = document.getElementById('admin-token').value;
-      if (v) localStorage.setItem('governor-admin-token', v);
+      if (v) localStorage.setItem('governor-token', v);
       return v || null;
     }
 
     // 恢复上次输入的管理员令牌。
     (function restoreToken() {
-      var saved = localStorage.getItem('governor-admin-token');
+      var saved = localStorage.getItem('governor-token');
       if (saved) document.getElementById('admin-token').value = saved;
     })();
 
@@ -69,7 +69,10 @@
     async function loadUsers() {
       var msg = document.getElementById('msg');
       msg.textContent = '';
-      var res = await fetch(API_BASE + '/api/users');
+      var savedToken = localStorage.getItem('governor-token');
+      var res = await fetch(API_BASE + '/api/users', {
+        headers: savedToken ? { Authorization: 'Bearer ' + savedToken } : {},
+      });
       var data = await res.json();
       var tbody = document.getElementById('users-body');
       tbody.innerHTML = '';
@@ -91,7 +94,7 @@
       var msg = document.getElementById('msg');
       var headers = { 'Content-Type': 'application/json' };
       var t = token();
-      if (t) headers['X-Governor-Admin'] = t;
+      if (t) headers['Authorization'] = 'Bearer ' + t;
       var res = await fetch(API_BASE + '/api/users/' + encodeURIComponent(userId), {
         method: 'PATCH',
         headers: headers,
