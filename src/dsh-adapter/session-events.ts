@@ -174,7 +174,10 @@ export function findGovernorSelectionMode(
   selectionRevision: number,
 ): SessionEvent<'governor/selection-mode'> | undefined {
   for (const event of session.events) {
-    if (event.type === 'governor/selection-mode' && event.data.selectionRevision === selectionRevision) {
+    if (
+      event.type === 'governor/selection-mode' &&
+      event.data.selectionRevision === selectionRevision
+    ) {
       return event;
     }
   }

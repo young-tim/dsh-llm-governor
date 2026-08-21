@@ -44,17 +44,26 @@ export type SessionResolver = (sessionId: string) => Session | undefined;
 export class SessionStoreSink implements SessionEventSink {
   private readonly _resolve: SessionResolver;
   private readonly _flush: (session: Session) => Promise<boolean>;
+  private readonly _sessions: () => Session[];
 
-  constructor(resolve: SessionResolver, flush: (session: Session) => Promise<boolean>) {
+  constructor(
+    resolve: SessionResolver,
+    flush: (session: Session) => Promise<boolean>,
+    sessions?: () => Session[],
+  ) {
     this._resolve = resolve;
     this._flush = flush;
+    this._sessions = sessions ?? (() => []);
   }
 
   /** 幂等追加决策事件并等待 durable ack。 */
   async appendDecision(decision: SealedDecision, context: { sessionId: string }): Promise<void> {
     const session = this._resolve(context.sessionId);
     if (session === undefined) {
-      throw new RoutingError('AUDIT_PERSIST_FAILED', `session ${context.sessionId} not live for decision append`);
+      throw new RoutingError(
+        'AUDIT_PERSIST_FAILED',
+        `session ${context.sessionId} not live for decision append`,
+      );
     }
     appendGovernorDecision(session, this._toEventData(decision));
     const participated = await this._flush(session);
@@ -72,11 +81,6 @@ export class SessionStoreSink implements SessionEventSink {
       if (findGovernorDecision(session, decisionId) !== undefined) return true;
     }
     return false;
-  }
-
-  /** 枚举已知会话（对账扫描用；接线层提供）。 */
-  private _sessions(): Session[] {
-    return [];
   }
 
   /** 将 SealedDecision 映射为 Session Event 数据。 */
@@ -101,7 +105,10 @@ export class SessionStoreSink implements SessionEventSink {
         ...(c.quality !== undefined ? { quality: c.quality } : {}),
         multiplierPpm: c.multiplierPpm,
       })),
-      excluded: decision.excludedTruncation.items.map((e) => ({ routeId: e.routeId, reason: e.reason })),
+      excluded: decision.excludedTruncation.items.map((e) => ({
+        routeId: e.routeId,
+        reason: e.reason,
+      })),
       outcome: decision.outcome,
       configRevision: decision.configRevision,
       ...(decision.errorCode !== undefined ? { errorCode: decision.errorCode } : {}),
@@ -171,7 +178,10 @@ export class AuditPipeline {
         `decision ${decision.decisionId} session event append failed: ${String(err)}`,
       );
     }
-    const committed = this._repository.markDecisionCommitted(decision.decisionId, decision.decisionHash);
+    const committed = this._repository.markDecisionCommitted(
+      decision.decisionId,
+      decision.decisionHash,
+    );
     if (!committed) {
       // 幂等重入（已 committed）或并发写入；确认最终状态后放行。
       const row = this._repository.getDecisions(decision.requestId, decision.fallbackIndex)[0];
@@ -204,7 +214,9 @@ export class AuditPipeline {
       const exists = await this._sink.hasDecision(row.decisionId);
       if (!exists) {
         try {
-          await this._sink.appendDecision(this._reconstruct(row), { sessionId: row.sessionId ?? 'unknown' });
+          await this._sink.appendDecision(this._reconstruct(row), {
+            sessionId: row.sessionId ?? 'unknown',
+          });
         } catch {
           // 会话不可写：保留 pending（诊断视图显示“审计未完成”）。
           result.pending += 1;
@@ -256,7 +268,11 @@ export class AuditPipeline {
       ...(row.errorCode != null ? { errorCode: row.errorCode } : {}),
       configRevision: row.configRevision,
       createdAt: row.createdAt,
-      candidateTruncation: { items: row.candidates.map((c) => ({ ...c })), totalCount: row.candidates.length, truncated: false },
+      candidateTruncation: {
+        items: row.candidates.map((c) => ({ ...c })),
+        totalCount: row.candidates.length,
+        truncated: false,
+      },
       excludedTruncation: {
         items: row.excluded.map((e) => ({ ...e })) as SealedDecision['excludedTruncation']['items'],
         totalCount: row.excluded.length,

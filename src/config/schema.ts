@@ -1051,7 +1051,9 @@ function parseCompatApi(value: unknown): CompatApiConfig {
         })()
       : undefined;
   const token =
-    value['token'] !== undefined ? parseNonEmptyString(value['token'], 'compat_api.token') : undefined;
+    value['token'] !== undefined
+      ? parseNonEmptyString(value['token'], 'compat_api.token')
+      : undefined;
   const allowedOrigin =
     value['allowed_origin'] !== undefined
       ? parseNonEmptyString(value['allowed_origin'], 'compat_api.allowed_origin')

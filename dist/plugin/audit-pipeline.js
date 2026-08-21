@@ -8,11 +8,11 @@ import { appendGovernorDecision, findGovernorDecision, GOVERNOR_SESSION_EVENT_SC
 export class SessionStoreSink {
     _resolve;
     _flush;
-    _listSessions;
-    constructor(resolve, flush, listSessions) {
+    _sessions;
+    constructor(resolve, flush, sessions) {
         this._resolve = resolve;
         this._flush = flush;
-        this._listSessions = listSessions ?? (() => []);
+        this._sessions = sessions ?? (() => []);
     }
     /** 幂等追加决策事件并等待 durable ack。 */
     async appendDecision(decision, context) {
@@ -28,7 +28,7 @@ export class SessionStoreSink {
     }
     /** 查询 Session log 中是否已存在该决策事件。 */
     async hasDecision(decisionId) {
-        for (const session of this._listSessions()) {
+        for (const session of this._sessions()) {
             if (findGovernorDecision(session, decisionId) !== undefined)
                 return true;
         }

@@ -45,10 +45,10 @@ describe('GOV-STATE-001 请求状态生命周期压测', () => {
       const ctx = new Context();
       const llm = ctx.plugin(LlmRuntime);
       await llm;
-      const adapter = new FakeLlmAdapter(
-        providers,
-        models,
-        (options: never, callIndex: number) => (callIndex % 5 === 0 ? rateLimitScript() : successScript('ok', { inputTokens: 1, outputTokens: 1 })),
+      const adapter = new FakeLlmAdapter(providers, models, (options: never, callIndex: number) =>
+        callIndex % 5 === 0
+          ? rateLimitScript()
+          : successScript('ok', { inputTokens: 1, outputTokens: 1 }),
       );
       const disposeAdapter = ctx.llm.registerAdapter(providers, adapter);
       const dbDir = mkdtempSync(join(tmpdir(), 'dsh-gov-stress-'));
@@ -78,7 +78,12 @@ describe('GOV-STATE-001 请求状态生命周期压测', () => {
             });
             // 模拟 20% 失败/取消：不执行 dispatch，直接标记 terminal
             if (i % 5 === 0) {
-              service.markAttemptTerminal(sessionId, turn, step, i % 10 === 0 ? 'cancelled' : 'failed');
+              service.markAttemptTerminal(
+                sessionId,
+                turn,
+                step,
+                i % 10 === 0 ? 'cancelled' : 'failed',
+              );
             } else {
               // 正常路径：dispatch → usage → terminal（10% Fallback 场景由脚本 429 触发重选）
               const opts = {

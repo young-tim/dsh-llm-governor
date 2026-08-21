@@ -36,8 +36,8 @@ export type SessionResolver = (sessionId: string) => Session | undefined;
 export declare class SessionStoreSink implements SessionEventSink {
     private readonly _resolve;
     private readonly _flush;
-    private readonly _listSessions;
-    constructor(resolve: SessionResolver, flush: (session: Session) => Promise<boolean>, listSessions?: () => Session[]);
+    private readonly _sessions;
+    constructor(resolve: SessionResolver, flush: (session: Session) => Promise<boolean>, sessions?: () => Session[]);
     /** 幂等追加决策事件并等待 durable ack。 */
     appendDecision(decision: SealedDecision, context: {
         sessionId: string;

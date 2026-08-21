@@ -128,7 +128,9 @@ describe('GOV-DECISION decisionHash', () => {
     const h1 = computeDecisionHash(base);
     expect(computeDecisionHash({ ...base, selectedRoute: 'p:other' })).not.toBe(h1);
     expect(computeDecisionHash({ ...base, configRevision: 2 })).not.toBe(h1);
-    expect(computeDecisionHash({ ...base, outcome: 'rejected', errorCode: 'NO_MODEL_MATCHED' })).not.toBe(h1);
+    expect(
+      computeDecisionHash({ ...base, outcome: 'rejected', errorCode: 'NO_MODEL_MATCHED' }),
+    ).not.toBe(h1);
   });
 });
 

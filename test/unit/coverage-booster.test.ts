@@ -8,8 +8,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Context } from '../../src/dsh-adapter/mod.js';
 import SessionStore from '@deepseek-ai/dsh-session';
-import type { Session } from '@deepseek-ai/dsh-session';
-import { SessionStoreSink, NullSessionEventSink, AuditPipeline } from '../../src/plugin/audit-pipeline.js';
+import {
+  SessionStoreSink,
+  NullSessionEventSink,
+  AuditPipeline,
+} from '../../src/plugin/audit-pipeline.js';
 import { sealDecision } from '../../src/routing/decision.js';
 import { GovernorDatabase } from '../../src/storage/database.js';
 import { GovernorRepository } from '../../src/storage/repository.js';
@@ -50,7 +53,7 @@ describe('GOV-TRACE-001 SessionStoreSink（内存 Session 的完整双写）', (
     const sessions = new Map([['sink-1', session]]);
     const sink = new SessionStoreSink(
       (id) => sessions.get(id),
-      async (s) => {
+      async () => {
         // durable ack：flush 参与返回 true
         return true;
       },
@@ -69,8 +72,13 @@ describe('GOV-TRACE-001 SessionStoreSink（内存 Session 的完整双写）', (
   });
 
   it('appendDecision 会话不存在时抛 AUDIT_PERSIST_FAILED', async () => {
-    const sink = new SessionStoreSink(() => undefined, async () => true);
-    await expect(sink.appendDecision(decision('req-x'), { sessionId: 'missing' })).rejects.toMatchObject({
+    const sink = new SessionStoreSink(
+      () => undefined,
+      async () => true,
+    );
+    await expect(
+      sink.appendDecision(decision('req-x'), { sessionId: 'missing' }),
+    ).rejects.toMatchObject({
       code: 'AUDIT_PERSIST_FAILED',
     });
   });
@@ -80,8 +88,13 @@ describe('GOV-TRACE-001 SessionStoreSink（内存 Session 的完整双写）', (
     const store = ctx.plugin(SessionStore);
     await store;
     const session = ctx.sessions.create('sink-2', { meta: { cwd: process.cwd() } });
-    const sink = new SessionStoreSink(() => session, async () => false);
-    await expect(sink.appendDecision(decision('req-y'), { sessionId: 'sink-2' })).rejects.toMatchObject({
+    const sink = new SessionStoreSink(
+      () => session,
+      async () => false,
+    );
+    await expect(
+      sink.appendDecision(decision('req-y'), { sessionId: 'sink-2' }),
+    ).rejects.toMatchObject({
       code: 'AUDIT_PERSIST_FAILED',
     });
     await store.dispose();
@@ -89,7 +102,9 @@ describe('GOV-TRACE-001 SessionStoreSink（内存 Session 的完整双写）', (
 
   it('NullSessionEventSink：append 直接确认，hasDecision 恒 false', async () => {
     const sink = new NullSessionEventSink();
-    await expect(sink.appendDecision(decision('req-n'), { sessionId: 's' })).resolves.toBeUndefined();
+    await expect(
+      sink.appendDecision(decision('req-n'), { sessionId: 's' }),
+    ).resolves.toBeUndefined();
     await expect(sink.hasDecision('req-n:0')).resolves.toBe(false);
   });
 
@@ -174,7 +189,9 @@ describe('GOV-TRACE-001 AuditPipeline 对账分支', () => {
     const pipeline = new AuditPipeline(repo, failingSink);
     repo.insertSealedDecision(decision('br-2'), { sessionId: 's' });
     // sink 失败：CAS 未执行 → AUDIT_PERSIST_FAILED
-    await expect(pipeline.commitDecision(decision('br-2'), { sessionId: 's' })).rejects.toMatchObject({
+    await expect(
+      pipeline.commitDecision(decision('br-2'), { sessionId: 's' }),
+    ).rejects.toMatchObject({
       code: 'AUDIT_PERSIST_FAILED',
     });
     // 幂等重入：已 committed 的决策再次 commit 成功（已 committed 分支）
@@ -235,7 +252,10 @@ describe('GOV-OPS-002 导出辅助与上限分支', () => {
   };
 
   it('toUsageExportRows：假名化 + 字段扁平（conversation 默认）', () => {
-    const rows = toUsageExportRows([usageRow, { ...usageRow, usageKind: undefined, parentRequestId: undefined, fallbackIndex: 1 }]);
+    const rows = toUsageExportRows([
+      usageRow,
+      { ...usageRow, usageKind: undefined, parentRequestId: undefined, fallbackIndex: 1 },
+    ]);
     expect(rows[0]!.pseudonymousUser).toMatch(/^user-[0-9a-f]{8}$/);
     expect(rows[0]!.pseudonymousUser).not.toBe('user@example.com');
     expect(rows[0]!.usageKind).toBe('classifier');
@@ -248,12 +268,25 @@ describe('GOV-OPS-002 导出辅助与上限分支', () => {
   it('toDecisionExportRows：可选字段条件展开', () => {
     const rows = toDecisionExportRows([
       {
-        decisionId: 'd1', requestId: 'r1', sessionId: 's', turn: 1, step: 1,
-        fallbackIndex: 0, trigger: 'initial', selectionMode: 'auto',
-        effectiveStrategy: 'credit_first', mode: 'auto', candidates: [],
-        candidateTruncated: false, excluded: [], excludedTruncated: false,
-        outcome: 'selected', selectedRoute: 'p:m', auditState: 'committed',
-        configRevision: 1, createdAt: '2026-08-21T00:00:00Z',
+        decisionId: 'd1',
+        requestId: 'r1',
+        sessionId: 's',
+        turn: 1,
+        step: 1,
+        fallbackIndex: 0,
+        trigger: 'initial',
+        selectionMode: 'auto',
+        effectiveStrategy: 'credit_first',
+        mode: 'auto',
+        candidates: [],
+        candidateTruncated: false,
+        excluded: [],
+        excludedTruncated: false,
+        outcome: 'selected',
+        selectedRoute: 'p:m',
+        auditState: 'committed',
+        configRevision: 1,
+        createdAt: '2026-08-21T00:00:00Z',
       },
     ]);
     expect(rows[0]!.decisionId).toBe('d1');
@@ -280,15 +313,27 @@ describe('GOV-OPS-002 导出辅助与上限分支', () => {
   it('toDecisionExportRows：全字段缺失的最小行（条件分支全 false）', () => {
     const rows = toDecisionExportRows([
       {
-        decisionId: 'd-min', requestId: 'r-min', fallbackIndex: 0,
-        mode: 'manual', candidates: [], candidateTruncated: false,
-        excluded: [], excludedTruncated: false, outcome: 'rejected',
-        auditState: 'pending', configRevision: 1, createdAt: '2026-08-21T00:00:00Z',
+        decisionId: 'd-min',
+        requestId: 'r-min',
+        fallbackIndex: 0,
+        mode: 'manual',
+        candidates: [],
+        candidateTruncated: false,
+        excluded: [],
+        excludedTruncated: false,
+        outcome: 'rejected',
+        auditState: 'pending',
+        configRevision: 1,
+        createdAt: '2026-08-21T00:00:00Z',
       },
     ]);
     expect(rows[0]).toEqual({
-      decisionId: 'd-min', requestId: 'r-min', fallbackIndex: 0,
-      outcome: 'rejected', configRevision: 1, createdAt: '2026-08-21T00:00:00Z',
+      decisionId: 'd-min',
+      requestId: 'r-min',
+      fallbackIndex: 0,
+      outcome: 'rejected',
+      configRevision: 1,
+      createdAt: '2026-08-21T00:00:00Z',
     });
   });
 
@@ -359,7 +404,9 @@ describe('GOV-OPS-003 指标分支补强', () => {
     expect(empty.insufficientSample).toBe(true);
     // 全部 usage_missing → 不足样本
     const missing = computeRoutingMetrics(
-      Array.from({ length: 100 }, (_unused, i) => sample(`m-${i}`, [{ completed: true, usageMissing: true, creditNanos: 1n }])),
+      Array.from({ length: 100 }, (_unused, i) =>
+        sample(`m-${i}`, [{ completed: true, usageMissing: true, creditNanos: 1n }]),
+      ),
       1_000_000,
     );
     expect(missing.insufficientSample).toBe(true);

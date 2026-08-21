@@ -207,7 +207,9 @@ describe('GOV-SELECT-001 会话选择模式', () => {
   it('切回 Auto 时保留 lastManualRoute（便于切回但不约束 Auto 结果）', async () => {
     const h = await boot();
     try {
-      await h.service.setSessionSelectionMode('s1', 'manual', { lastManualRoute: 'fake-provider:model-a' });
+      await h.service.setSessionSelectionMode('s1', 'manual', {
+        lastManualRoute: 'fake-provider:model-a',
+      });
       // 切到 Auto：lastManualRoute 保留
       await h.service.setSessionSelectionMode('s1', 'auto');
       const state = h.service.getSessionSelectionMode('s1');

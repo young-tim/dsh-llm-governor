@@ -1091,7 +1091,10 @@ export class GovernorService extends Service {
     }
     // GOV-UI-002：Host 拒绝超界值（multiplier 非负；表单范围只是提示，
     // 最终准入以后端校验为准）
-    if (patch.multiplier !== undefined && (!Number.isFinite(patch.multiplier) || patch.multiplier < 0)) {
+    if (
+      patch.multiplier !== undefined &&
+      (!Number.isFinite(patch.multiplier) || patch.multiplier < 0)
+    ) {
       throw new Error('INVALID_MULTIPLIER');
     }
 

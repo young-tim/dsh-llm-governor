@@ -99,7 +99,8 @@ export function computeRoutingMetrics(
     (s) => s.attempts.length > 0 && s.attempts.every((a) => !a.usageMissing),
   );
   const insufficientSample =
-    validSamples.length < METRICS_THRESHOLDS.minSamples || usageMissingRatio > METRICS_THRESHOLDS.maxUsageMissingRatio;
+    validSamples.length < METRICS_THRESHOLDS.minSamples ||
+    usageMissingRatio > METRICS_THRESHOLDS.maxUsageMissingRatio;
 
   const result: RoutingMetrics = {
     requests,
@@ -199,8 +200,16 @@ export function buildSamplesFromRows(
       finalRoute: finalDecision.selectedRoute,
       attempts,
       classifierCreditNanos,
-      qualityFirstRoute: { routeId: qf.routeId, multiplierPpm: qfRoute.multiplierPpm, quality: qfRoute.quality },
-      autoRoute: { routeId: finalDecision.selectedRoute, multiplierPpm: autoRoute.multiplierPpm, quality: autoRoute.quality },
+      qualityFirstRoute: {
+        routeId: qf.routeId,
+        multiplierPpm: qfRoute.multiplierPpm,
+        quality: qfRoute.quality,
+      },
+      autoRoute: {
+        routeId: finalDecision.selectedRoute,
+        multiplierPpm: autoRoute.multiplierPpm,
+        quality: autoRoute.quality,
+      },
     });
   }
   return samples;

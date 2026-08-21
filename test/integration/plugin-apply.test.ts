@@ -27,14 +27,21 @@ async function bootPlugin(config: Record<string, unknown>): Promise<{
   const ctx = new Context();
   const llm = ctx.plugin(LlmRuntime);
   await llm;
-  const adapter = new FakeLlmAdapter(providers, models, successScript('ok', { inputTokens: 1, outputTokens: 1 }));
+  const adapter = new FakeLlmAdapter(
+    providers,
+    models,
+    successScript('ok', { inputTokens: 1, outputTokens: 1 }),
+  );
   const disposeAdapter = ctx.llm.registerAdapter(providers, adapter);
   const dbDir = mkdtempSync(join(tmpdir(), 'dsh-gov-apply-'));
-  const gov = ctx.plugin(GovernorPlugin as never, {
-    schema_version: 1,
-    storage: { enabled: true, path: join(dbDir, 'governor.db') },
-    ...config,
-  } as never) as unknown as { dispose: () => Promise<void> };
+  const gov = ctx.plugin(
+    GovernorPlugin as never,
+    {
+      schema_version: 1,
+      storage: { enabled: true, path: join(dbDir, 'governor.db') },
+      ...config,
+    } as never,
+  ) as unknown as { dispose: () => Promise<void> };
   await (gov as never as PromiseLike<unknown>);
   return {
     ctx,
@@ -61,8 +68,11 @@ describe('GOV-UI-001 compatApi 启用分支（插件 apply 完整路径）', () 
       // 无 webServer 时 compatApi 独立监听；等待 listen 完成后枚举验证
       await new Promise((resolve) => setTimeout(resolve, 100));
       const net = await import('node:net');
-      const handles = (process as unknown as { _getActiveHandles?: () => unknown[] })._getActiveHandles?.() ?? [];
-      const servers = handles.filter((h) => h instanceof net.Server) as Array<{ address: () => unknown }>;
+      const handles =
+        (process as unknown as { _getActiveHandles?: () => unknown[] })._getActiveHandles?.() ?? [];
+      const servers = handles.filter((h) => h instanceof net.Server) as Array<{
+        address: () => unknown;
+      }>;
       const governorServer = servers.find((s) => {
         const addr = s.address();
         return typeof addr === 'object' && addr !== null && (addr as { port: number }).port > 0;
@@ -88,8 +98,9 @@ describe('GOV-UI-001 compatApi 启用分支（插件 apply 完整路径）', () 
 
   it('ui.enabled=false：不挂载任何 UI（无新增监听端口）', async () => {
     const net = await import('node:net');
-    const before = ((process as unknown as { _getActiveHandles?: () => unknown[] })._getActiveHandles?.() ?? [])
-      .filter((h) => h instanceof net.Server).length;
+    const before = (
+      (process as unknown as { _getActiveHandles?: () => unknown[] })._getActiveHandles?.() ?? []
+    ).filter((h) => h instanceof net.Server).length;
     const { dispose } = await bootPlugin({
       identity: { provider: 'local', local_user_id: 'local' },
       routing: { default: 'manual' },
@@ -97,8 +108,9 @@ describe('GOV-UI-001 compatApi 启用分支（插件 apply 完整路径）', () 
       ui: { enabled: false },
     });
     try {
-      const after = ((process as unknown as { _getActiveHandles?: () => unknown[] })._getActiveHandles?.() ?? [])
-        .filter((h) => h instanceof net.Server).length;
+      const after = (
+        (process as unknown as { _getActiveHandles?: () => unknown[] })._getActiveHandles?.() ?? []
+      ).filter((h) => h instanceof net.Server).length;
       expect(after).toBe(before);
     } finally {
       await dispose();
@@ -150,8 +162,11 @@ describe('GOV-UI-001 compatApi 启用分支（插件 apply 完整路径）', () 
     try {
       await new Promise((resolve) => setTimeout(resolve, 100));
       const net = await import('node:net');
-      const handles = (process as unknown as { _getActiveHandles?: () => unknown[] })._getActiveHandles?.() ?? [];
-      const servers = handles.filter((h) => h instanceof net.Server) as Array<{ address: () => unknown }>;
+      const handles =
+        (process as unknown as { _getActiveHandles?: () => unknown[] })._getActiveHandles?.() ?? [];
+      const servers = handles.filter((h) => h instanceof net.Server) as Array<{
+        address: () => unknown;
+      }>;
       const gov = servers.find((s) => {
         const addr = s.address();
         return typeof addr === 'object' && addr !== null && (addr as { port: number }).port > 0;
@@ -180,7 +195,13 @@ describe('GOV-TRACE-001 classifier backend（auto.llm_classifier 启用）', () 
       },
     });
     try {
-      const service = (ctx as unknown as { governor: { classifyStep: (s: string, t: number, st: number, i: unknown) => Promise<unknown> } }).governor;
+      const service = (
+        ctx as unknown as {
+          governor: {
+            classifyStep: (s: string, t: number, st: number, i: unknown) => Promise<unknown>;
+          };
+        }
+      ).governor;
       // 消息不命中 Hint/Rule → 走 LLM 分类（fake adapter 返回固定文本）
       const result = (await service.classifyStep('cls-session', 1, 1, {
         messages: [{ type: 'text', text: '随便聊聊' }],
@@ -202,20 +223,23 @@ describe('GOV-TRACE-001 classifier backend（auto.llm_classifier 启用）', () 
       const adapter = new FakeLlmAdapter(providers, models, { text: scriptText, finish: 'stop' });
       const disposeAdapter = ctx.llm.registerAdapter(providers, adapter);
       const dbDir = mkdtempSync(join(tmpdir(), 'dsh-gov-cls-'));
-      const gov = ctx.plugin(GovernorPlugin as never, {
-        schema_version: 1,
-        identity: { provider: 'local', local_user_id: 'local' },
-        routing: { default: 'auto' },
-        auto: {
-          confidence_threshold: 0.5,
-          llm_classifier: { enabled: true, provider: 'fake-provider', model: 'model-b' },
-        },
-        models: {
-          'fake-provider:model-a': { quality: { general: 90 }, multiplier: 1 },
-          'fake-provider:model-b': { quality: { general: 80 }, multiplier: 0.5 },
-        },
-        storage: { enabled: true, path: join(dbDir, 'governor.db') },
-      } as never) as unknown as { dispose: () => Promise<void> };
+      const gov = ctx.plugin(
+        GovernorPlugin as never,
+        {
+          schema_version: 1,
+          identity: { provider: 'local', local_user_id: 'local' },
+          routing: { default: 'auto' },
+          auto: {
+            confidence_threshold: 0.5,
+            llm_classifier: { enabled: true, provider: 'fake-provider', model: 'model-b' },
+          },
+          models: {
+            'fake-provider:model-a': { quality: { general: 90 }, multiplier: 1 },
+            'fake-provider:model-b': { quality: { general: 80 }, multiplier: 0.5 },
+          },
+          storage: { enabled: true, path: join(dbDir, 'governor.db') },
+        } as never,
+      ) as unknown as { dispose: () => Promise<void> };
       await (gov as never as PromiseLike<unknown>);
       return {
         ctx,
@@ -230,8 +254,16 @@ describe('GOV-TRACE-001 classifier backend（auto.llm_classifier 启用）', () 
     // 非法 task_type → CLASSIFIER_INVALID_TASK_TYPE → 降级
     const bad1 = await makeCtx('{"task_type": "bogus", "complexity": "high", "confidence": 0.9}');
     try {
-      const svc = (bad1.ctx as unknown as { governor: { classifyStep: (s: string, t: number, st: number, i: unknown) => Promise<unknown> } }).governor;
-      const r1 = (await svc.classifyStep('c1', 1, 1, { messages: [{ type: 'text', text: '闲聊' }] })) as { source: string };
+      const svc = (
+        bad1.ctx as unknown as {
+          governor: {
+            classifyStep: (s: string, t: number, st: number, i: unknown) => Promise<unknown>;
+          };
+        }
+      ).governor;
+      const r1 = (await svc.classifyStep('c1', 1, 1, {
+        messages: [{ type: 'text', text: '闲聊' }],
+      })) as { source: string };
       expect(r1.source).toBe('rule');
     } finally {
       await bad1.dispose();
@@ -239,8 +271,16 @@ describe('GOV-TRACE-001 classifier backend（auto.llm_classifier 启用）', () 
     // 非法 complexity → CLASSIFIER_INVALID_COMPLEXITY → 降级
     const bad2 = await makeCtx('{"task_type": "coding", "complexity": "bogus", "confidence": 0.9}');
     try {
-      const svc = (bad2.ctx as unknown as { governor: { classifyStep: (s: string, t: number, st: number, i: unknown) => Promise<unknown> } }).governor;
-      const r2 = (await svc.classifyStep('c2', 1, 1, { messages: [{ type: 'text', text: '闲聊' }] })) as { source: string };
+      const svc = (
+        bad2.ctx as unknown as {
+          governor: {
+            classifyStep: (s: string, t: number, st: number, i: unknown) => Promise<unknown>;
+          };
+        }
+      ).governor;
+      const r2 = (await svc.classifyStep('c2', 1, 1, {
+        messages: [{ type: 'text', text: '闲聊' }],
+      })) as { source: string };
       expect(r2.source).toBe('rule');
     } finally {
       await bad2.dispose();
@@ -248,8 +288,16 @@ describe('GOV-TRACE-001 classifier backend（auto.llm_classifier 启用）', () 
     // 合法输出（confidence 缺省 0）→ llm 结果但低置信度不缓存
     const ok = await makeCtx('{"task_type": "coding", "complexity": "high"}');
     try {
-      const svc = (ok.ctx as unknown as { governor: { classifyStep: (s: string, t: number, st: number, i: unknown) => Promise<unknown> } }).governor;
-      const r3 = (await svc.classifyStep('c3', 1, 1, { messages: [{ type: 'text', text: '闲聊' }] })) as { source: string };
+      const svc = (
+        ok.ctx as unknown as {
+          governor: {
+            classifyStep: (s: string, t: number, st: number, i: unknown) => Promise<unknown>;
+          };
+        }
+      ).governor;
+      const r3 = (await svc.classifyStep('c3', 1, 1, {
+        messages: [{ type: 'text', text: '闲聊' }],
+      })) as { source: string };
       expect(r3.source).toBe('llm');
     } finally {
       await ok.dispose();
@@ -261,7 +309,11 @@ describe('header identity bind 端点（/governor/api/bind）', () => {
   it('loopback POST bind 成功；非 loopback/非法请求被拒', async () => {
     const { Service } = await import('../../src/dsh-adapter/mod.js');
     class WebServer extends Service {
-      public registered: Array<{ kind: string; path: string; handler: (req: never, res: never) => void }> = [];
+      public registered: Array<{
+        kind: string;
+        path: string;
+        handler: (req: never, res: never) => void;
+      }> = [];
       constructor(ctx: Context) {
         super(ctx, 'webServer');
       }
@@ -273,24 +325,31 @@ describe('header identity bind 端点（/governor/api/bind）', () => {
     const ctx = new Context();
     const llm = ctx.plugin(LlmRuntime);
     await llm;
-    const adapter = new FakeLlmAdapter(providers, models, successScript('ok', { inputTokens: 1, outputTokens: 1 }));
+    const adapter = new FakeLlmAdapter(
+      providers,
+      models,
+      successScript('ok', { inputTokens: 1, outputTokens: 1 }),
+    );
     const disposeAdapter = ctx.llm.registerAdapter(providers, adapter);
     const ws = ctx.plugin(WebServer);
     await ws;
     const dbDir = mkdtempSync(join(tmpdir(), 'dsh-gov-bind-'));
-    const gov = ctx.plugin(GovernorPlugin as never, {
-      schema_version: 1,
-      identity: {
-        provider: 'header',
-        header_name: 'X-User',
-        trusted_proxy: 'proxy-1',
-        proxy_header_name: 'X-Proxy-Id',
-      },
-      routing: { default: 'manual' },
-      models: { 'fake-provider:model-a': { quality: { general: 90 }, multiplier: 1 } },
-      storage: { enabled: true, path: join(dbDir, 'governor.db') },
-      ui: { enabled: true },
-    } as never) as unknown as { dispose: () => Promise<void> };
+    const gov = ctx.plugin(
+      GovernorPlugin as never,
+      {
+        schema_version: 1,
+        identity: {
+          provider: 'header',
+          header_name: 'X-User',
+          trusted_proxy: 'proxy-1',
+          proxy_header_name: 'X-Proxy-Id',
+        },
+        routing: { default: 'manual' },
+        models: { 'fake-provider:model-a': { quality: { general: 90 }, multiplier: 1 } },
+        storage: { enabled: true, path: join(dbDir, 'governor.db') },
+        ui: { enabled: true },
+      } as never,
+    ) as unknown as { dispose: () => Promise<void> };
     await (gov as never as PromiseLike<unknown>);
 
     const webServer = (ctx as unknown as { webServer: WebServer }).webServer;
@@ -317,7 +376,6 @@ describe('header identity bind 端点（/governor/api/bind）', () => {
           if (body !== undefined) this.body = body;
         },
       };
-      let chunks: Buffer[] = [];
       const listeners: Record<string, Array<(chunk: Buffer) => void>> = {};
       await handler(
         {
@@ -339,8 +397,6 @@ describe('header identity bind 端点（/governor/api/bind）', () => {
         for (const cb of listeners['end'] ?? []) cb(Buffer.alloc(0));
       }
       await new Promise((resolve) => setImmediate(resolve));
-      void chunks;
-      chunks = [];
       return { status: res.statusCode, body: res.body };
     }
 
@@ -357,7 +413,10 @@ describe('header identity bind 端点（/governor/api/bind）', () => {
       const ok = await call({
         url: '/governor/api/bind',
         method: 'POST',
-        body: JSON.stringify({ sessionId: 'b1', headers: { 'X-User': 'alice', 'X-Proxy-Id': 'proxy-1' } }),
+        body: JSON.stringify({
+          sessionId: 'b1',
+          headers: { 'X-User': 'alice', 'X-Proxy-Id': 'proxy-1' },
+        }),
       });
       expect(ok.status).toBe(200);
       expect(JSON.parse(ok.body).userId).toBe('alice');
@@ -371,7 +430,10 @@ describe('header identity bind 端点（/governor/api/bind）', () => {
       const badIdentity = await call({
         url: '/governor/api/bind',
         method: 'POST',
-        body: JSON.stringify({ sessionId: 'b2', headers: { 'X-User': 'bob', 'X-Proxy-Id': 'wrong-proxy' } }),
+        body: JSON.stringify({
+          sessionId: 'b2',
+          headers: { 'X-User': 'bob', 'X-Proxy-Id': 'wrong-proxy' },
+        }),
       });
       expect(badIdentity.status).toBe(401);
     } finally {

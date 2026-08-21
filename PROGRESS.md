@@ -113,6 +113,22 @@
     IMPLEMENTATION_PLAN.md 状态更新（测试矩阵 + 最终数字）、
     README.md（目录树补 ops/ 与决策审计、设计原则补
     committed-Decision/双类 Usage/默认零 socket 三条）。
+  - 提交后复证回归与修复（2026-08-21，如实记录）：
+    - 提交 2c7ed0b 后复跑 pnpm test 发现回归（7 files 失败 / 8 tests
+      失败 / 21 skipped）：提交前一次批量编辑事故破坏了多个文件，
+      而 typecheck/lint/format:check 均在事故发生前通过，坏版本进入提交。
+    - 修复 1：src/classifier/sqlite-cache.ts——import 缺 createHash、
+      get/set 调用不存在的 splitKey（定义名为 storageKey）。
+    - 修复 2：src/plugin/audit-pipeline.ts——SessionStoreSink 构造函数
+      缺第三个参数（sessions 枚举器）且 _sessions() 硬编码返回 []，
+      导致 hasDecision 恒 false（对账失效）；改为可选注入。
+    - 修复 3：test/integration/plugin-apply.test.ts 残留无意义 chunks
+      赋值（no-useless-assignment）与 coverage-booster.test.ts 未用
+      import/参数；21 个文件恢复 Prettier 格式。
+    - 修复后完整明卷（实际输出见对话）：typecheck/lint/format:check/
+      build 全过；pnpm test 40 files / 717 tests 全过 skipped 0；
+      coverage stmts 95.89 / branches 87.84 / funcs 96.67 / lines 96.85
+      （四项均高于基线）。
   - 完整明卷（命令实际输出见对话）：
     - pnpm typecheck ✓ / pnpm lint ✓ / pnpm format:check ✓ / pnpm build ✓
     - pnpm test：40 files / 717 tests 全过、skipped 0（≥ 基线 589）

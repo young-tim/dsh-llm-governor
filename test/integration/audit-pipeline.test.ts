@@ -79,7 +79,11 @@ async function bootFaultHarness(): Promise<FaultHarness> {
   const ctx = new Context();
   const llm = ctx.plugin(LlmRuntime);
   await llm;
-  const adapter = new FakeLlmAdapter(providers, models, successScript('ok', { inputTokens: 1, outputTokens: 1 }));
+  const adapter = new FakeLlmAdapter(
+    providers,
+    models,
+    successScript('ok', { inputTokens: 1, outputTokens: 1 }),
+  );
   const disposeAdapter = ctx.llm.registerAdapter(providers, adapter);
   const dbDir = mkdtempSync(join(tmpdir(), 'dsh-gov-audit-'));
   const db = new GovernorDatabase(join(dbDir, 'governor.db'));
@@ -148,7 +152,10 @@ async function runAttempt(
     step,
     signal: new AbortController().signal,
   };
-  await events.waterfall('agent/pre-step', { ...payload, messages: [] }, async () => ({ kind: 'enter', messages: [] }));
+  await events.waterfall('agent/pre-step', { ...payload, messages: [] }, async () => ({
+    kind: 'enter',
+    messages: [],
+  }));
   const config = (await events.waterfall('agent/request', payload, async () => ({
     provider: 'fake-provider',
     model: 'model-a',
@@ -272,7 +279,12 @@ describe('GOV-ATTEMPT-001 attempt 生命周期', () => {
       // 决策已提交但未发生 dispatch：状态 not_dispatched（“已选择，未执行”）。
       expect(h.governor.getAttemptState(h.session.id, 2, 1)).toBe('not_dispatched');
       // dispatch 边界前进入 dispatch_started
-      const config = { provider: 'fake-provider', model: 'model-a', messages: [], sessionId: h.session.id };
+      const config = {
+        provider: 'fake-provider',
+        model: 'model-a',
+        messages: [],
+        sessionId: h.session.id,
+      };
       const stream = (await events.waterfall('llm/stream', config, () =>
         (h.ctx.llm as unknown as { stream: (o: unknown) => AsyncIterable<unknown> }).stream(config),
       )) as AsyncIterable<unknown>;

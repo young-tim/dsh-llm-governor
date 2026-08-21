@@ -42,7 +42,9 @@ beforeAll(async () => {
   );
   await harness.governor!.bindIdentity('session-1', { userId: 'user-1' });
   server = createGovernorApiServer(harness.governor!, {
-    actors: [{ token: ADMIN_TOKEN, capabilities: ['governor.read', 'governor.manage', 'governor.audit'] }],
+    actors: [
+      { token: ADMIN_TOKEN, capabilities: ['governor.read', 'governor.manage', 'governor.audit'] },
+    ],
   });
   await new Promise<void>((resolve) => {
     server.listen(0, '127.0.0.1', () => {

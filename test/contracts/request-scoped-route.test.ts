@@ -57,14 +57,21 @@ async function bootWithSession(): Promise<SessionHarness> {
   const ctx = new Context();
   const llm = ctx.plugin(LlmRuntime);
   await llm;
-  const adapter = new FakeLlmAdapter(providers, models, successScript('ok', { inputTokens: 1, outputTokens: 1 }));
+  const adapter = new FakeLlmAdapter(
+    providers,
+    models,
+    successScript('ok', { inputTokens: 1, outputTokens: 1 }),
+  );
   const disposeAdapter = ctx.llm.registerAdapter(providers, adapter);
   const dbDir = mkdtempSync(join(tmpdir(), 'dsh-gov-rs-'));
-  const gov = ctx.plugin(GovernorPlugin as never, {
-    schema_version: 1,
-    ...autoGovernorConfig(),
-    storage: { enabled: true, path: join(dbDir, 'governor.db') },
-  } as never) as unknown as { dispose: () => Promise<void> };
+  const gov = ctx.plugin(
+    GovernorPlugin as never,
+    {
+      schema_version: 1,
+      ...autoGovernorConfig(),
+      storage: { enabled: true, path: join(dbDir, 'governor.db') },
+    } as never,
+  ) as unknown as { dispose: () => Promise<void> };
   await (gov as never as PromiseLike<unknown>);
   const store = ctx.plugin(SessionStore);
   await store;
@@ -99,8 +106,14 @@ async function runRequestCycle(
     step,
     signal: new AbortController().signal,
   };
-  await events.waterfall('agent/pre-step', { ...payload, messages: [{ type: 'text', text: 'write a function' }] }, async () => ({ kind: 'enter', messages: [] }));
-  return (await events.waterfall('agent/request', payload, async () => ({ ...fallbackConfig }))) as {
+  await events.waterfall(
+    'agent/pre-step',
+    { ...payload, messages: [{ type: 'text', text: 'write a function' }] },
+    async () => ({ kind: 'enter', messages: [] }),
+  );
+  return (await events.waterfall('agent/request', payload, async () => ({
+    ...fallbackConfig,
+  }))) as {
     provider: string;
     model: string;
   };
@@ -110,7 +123,10 @@ describe('rc.8 request-scoped route override seam', () => {
   it('Auto 改写只进入返回的 dispatch config，Session log 不出现持久模型选择事件', async () => {
     const h = await bootWithSession();
     try {
-      const config = await runRequestCycle(h, 1, 1, { provider: 'fake-provider', model: 'model-a' });
+      const config = await runRequestCycle(h, 1, 1, {
+        provider: 'fake-provider',
+        model: 'model-a',
+      });
       // Auto 依据 rule 分类（coding）选择达标集合中低倍率模型。
       expect(config).toMatchObject({ provider: 'fake-provider' });
       expect(typeof config.model).toBe('string');
@@ -159,16 +175,21 @@ describe('rc.8 request-scoped route override seam', () => {
   it('llm/stream 收到的 provider/model 与 agent/request 返回的 dispatch config 一致', async () => {
     const h = await bootWithSession();
     try {
-      const config = await runRequestCycle(h, 2, 1, { provider: 'fake-provider', model: 'model-a' });
+      const config = await runRequestCycle(h, 2, 1, {
+        provider: 'fake-provider',
+        model: 'model-a',
+      });
       const events = h.ctx.events as unknown as {
         waterfall: (name: string, ...args: unknown[]) => Promise<unknown>;
       };
       const dispatch = { ...config, messages: [], sessionId: h.session.id };
       const chunks: unknown[] = [];
       const stream = (await events.waterfall('llm/stream', dispatch, () =>
-        (h.ctx.llm as unknown as {
-          stream: (o: unknown) => AsyncIterable<unknown>;
-        }).stream(dispatch),
+        (
+          h.ctx.llm as unknown as {
+            stream: (o: unknown) => AsyncIterable<unknown>;
+          }
+        ).stream(dispatch),
       )) as AsyncIterable<unknown>;
       for await (const chunk of stream) chunks.push(chunk);
       expect(chunks.length).toBeGreaterThan(0);

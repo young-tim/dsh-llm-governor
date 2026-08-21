@@ -38,7 +38,8 @@ function baseConfig(dbPath: string): GovernorPluginConfig {
 function countListeningSockets(): number {
   // Node 没有公开 API 枚举监听 socket；用 process._getActiveHandles 近似计数
   // （http/net server handle 会出现在 active handles 中）。
-  const handles = (process as unknown as { _getActiveHandles?: () => unknown[] })._getActiveHandles?.() ?? [];
+  const handles =
+    (process as unknown as { _getActiveHandles?: () => unknown[] })._getActiveHandles?.() ?? [];
   return handles.filter((h) => h instanceof net.Server).length;
 }
 
@@ -47,15 +48,22 @@ describe('GOV-UI-001 默认零监听', () => {
     const ctx = new Context();
     const llm = ctx.plugin(LlmRuntime);
     await llm;
-    const adapter = new FakeLlmAdapter(providers, models, successScript('ok', { inputTokens: 1, outputTokens: 1 }));
+    const adapter = new FakeLlmAdapter(
+      providers,
+      models,
+      successScript('ok', { inputTokens: 1, outputTokens: 1 }),
+    );
     const disposeAdapter = ctx.llm.registerAdapter(providers, adapter);
     const dbDir = mkdtempSync(join(tmpdir(), 'dsh-gov-socket-'));
     const before = countListeningSockets();
-    const gov = ctx.plugin(GovernorPlugin as never, {
-      schema_version: 1,
-      ...baseConfig(join(dbDir, 'governor.db')),
-      ui: { enabled: true },
-    } as never) as unknown as { dispose: () => Promise<void> };
+    const gov = ctx.plugin(
+      GovernorPlugin as never,
+      {
+        schema_version: 1,
+        ...baseConfig(join(dbDir, 'governor.db')),
+        ui: { enabled: true },
+      } as never,
+    ) as unknown as { dispose: () => Promise<void> };
     await (gov as never as PromiseLike<unknown>);
     const after = countListeningSockets();
     expect(after).toBe(before);
@@ -71,13 +79,20 @@ describe('GOV-UI-001 兼容 API loopback 强制', () => {
     const ctx = new Context();
     const llm = ctx.plugin(LlmRuntime);
     await llm;
-    const adapter = new FakeLlmAdapter(providers, models, successScript('ok', { inputTokens: 1, outputTokens: 1 }));
+    const adapter = new FakeLlmAdapter(
+      providers,
+      models,
+      successScript('ok', { inputTokens: 1, outputTokens: 1 }),
+    );
     const disposeAdapter = ctx.llm.registerAdapter(providers, adapter);
     const dbDir = mkdtempSync(join(tmpdir(), 'dsh-gov-compat-'));
-    const gov = ctx.plugin(GovernorPlugin as never, {
-      schema_version: 1,
-      ...baseConfig(join(dbDir, 'governor.db')),
-    } as never) as unknown as { dispose: () => Promise<void> };
+    const gov = ctx.plugin(
+      GovernorPlugin as never,
+      {
+        schema_version: 1,
+        ...baseConfig(join(dbDir, 'governor.db')),
+      } as never,
+    ) as unknown as { dispose: () => Promise<void> };
     await (gov as never as PromiseLike<unknown>);
     const service = (ctx as unknown as { governor: GovernorService }).governor;
     const token = 'compat-token-0123456789abcdef0123456789abcdef';
@@ -116,7 +131,12 @@ describe('GOV-UI-001 兼容 API loopback 强制', () => {
       requireLoopback: true,
     });
     await strictHandler(
-      { url: '/api/models', method: 'GET', headers: { Authorization: `Bearer ${token}` }, socket: { remoteAddress: '10.0.0.5' } } as never,
+      {
+        url: '/api/models',
+        method: 'GET',
+        headers: { Authorization: `Bearer ${token}` },
+        socket: { remoteAddress: '10.0.0.5' },
+      } as never,
       handlerResponse as never,
     );
     expect(handlerResponse.statusCode).toBe(403);

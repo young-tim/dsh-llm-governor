@@ -523,7 +523,8 @@ describe('未知路由', () => {
 
 // ===== GOV-SEC-001 capability 矩阵（匿名 / read / manage / audit 及组合） =====
 
-describe('GOV-SEC-001 capability 矩阵', () => {  it('audit 端点：read-only token → 403 FORBIDDEN；audit token → 200', async () => {
+describe('GOV-SEC-001 capability 矩阵', () => {
+  it('audit 端点：read-only token → 403 FORBIDDEN；audit token → 200', async () => {
     const reader = await request('/api/audit', { auth: 'reader' });
     expect(reader.status).toBe(403);
     expect((reader.body as { code: string }).code).toBe('FORBIDDEN');
@@ -583,10 +584,10 @@ describe('GOV-SEC-001 capability 矩阵', () => {  it('audit 端点：read-only 
 
   it('REVISION_CONFLICT 映射为 409', async () => {
     // 用过期 expectedRevision 触发冲突
-    const res = await request(
-      `/api/models/${encodeURIComponent(ROUTE_A)}?expectedRevision=99999`,
-      { method: 'PATCH', body: { multiplier: 2 } },
-    );
+    const res = await request(`/api/models/${encodeURIComponent(ROUTE_A)}?expectedRevision=99999`, {
+      method: 'PATCH',
+      body: { multiplier: 2 },
+    });
     expect(res.status).toBe(409);
     expect((res.body as { code: string }).code).toBe('REVISION_CONFLICT');
   });

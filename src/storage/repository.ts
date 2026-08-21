@@ -553,19 +553,30 @@ export class GovernorRepository {
   // ===== 分类器缓存（GOV-CLASSIFIER-001） =====
 
   /** 读取分类缓存（input_hash 为 HMAC 复合键哈希；TTL 由调用方检查）。 */
-  getClassifierCache(inputHash: string, configRevision: number): {
-    taskType: string;
-    complexity: string;
-    confidence: number;
-    source: string;
-    createdAt: string;
-  } | undefined {
+  getClassifierCache(
+    inputHash: string,
+    configRevision: number,
+  ):
+    | {
+        taskType: string;
+        complexity: string;
+        confidence: number;
+        source: string;
+        createdAt: string;
+      }
+    | undefined {
     const row = this._db
       .prepare(
         'SELECT task_type, complexity, confidence, source, created_at FROM classifier_cache WHERE input_hash = ? AND config_revision = ?',
       )
       .get(inputHash, configRevision) as
-      | { task_type: string; complexity: string; confidence: number; source: string; created_at: string }
+      | {
+          task_type: string;
+          complexity: string;
+          confidence: number;
+          source: string;
+          created_at: string;
+        }
       | undefined;
     if (row === undefined) return undefined;
     return {
@@ -605,8 +616,7 @@ export class GovernorRepository {
   /** 读取 kv 值（HMAC key 等版本化合同数据）。 */
   getGovernorKv(key: string): string | undefined {
     const row = this._db.prepare('SELECT value FROM governor_kv WHERE key = ?').get(key) as
-      | { value: string }
-      | undefined;
+      { value: string } | undefined;
     return row?.value;
   }
 
@@ -696,7 +706,12 @@ export class GovernorRepository {
   }
 
   /** 查询 Usage 事件。 */
-  queryUsage(opts: { userId?: string; provider?: string; usageKind?: 'conversation' | 'classifier'; limit?: number }): UsageEventRow[] {
+  queryUsage(opts: {
+    userId?: string;
+    provider?: string;
+    usageKind?: 'conversation' | 'classifier';
+    limit?: number;
+  }): UsageEventRow[] {
     let sql = 'SELECT * FROM usage_events WHERE 1=1';
     const params: (string | number)[] = [];
     if (opts.userId) {
@@ -753,14 +768,19 @@ export class GovernorRepository {
   }
 
   /** GOV-USAGE-001 统计分母：Requests 以 requestId 去重，Attempts 以行数计。 */
-  countUsageRequests(opts: { usageKind?: 'conversation' | 'classifier' } = {}): { requests: number; attempts: number } {
+  countUsageRequests(opts: { usageKind?: 'conversation' | 'classifier' } = {}): {
+    requests: number;
+    attempts: number;
+  } {
     const sql =
       opts.usageKind !== undefined
         ? 'SELECT COUNT(DISTINCT request_id) AS requests, COUNT(*) AS attempts FROM usage_events WHERE usage_kind = ?'
         : 'SELECT COUNT(DISTINCT request_id) AS requests, COUNT(*) AS attempts FROM usage_events';
-    const row = (opts.usageKind !== undefined
-      ? this._db.prepare(sql).get(opts.usageKind)
-      : this._db.prepare(sql).get()) as { requests: number; attempts: number };
+    const row = (
+      opts.usageKind !== undefined
+        ? this._db.prepare(sql).get(opts.usageKind)
+        : this._db.prepare(sql).get()
+    ) as { requests: number; attempts: number };
     return { requests: row.requests, attempts: row.attempts };
   }
 }

@@ -14,7 +14,9 @@ import { GovernorDatabase } from '../../src/storage/database.js';
 import { GovernorRepository } from '../../src/storage/repository.js';
 
 /** 构造带 SQLite 的 service（临时库）。 */
-async function bootService(config: GovernorPluginConfig): Promise<{ service: GovernorService; repo: GovernorRepository; dispose: () => void }> {
+async function bootService(
+  config: GovernorPluginConfig,
+): Promise<{ service: GovernorService; repo: GovernorRepository; dispose: () => void }> {
   const ctx = new Context();
   const dbDir = mkdtempSync(join(tmpdir(), 'dsh-gov-config-'));
   const db = new GovernorDatabase(join(dbDir, 'governor.db'));
@@ -58,7 +60,10 @@ describe('GOV-CONFIG-001 配置权威与 Revision', () => {
       // 先注册 advisory 目录使 p:a 可见
       await h.service.refreshModelDirectory(
         () => [{ id: 'p' }],
-        () => [{ provider: 'p', id: 'a' }, { provider: 'p', id: 'b' }],
+        () => [
+          { provider: 'p', id: 'a' },
+          { provider: 'p', id: 'b' },
+        ],
       );
       const before = h.service.configRevision;
       // 有效变更：multiplier 变化
@@ -89,19 +94,19 @@ describe('GOV-CONFIG-001 配置权威与 Revision', () => {
         () => [{ provider: 'p', id: 'a' }],
       );
       const current = h.service.configRevision;
-      await expect(h.service.updateModel('p:a', { multiplier: 3 }, { expectedRevision: current + 5 })).rejects.toMatchObject(
-        { code: 'REVISION_CONFLICT' },
-      );
-      await expect(h.service.updateModel('p:a', { multiplier: 3 }, { expectedRevision: current })).resolves.toMatchObject(
-        { multiplierPpm: 3_000_000 },
-      );
+      await expect(
+        h.service.updateModel('p:a', { multiplier: 3 }, { expectedRevision: current + 5 }),
+      ).rejects.toMatchObject({ code: 'REVISION_CONFLICT' });
+      await expect(
+        h.service.updateModel('p:a', { multiplier: 3 }, { expectedRevision: current }),
+      ).resolves.toMatchObject({ multiplierPpm: 3_000_000 });
     } finally {
       h.dispose();
     }
   });
 
   it('用户策略变更递增 revision 并写审计；no-op 不递增', async () => {
-    const h = await bootService({ ...baseConfig(), users: { 'u1': { monthly_credits: 10 } } });
+    const h = await bootService({ ...baseConfig(), users: { u1: { monthly_credits: 10 } } });
     try {
       const before = h.service.configRevision;
       await h.service.updateUser('u1', { monthlyCredits: 20 });

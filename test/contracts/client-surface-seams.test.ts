@@ -36,21 +36,38 @@ function pkgFile(name: string, relative: string): string {
 describe('rc.8 Trajectory definition seam（发布物取证）', () => {
   it('dsh-client-runtime 的 client 契约声明 conversationEvents/conversationViews 注册表', () => {
     const dts = pkgFile('@deepseek-ai/dsh-client-runtime', 'lib/types/client/index.d.ts');
-    expect(dts).toContain('conversationEvents: import(\'./conversation/event-registry.ts\').ConversationEventRegistry');
-    expect(dts).toContain('conversationViews: import(\'./conversation/view-registry.ts\').ConversationViewRegistry');
+    expect(dts).toContain(
+      "conversationEvents: import('./conversation/event-registry.ts').ConversationEventRegistry",
+    );
+    expect(dts).toContain(
+      "conversationViews: import('./conversation/view-registry.ts').ConversationViewRegistry",
+    );
     // 注册表 API：register(definition)（唯一命名 + 幂等 disposer）与 registerFallback。
-    const registry = pkgFile('@deepseek-ai/dsh-client-runtime', 'lib/types/client/conversation/event-registry.d.ts');
+    const registry = pkgFile(
+      '@deepseek-ai/dsh-client-runtime',
+      'lib/types/client/conversation/event-registry.d.ts',
+    );
     expect(registry).toContain('register(definition: ConversationNodeDefinition): () => void');
-    expect(registry).toContain('registerFallback(definition: ConversationNodeDefinition): () => void');
+    expect(registry).toContain(
+      'registerFallback(definition: ConversationNodeDefinition): () => void',
+    );
   });
 
   it('ConversationNodeDefinition 契约以 match(event) 匹配 SessionEvent（Governor 轨迹卡片的挂载面）', () => {
-    const contract = pkgFile('@deepseek-ai/dsh-client-runtime', 'lib/types/client/contract/conversation.d.ts');
+    const contract = pkgFile(
+      '@deepseek-ai/dsh-client-runtime',
+      'lib/types/client/contract/conversation.d.ts',
+    );
     expect(contract).toContain('match(event: SessionEvent): ConversationMatchResult | null');
-    expect(contract).toContain('start(context: ConversationNodeContext<State>, match: ConversationMatch');
+    expect(contract).toContain(
+      'start(context: ConversationNodeContext<State>, match: ConversationMatch',
+    );
     expect(contract).toContain('buildViewNode?');
     // 视图构建注册表：按 target 注册 per-session builder。
-    const view = pkgFile('@deepseek-ai/dsh-client-runtime', 'lib/types/client/conversation/view-registry.d.ts');
+    const view = pkgFile(
+      '@deepseek-ai/dsh-client-runtime',
+      'lib/types/client/conversation/view-registry.d.ts',
+    );
     expect(view).toContain('register(definition: ConversationViewDefinition): () => void');
   });
 
@@ -62,24 +79,37 @@ describe('rc.8 Trajectory definition seam（发布物取证）', () => {
 
 describe('rc.8 单占位 model selector seam（发布物取证）', () => {
   it('conversation.input.model 槽位声明 kind single / scope session（唯一占位）', () => {
-    const slots = pkgFile('@deepseek-ai/dsh-client-ui-conversation', 'lib/types/client/contract/slots.d.ts');
-    const match = slots.match(/'conversation\.input\.model':\s*\{[\s\S]*?kind: 'single';[\s\S]*?scope: 'session';/);
+    const slots = pkgFile(
+      '@deepseek-ai/dsh-client-ui-conversation',
+      'lib/types/client/contract/slots.d.ts',
+    );
+    const match = slots.match(
+      /'conversation\.input\.model':\s*\{[\s\S]*?kind: 'single';[\s\S]*?scope: 'session';/,
+    );
     expect(match).not.toBeNull();
   });
 
   it('官方 occupant 由 dsh-client-ui-model-selection 唯一贡献（this package only contributes the single occupant）', () => {
-    const occupant = pkgFile('@deepseek-ai/dsh-client-ui-model-selection', 'lib/types/client/slots.d.ts');
-    expect(occupant).toContain("only contributes the single occupant");
+    const occupant = pkgFile(
+      '@deepseek-ai/dsh-client-ui-model-selection',
+      'lib/types/client/slots.d.ts',
+    );
+    expect(occupant).toContain('only contributes the single occupant');
     // occupant 的注入面提供 select()（持久模型选择走 Host）与 directory（共享目录）。
     expect(occupant).toContain('select: (selection: ModelSelection) => Promise<boolean>');
     expect(occupant).toContain('directory: SnapshotStore<ModelDirectoryState>');
   });
 
   it('SlotMap 采用 declaration merging（插件声明即占用），children 表声明槽位契约', () => {
-    const slots = pkgFile('@deepseek-ai/dsh-client-ui-conversation', 'lib/types/client/contract/slots.d.ts');
+    const slots = pkgFile(
+      '@deepseek-ai/dsh-client-ui-conversation',
+      'lib/types/client/contract/slots.d.ts',
+    );
     expect(slots).toContain('interface SlotMap');
     // 单占位语义在类型文档中固定为「一个 occupant 占据整席」。
-    expect(slots).toMatch(/one occupant, so taking it means rendering the\s+\*\s*whole model affordance yourself/);
+    expect(slots).toMatch(
+      /one occupant, so taking it means rendering the\s+\*\s*whole model affordance yourself/,
+    );
   });
 });
 
@@ -143,7 +173,13 @@ describe('rc.8 方法级 Remote capability seam（含 SEAM-3 缺失证据）', (
     // capability 相关注册/检查/声明面完全缺失。
     expect(exports.filter((k) => /capabilit|permission|authoriz/i.test(k))).toEqual([]);
     // 现有 API 面仅覆盖绑定与标记读取。
-    for (const k of ['bindTypertRemote', 'remoteMethods', 'Remote', 'RemoteScope', 'TypertRemoteService']) {
+    for (const k of [
+      'bindTypertRemote',
+      'remoteMethods',
+      'Remote',
+      'RemoteScope',
+      'TypertRemoteService',
+    ]) {
       expect(exports).toContain(k);
     }
   });

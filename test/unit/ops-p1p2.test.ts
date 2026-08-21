@@ -15,7 +15,13 @@ import {
   hmacInputHash,
   CLASSIFIER_CACHE_TTL_MS,
 } from '../../src/classifier/sqlite-cache.js';
-import { escapeCsvCell, exportWithLimits, toCsv, pseudonymizeUser, EXPORT_LIMITS } from '../../src/ops/export.js';
+import {
+  escapeCsvCell,
+  exportWithLimits,
+  toCsv,
+  pseudonymizeUser,
+  EXPORT_LIMITS,
+} from '../../src/ops/export.js';
 import { computeRoutingMetrics, buildSamplesFromRows } from '../../src/ops/metrics.js';
 import type { AutoRequestSample } from '../../src/ops/metrics.js';
 import { sealDecision } from '../../src/routing/decision.js';
@@ -26,7 +32,13 @@ function tempRepo(): { repo: GovernorRepository; dispose: () => void } {
   const dir = mkdtempSync(join(tmpdir(), 'gov-p1p2-'));
   const db = new GovernorDatabase(join(dir, 'test.db'));
   const repo = new GovernorRepository(db);
-  return { repo, dispose: () => { db.close(); rmSync(dir, { recursive: true, force: true }); } };
+  return {
+    repo,
+    dispose: () => {
+      db.close();
+      rmSync(dir, { recursive: true, force: true });
+    },
+  };
 }
 
 describe('GOV-CLASSIFIER-001 SQLite 分类缓存', () => {
@@ -35,7 +47,12 @@ describe('GOV-CLASSIFIER-001 SQLite 分类缓存', () => {
     try {
       const cache = new SQLiteClassifierCache(repo);
       const key = cache.buildKey('{"messages":[]}', 1);
-      const value: Classification = { taskType: 'coding', complexity: 'high', confidence: 0.95, source: 'llm' };
+      const value: Classification = {
+        taskType: 'coding',
+        complexity: 'high',
+        confidence: 0.95,
+        source: 'llm',
+      };
       expect(cache.get(key)).toBeUndefined();
       cache.set(key, value);
       expect(cache.get(key)).toEqual(value);
@@ -51,16 +68,40 @@ describe('GOV-CLASSIFIER-001 SQLite 分类缓存', () => {
     const { repo, dispose } = tempRepo();
     try {
       const cache = new SQLiteClassifierCache(repo);
-      const key1 = buildClassifierCacheKey(hmacInputHash('input', 'k'), 'default', 'v1', 1, 'default');
+      const key1 = buildClassifierCacheKey(
+        hmacInputHash('input', 'k'),
+        'default',
+        'v1',
+        1,
+        'default',
+      );
       cache.set(key1, { taskType: 'general', complexity: 'low', confidence: 0.9, source: 'llm' });
       // revision 变化
-      const key2 = buildClassifierCacheKey(hmacInputHash('input', 'k'), 'default', 'v1', 2, 'default');
+      const key2 = buildClassifierCacheKey(
+        hmacInputHash('input', 'k'),
+        'default',
+        'v1',
+        2,
+        'default',
+      );
       expect(cache.get(key2)).toBeUndefined();
       // promptVersion 变化
-      const key3 = buildClassifierCacheKey(hmacInputHash('input', 'k'), 'default', 'v2', 1, 'default');
+      const key3 = buildClassifierCacheKey(
+        hmacInputHash('input', 'k'),
+        'default',
+        'v2',
+        1,
+        'default',
+      );
       expect(cache.get(key3)).toBeUndefined();
       // tenant 变化
-      const key4 = buildClassifierCacheKey(hmacInputHash('input', 'k'), 'default', 'v1', 1, 'other');
+      const key4 = buildClassifierCacheKey(
+        hmacInputHash('input', 'k'),
+        'default',
+        'v1',
+        1,
+        'other',
+      );
       expect(cache.get(key4)).toBeUndefined();
       // 原键仍命中
       expect(cache.get(key1)).toBeDefined();
@@ -118,26 +159,69 @@ describe('GOV-USAGE-001 用量种类与统计分母', () => {
     const { repo, dispose } = tempRepo();
     try {
       repo.insertUsageEvent({
-        requestId: 'conv-1', fallbackIndex: 0, sessionId: 's1', turn: 1, step: 1,
-        userId: 'u1', provider: 'p', model: 'm', routingMode: 'auto',
-        inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0,
-        creditNanos: 100n, success: true, latencyMs: 10,
-        attemptOrigin: 'provider', usageMissing: false, createdAt: '2026-08-21T00:00:00Z',
+        requestId: 'conv-1',
+        fallbackIndex: 0,
+        sessionId: 's1',
+        turn: 1,
+        step: 1,
+        userId: 'u1',
+        provider: 'p',
+        model: 'm',
+        routingMode: 'auto',
+        inputTokens: 10,
+        outputTokens: 5,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        creditNanos: 100n,
+        success: true,
+        latencyMs: 10,
+        attemptOrigin: 'provider',
+        usageMissing: false,
+        createdAt: '2026-08-21T00:00:00Z',
       });
       repo.insertUsageEvent({
-        requestId: 'conv-1', fallbackIndex: 1, sessionId: 's1', turn: 1, step: 1,
-        userId: 'u1', provider: 'p', model: 'm2', routingMode: 'auto',
-        inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0,
-        creditNanos: 100n, success: true, latencyMs: 10,
-        attemptOrigin: 'provider', usageMissing: false, createdAt: '2026-08-21T00:00:01Z',
+        requestId: 'conv-1',
+        fallbackIndex: 1,
+        sessionId: 's1',
+        turn: 1,
+        step: 1,
+        userId: 'u1',
+        provider: 'p',
+        model: 'm2',
+        routingMode: 'auto',
+        inputTokens: 10,
+        outputTokens: 5,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        creditNanos: 100n,
+        success: true,
+        latencyMs: 10,
+        attemptOrigin: 'provider',
+        usageMissing: false,
+        createdAt: '2026-08-21T00:00:01Z',
       });
       repo.insertUsageEvent({
-        requestId: 'cls-1', fallbackIndex: 0, sessionId: 's1', usageKind: 'classifier',
-        parentRequestId: 'conv-1', turn: 0, step: 0,
-        userId: 'u1', provider: 'p', model: 'cls', routingMode: 'auto',
-        inputTokens: 5, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0,
-        creditNanos: 20n, success: true, latencyMs: 5,
-        attemptOrigin: 'provider', usageMissing: false, createdAt: '2026-08-21T00:00:02Z',
+        requestId: 'cls-1',
+        fallbackIndex: 0,
+        sessionId: 's1',
+        usageKind: 'classifier',
+        parentRequestId: 'conv-1',
+        turn: 0,
+        step: 0,
+        userId: 'u1',
+        provider: 'p',
+        model: 'cls',
+        routingMode: 'auto',
+        inputTokens: 5,
+        outputTokens: 1,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        creditNanos: 20n,
+        success: true,
+        latencyMs: 5,
+        attemptOrigin: 'provider',
+        usageMissing: false,
+        createdAt: '2026-08-21T00:00:02Z',
       });
       // 按种类过滤
       const conv = repo.queryUsage({ usageKind: 'conversation' });
@@ -149,7 +233,10 @@ describe('GOV-USAGE-001 用量种类与统计分母', () => {
       // 双分母：Requests 以 requestId 去重（2：conv-1/cls-1），Attempts 按行数（3）
       expect(repo.countUsageRequests()).toEqual({ requests: 2, attempts: 3 });
       // conversation 分母：1 request / 2 attempts
-      expect(repo.countUsageRequests({ usageKind: 'conversation' })).toEqual({ requests: 1, attempts: 2 });
+      expect(repo.countUsageRequests({ usageKind: 'conversation' })).toEqual({
+        requests: 1,
+        attempts: 2,
+      });
     } finally {
       dispose();
     }
@@ -159,11 +246,25 @@ describe('GOV-USAGE-001 用量种类与统计分母', () => {
     const { repo, dispose } = tempRepo();
     try {
       repo.insertUsageEvent({
-        requestId: 'r1', fallbackIndex: 0, sessionId: 's', turn: 1, step: 1,
-        userId: 'u', provider: 'p', model: 'm', routingMode: 'manual',
-        inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0,
-        creditNanos: 0n, success: true, latencyMs: 5,
-        attemptOrigin: 'provider', usageMissing: true, createdAt: '2026-08-21T00:00:00Z',
+        requestId: 'r1',
+        fallbackIndex: 0,
+        sessionId: 's',
+        turn: 1,
+        step: 1,
+        userId: 'u',
+        provider: 'p',
+        model: 'm',
+        routingMode: 'manual',
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        creditNanos: 0n,
+        success: true,
+        latencyMs: 5,
+        attemptOrigin: 'provider',
+        usageMissing: true,
+        createdAt: '2026-08-21T00:00:00Z',
       });
       const rows = repo.queryUsage({});
       expect(rows[0]!.usageMissing).toBe(true);
@@ -250,7 +351,10 @@ describe('GOV-OPS-003 路由效果指标', () => {
   });
 
   it('边界：有效样本少于 100 → insufficientSample，隐藏百分比', () => {
-    const m = computeRoutingMetrics(Array.from({ length: 99 }, () => sample()), 1_000_000);
+    const m = computeRoutingMetrics(
+      Array.from({ length: 99 }, () => sample()),
+      1_000_000,
+    );
     expect(m.insufficientSample).toBe(true);
     expect(m.estimatedCreditSaving).toBeUndefined();
     expect(m.configuredQualityRetention).toBeUndefined();
@@ -281,22 +385,45 @@ describe('GOV-OPS-003 路由效果指标', () => {
     const { repo, dispose } = tempRepo();
     try {
       const decision = sealDecision({
-        requestId: 'req-1', turn: 1, step: 1, fallbackIndex: 0, causes: ['initial'],
-        changedFields: [], selectionMode: 'auto', effectiveStrategy: 'credit_first',
+        requestId: 'req-1',
+        turn: 1,
+        step: 1,
+        fallbackIndex: 0,
+        causes: ['initial'],
+        changedFields: [],
+        selectionMode: 'auto',
+        effectiveStrategy: 'credit_first',
         candidates: [
           { routeId: 'p:cheap', quality: 70, multiplierPpm: 500_000 },
           { routeId: 'p:best', quality: 95, multiplierPpm: 2_000_000 },
         ],
-        excluded: [], outcome: 'selected', selectedRoute: 'p:cheap', configRevision: 1,
+        excluded: [],
+        outcome: 'selected',
+        selectedRoute: 'p:cheap',
+        configRevision: 1,
       });
       repo.insertSealedDecision(decision, { sessionId: 's1' });
       repo.markDecisionCommitted(decision.decisionId, decision.decisionHash);
       repo.insertUsageEvent({
-        requestId: 'req-1', fallbackIndex: 0, sessionId: 's1', turn: 1, step: 1,
-        userId: 'u', provider: 'p', model: 'cheap', routingMode: 'auto',
-        inputTokens: 600, outputTokens: 400, cacheReadTokens: 0, cacheWriteTokens: 0,
-        creditNanos: 500_000n, success: true, latencyMs: 10,
-        attemptOrigin: 'provider', usageMissing: false, createdAt: '2026-08-21T00:00:00Z',
+        requestId: 'req-1',
+        fallbackIndex: 0,
+        sessionId: 's1',
+        turn: 1,
+        step: 1,
+        userId: 'u',
+        provider: 'p',
+        model: 'cheap',
+        routingMode: 'auto',
+        inputTokens: 600,
+        outputTokens: 400,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        creditNanos: 500_000n,
+        success: true,
+        latencyMs: 10,
+        attemptOrigin: 'provider',
+        usageMissing: false,
+        createdAt: '2026-08-21T00:00:00Z',
       });
       const directory = new Map([
         ['p:cheap', { multiplierPpm: 500_000, quality: 70 }],

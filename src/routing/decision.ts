@@ -51,12 +51,7 @@ export const TRIGGER_PRIORITY = [
 
 /** 决策原因（causes 元素）。 */
 export type DecisionCause =
-  | 'initial'
-  | 'resume'
-  | 'step'
-  | 'selection_mode_change'
-  | 'config_change'
-  | 'fallback';
+  'initial' | 'resume' | 'step' | 'selection_mode_change' | 'config_change' | 'fallback';
 
 /**
  * 生成 UUIDv7（48 bit 毫秒时间戳 + 版本/变体位 + 随机位）。
@@ -142,7 +137,8 @@ export interface DecisionHashInput {
   changedFields: readonly string[];
   selectionMode: string;
   effectiveStrategy: string;
-  classifier?: { taskType: string; complexity: string; confidence: number; source: string } | undefined;
+  classifier?:
+    { taskType: string; complexity: string; confidence: number; source: string } | undefined;
   minimumQuality?: number | undefined;
   candidates: readonly DecisionCandidate[];
   excluded: ReadonlyArray<{ routeId: string; reason: string }>;
@@ -238,7 +234,9 @@ export function deriveTrigger(causes: readonly DecisionCause[]): (typeof TRIGGER
  * @param fields - 待校验字段列表。
  * @throws 未知字段时抛错（fail closed）。
  */
-export function assertChangedFields(fields: readonly string[]): asserts fields is readonly ChangedField[] {
+export function assertChangedFields(
+  fields: readonly string[],
+): asserts fields is readonly ChangedField[] {
   for (const field of fields) {
     if (!(CHANGED_FIELDS as readonly string[]).includes(field)) {
       throw new Error(`DECISION_SCHEMA: unknown changedField ${field}`);
@@ -262,7 +260,12 @@ export interface SealedDecision {
   changedFields: readonly ChangedField[];
   selectionMode: 'manual' | 'auto';
   effectiveStrategy: 'manual' | 'quality_first' | 'credit_first';
-  classifier?: { taskType: string; complexity: string; confidence: number; source: 'hint' | 'rule' | 'llm' };
+  classifier?: {
+    taskType: string;
+    complexity: string;
+    confidence: number;
+    source: 'hint' | 'rule' | 'llm';
+  };
   minimumQuality?: number;
   candidates: readonly DecisionCandidate[];
   excluded: ReadonlyArray<{ routeId: CanonicalRoute; reason: ExclusionReason }>;
@@ -286,7 +289,12 @@ export interface SealDecisionInput {
   changedFields: readonly string[];
   selectionMode: 'manual' | 'auto';
   effectiveStrategy: 'manual' | 'quality_first' | 'credit_first';
-  classifier?: { taskType: string; complexity: string; confidence: number; source: 'hint' | 'rule' | 'llm' };
+  classifier?: {
+    taskType: string;
+    complexity: string;
+    confidence: number;
+    source: 'hint' | 'rule' | 'llm';
+  };
   minimumQuality?: number;
   candidates: readonly DecisionCandidate[];
   excluded: ReadonlyArray<{ routeId: CanonicalRoute; reason: ExclusionReason }>;
@@ -345,7 +353,9 @@ export function sealDecision(input: SealDecisionInput): SealedDecision {
     changedFields: Object.freeze([...input.changedFields]),
     selectionMode: input.selectionMode,
     effectiveStrategy: input.effectiveStrategy,
-    ...(input.classifier !== undefined ? { classifier: Object.freeze({ ...input.classifier }) } : {}),
+    ...(input.classifier !== undefined
+      ? { classifier: Object.freeze({ ...input.classifier }) }
+      : {}),
     ...(input.minimumQuality !== undefined ? { minimumQuality: input.minimumQuality } : {}),
     candidates: Object.freeze(candidateTruncation.items.map((c) => Object.freeze({ ...c }))),
     excluded: Object.freeze(excludedTruncation.items.map((e) => Object.freeze({ ...e }))),
@@ -375,6 +385,8 @@ export function sealDecision(input: SealDecisionInput): SealedDecision {
 export function assertEventSize(payload: unknown): void {
   const size = Buffer.byteLength(canonicalizeJson(payload), 'utf8');
   if (size > DECISION_LIMITS.maxEventBytes) {
-    throw new Error(`DECISION_SCHEMA: event exceeds ${DECISION_LIMITS.maxEventBytes} bytes (${size})`);
+    throw new Error(
+      `DECISION_SCHEMA: event exceeds ${DECISION_LIMITS.maxEventBytes} bytes (${size})`,
+    );
   }
 }

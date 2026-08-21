@@ -7,7 +7,7 @@
  * - 缓存只保存哈希、分类结果、版本与时间——不保存 Prompt 正文。
  * - 失败、超时、非法 JSON 与低置信度结果由调用方（index.ts）决定不写入。
  */
-import { createHmac, randomBytes } from 'node:crypto';
+import { createHash, createHmac, randomBytes } from 'node:crypto';
 import type { GovernorRepository } from '../storage/repository.js';
 import type { ClassifierCache, Classification } from './types.js';
 
@@ -86,7 +86,7 @@ export class SQLiteClassifierCache implements ClassifierCache {
 
   /** 读取缓存；TTL 过期视为 miss。 */
   get(key: string): Classification | undefined {
-    const { inputHash, configRevision } = splitKey(key);
+    const { inputHash, configRevision } = storageKey(key);
     const row = this._repo.getClassifierCache(inputHash, configRevision);
     if (row === undefined) return undefined;
     // TTL 检查：过期条目视为 miss（惰性；批量清理在保留任务中）
@@ -102,7 +102,7 @@ export class SQLiteClassifierCache implements ClassifierCache {
 
   /** 写入缓存（幂等 UPSERT）。 */
   set(key: string, value: Classification): void {
-    const { inputHash, configRevision } = splitKey(key);
+    const { inputHash, configRevision } = storageKey(key);
     this._repo.setClassifierCache(inputHash, configRevision, {
       taskType: value.taskType,
       complexity: value.complexity,

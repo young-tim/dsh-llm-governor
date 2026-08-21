@@ -26,7 +26,10 @@ import {
 } from '../../src/dsh-adapter/session-events.js';
 
 /** 构造一条最小决策事件数据的 helper。 */
-function decisionData(decisionId: string, overrides?: Partial<GovernorRoutingDecisionEventData>): GovernorRoutingDecisionEventData {
+function decisionData(
+  decisionId: string,
+  overrides?: Partial<GovernorRoutingDecisionEventData>,
+): GovernorRoutingDecisionEventData {
   const [requestId, fallbackIndex] = decisionId.split(':');
   return {
     schemaVersion: GOVERNOR_SESSION_EVENT_SCHEMA_VERSION,
@@ -60,7 +63,9 @@ afterAll(() => {
 });
 
 /** 启动一套带 JSONL 持久化后端的 Context（SessionStore + persistence）。 */
-async function bootPersisted(rootDir: string): Promise<{ ctx: Context; dispose: () => Promise<void> }> {
+async function bootPersisted(
+  rootDir: string,
+): Promise<{ ctx: Context; dispose: () => Promise<void> }> {
   const ctx = new Context();
   const jsonl = ctx.plugin(JsonlPersistence, { root: rootDir, compression: 'none' });
   await jsonl;
@@ -210,7 +215,10 @@ describe('rc.8 Session Event seam: 持久化冷读回（红灯证据）', () => 
       ignorable: true,
     });
     const turnEnd = JSON.parse(lines[lines.length - 1] as string) as { seq: number };
-    writeFileSync(logPath, [...lines.slice(0, 4), govLine, JSON.stringify({ ...turnEnd, seq: 4 })].join('\n') + '\n');
+    writeFileSync(
+      logPath,
+      [...lines.slice(0, 4), govLine, JSON.stringify({ ...turnEnd, seq: 4 })].join('\n') + '\n',
+    );
     {
       const { ctx, dispose } = await bootPersisted(dir);
       const loaded = await ctx.sessionPersistence.load('cold-2');
@@ -222,7 +230,12 @@ describe('rc.8 Session Event seam: 持久化冷读回（红灯证据）', () => 
 
   it('Session API 层（fromRestore/seed）不拒绝 governor 事件：内存与 fork 路径兼容', () => {
     const seed: never[] = [];
-    const session = Session.create('seed-1', seed, { version: 0, id: 'seed-1', createdAt: Date.now(), cwd: root });
+    const session = Session.create('seed-1', seed, {
+      version: 0,
+      id: 'seed-1',
+      createdAt: Date.now(),
+      cwd: root,
+    });
     appendGovernorDecision(session, decisionData('req-s1:0'));
     // fromRestore 接受含 governor 事件的 seed（envelope 校验不检查 KNOWN 类型集）。
     const restored = Session.fromRestore('seed-1', structuredClone(session.events), {
@@ -296,7 +309,10 @@ describe('rc.8 会话控制状态 seam: selection-mode 事件持久化与恢复'
       lastDecisionConfigRevision: 3,
     });
     // seed 恢复路径（SessionStore.create with seed）同样重建。
-    const resumed = ctx.sessions.create('sel-2-resume', { seed: [...child.events], meta: { cwd: root } });
+    const resumed = ctx.sessions.create('sel-2-resume', {
+      seed: [...child.events],
+      meta: { cwd: root },
+    });
     expect(restoreGovernorSelection(resumed.events)?.mode).toBe('manual');
     // 无 selection-mode 事件的旧会话返回 undefined（调用方用全局默认，不反推）。
     const legacy = ctx.sessions.create('sel-2-legacy', { meta: { cwd: root } });
