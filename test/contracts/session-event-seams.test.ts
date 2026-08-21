@@ -3,19 +3,22 @@
  *
  * 证明/证伪：
  * - Session Event 幂等持久化：append/flush/fromRestore 存在；append 无幂等键参数，
- *   幂等由 Governor 持久层（扫描 log + append）实现；未标 ignorable 的插件事件
- *   持久化后冷读回被拒绝（SEAM-1 红灯证据）；带 ignorable 的事件冷读回成功。
- * - 会话控制状态：selection-mode 事件持久化于 log，fork/seed 恢复后可重建。
+ *   幂等由 Governor 持久层（扫描 log + append）实现。未知插件 envelope 的红灯证据
+ *   保留；正式写入改用已知 `request/context` carrier 并通过真实 JSONL 冷恢复。
+ * - 会话控制状态：selection 投影持久化于 log，fork/seed/冷启动后可重建。
  *
  * 全程使用临时目录与内存 Context，不触碰真实 DSH_HOME。
  */
-import { mkdtempSync, rmSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, readdirSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { Context } from '@deepseek-ai/cordis';
 import SessionStore, { Session } from '@deepseek-ai/dsh-session';
 import JsonlPersistence from '@deepseek-ai/dsh-session-persistence-jsonl';
+import { AuditPipeline, SessionStoreSink } from '../../src/plugin/audit-pipeline.js';
+import { GovernorDatabase } from '../../src/storage/database.js';
+import { GovernorRepository } from '../../src/storage/repository.js';
 import {
   GOVERNOR_SESSION_EVENT_SCHEMA_VERSION,
   appendGovernorDecision,
@@ -101,10 +104,15 @@ describe('rc.8 Session Event seam: append/幂等/durable ack', () => {
     await store;
     const session = ctx.sessions.create('seam-1', { meta: { cwd: root } });
     session.append('turn/start', { turn: 1 });
-    const event = appendGovernorDecision(session, decisionData('req-1:0'));
-    expect(event.type).toBe('governor/routing-decision');
+    const event = appendGovernorDecision(
+      session,
+      decisionData('req-1:0', { selectedRoute: 'fake-provider:model-a' }),
+    );
+    expect(event.type).toBe('request/context');
     expect(event.seq).toBe(1);
-    expect(event.data.decisionId).toBe('req-1:0');
+    expect(event.data.provider).toBe('fake-provider');
+    expect(event.data.model).toBe('model-a');
+    expect(event.data.governorDecision?.decisionId).toBe('req-1:0');
     // 事件 envelope 与 data 被 deepFreeze：持久 log 不可事后改写。
     expect(Object.isFrozen(event)).toBe(true);
     expect(Object.isFrozen(event.data)).toBe(true);
@@ -116,13 +124,22 @@ describe('rc.8 Session Event seam: append/幂等/durable ack', () => {
     const store = ctx.plugin(SessionStore);
     await store;
     const session = ctx.sessions.create('seam-2', { meta: { cwd: root } });
-    appendGovernorDecision(session, decisionData('req-2:0'));
+    appendGovernorDecision(
+      session,
+      decisionData('req-2:0', { selectedRoute: 'fake-provider:model-a' }),
+    );
     const before = session.events.length;
-    const again = appendGovernorDecision(session, decisionData('req-2:0'));
+    const again = appendGovernorDecision(
+      session,
+      decisionData('req-2:0', { selectedRoute: 'fake-provider:model-a' }),
+    );
     expect(session.events.length).toBe(before);
-    expect(again.data.decisionId).toBe('req-2:0');
+    expect(again.data.governorDecision?.decisionId).toBe('req-2:0');
     // 不同 fallbackIndex 属于新 attempt，正常追加。
-    appendGovernorDecision(session, decisionData('req-2:1'));
+    appendGovernorDecision(
+      session,
+      decisionData('req-2:1', { selectedRoute: 'fake-provider:model-a' }),
+    );
     expect(session.events.length).toBe(before + 1);
     await store.dispose();
   });
@@ -132,12 +149,25 @@ describe('rc.8 Session Event seam: append/幂等/durable ack', () => {
     const store = ctx.plugin(SessionStore);
     await store;
     const session = ctx.sessions.create('seam-3', { meta: { cwd: root } });
-    appendGovernorDecision(session, decisionData('req-3:0'));
+    appendGovernorDecision(
+      session,
+      decisionData('req-3:0', { selectedRoute: 'fake-provider:model-a' }),
+    );
     expect(() =>
-      appendGovernorDecision(session, decisionData('req-3:0', { decisionHash: 'different' })),
+      appendGovernorDecision(
+        session,
+        decisionData('req-3:0', {
+          decisionHash: 'different',
+          selectedRoute: 'fake-provider:model-a',
+        }),
+      ),
     ).toThrowError(/DECISION_CONFLICT/);
     // 原事件未被覆盖。
-    expect(findGovernorDecision(session, 'req-3:0')?.data.decisionHash).toBe('hash-req-3:0');
+    const found = findGovernorDecision(session, 'req-3:0');
+    expect(found?.type).toBe('request/context');
+    expect(found?.type === 'request/context' && found.data.governorDecision.decisionHash).toBe(
+      'hash-req-3:0',
+    );
     await store.dispose();
   });
 
@@ -167,15 +197,16 @@ describe('rc.8 Session Event seam: append/幂等/durable ack', () => {
   });
 });
 
-describe('rc.8 Session Event seam: 持久化冷读回（红灯证据）', () => {
-  it('未标 ignorable 的 governor 事件持久化后冷读回被拒绝（SessionFormatUnsupportedError）', async () => {
+describe('rc.8 Session Event seam: 持久化冷读回', () => {
+  it('历史未标 ignorable 的 governor/* envelope 仍会被 rc.8 拒绝', async () => {
     const dir = mkdtempSync(join(root, 'refuse'));
     {
       const { ctx, dispose } = await bootPersisted(dir);
       const session = ctx.sessions.create('cold-1', { meta: { cwd: dir } });
       session.append('turn/start', { turn: 1 });
       session.append('step/start', { turn: 1, step: 1 });
-      appendGovernorDecision(session, decisionData('req-c1:0'));
+      // 直接复现早期开发版 envelope；当前 appendGovernorDecision 已不再写该类型。
+      session.append('governor/routing-decision', decisionData('req-c1:0'));
       session.append('step/end', { turn: 1, step: 1 });
       session.append('turn/end', { turn: 1, reason: { kind: 'completed' } });
       await ctx.sessions.flush(session);
@@ -191,39 +222,44 @@ describe('rc.8 Session Event seam: 持久化冷读回（红灯证据）', () => 
     }
   });
 
-  it('带 ignorable 标记的事件（未来 seam 补齐后的目标形态）冷读回成功且事件保留', async () => {
-    const dir = mkdtempSync(join(root, 'accept'));
+  it('request/context 命名投影经真实 JSONL 持久化、关闭、重启后可冷读恢复', async () => {
+    const dir = mkdtempSync(join(root, 'carrier-cold-read'));
     {
       const { ctx, dispose } = await bootPersisted(dir);
       const session = ctx.sessions.create('cold-2', { meta: { cwd: dir } });
       session.append('turn/start', { turn: 1 });
       session.append('step/start', { turn: 1, step: 1 });
+      appendGovernorDecision(
+        session,
+        decisionData('req-c2:0', { selectedRoute: 'fake-provider:model-a' }),
+      );
       session.append('step/end', { turn: 1, step: 1 });
       session.append('turn/end', { turn: 1, reason: { kind: 'completed' } });
       await ctx.sessions.flush(session);
       await dispose();
     }
-    // 手工注入带 ignorable 的 governor 事件（rc.8 append API 无法写出，见上一用例）。
+    // 物理 log 写入的是 rc.8 已知 envelope，不依赖 Governor 动态注册。
     const logPath = findLog(dir);
     expect(logPath).not.toBe('');
-    const lines = readFileSync(logPath, 'utf8').trim().split('\n');
-    const govLine = JSON.stringify({
-      type: 'governor/routing-decision',
-      seq: 3,
-      time: Date.now(),
-      data: decisionData('req-c2:0'),
-      ignorable: true,
-    });
-    const turnEnd = JSON.parse(lines[lines.length - 1] as string) as { seq: number };
-    writeFileSync(
-      logPath,
-      [...lines.slice(0, 4), govLine, JSON.stringify({ ...turnEnd, seq: 4 })].join('\n') + '\n',
-    );
+    const raw = readFileSync(logPath, 'utf8');
+    expect(raw).toContain('"type":"request/context"');
+    expect(raw).toContain('"governorDecision"');
+    expect(raw).not.toContain('"type":"governor/routing-decision"');
     {
+      // 全新 Context 模拟进程重启；只由 rc.8 persistence 解释 envelope。
       const { ctx, dispose } = await bootPersisted(dir);
       const loaded = await ctx.sessionPersistence.load('cold-2');
-      // ignorable 事件保留在 log 中，读取器可识别 Governor 轨迹。
-      expect(loaded.events.map((e) => e.type)).toContain('governor/routing-decision');
+      const carrier = loaded.events.find(
+        (event) =>
+          event.type === 'request/context' &&
+          event.data.governorDecision?.decisionId === 'req-c2:0',
+      );
+      expect(carrier?.type).toBe('request/context');
+      if (carrier?.type === 'request/context') {
+        expect(carrier.data.provider).toBe('fake-provider');
+        expect(carrier.data.model).toBe('model-a');
+        expect(carrier.data.governorDecision?.decisionHash).toBe('hash-req-c2:0');
+      }
       await dispose();
     }
   });
@@ -236,7 +272,10 @@ describe('rc.8 Session Event seam: 持久化冷读回（红灯证据）', () => 
       createdAt: Date.now(),
       cwd: root,
     });
-    appendGovernorDecision(session, decisionData('req-s1:0'));
+    appendGovernorDecision(
+      session,
+      decisionData('req-s1:0', { selectedRoute: 'fake-provider:model-a' }),
+    );
     // fromRestore 接受含 governor 事件的 seed（envelope 校验不检查 KNOWN 类型集）。
     const restored = Session.fromRestore('seed-1', structuredClone(session.events), {
       version: 0,
@@ -244,11 +283,88 @@ describe('rc.8 Session Event seam: 持久化冷读回（红灯证据）', () => 
       createdAt: Date.now(),
       cwd: root,
     });
-    expect(restored.events.some((e) => e.type === 'governor/routing-decision')).toBe(true);
+    expect(
+      restored.events.some(
+        (e) => e.type === 'request/context' && e.data.governorDecision?.decisionId === 'req-s1:0',
+      ),
+    ).toBe(true);
   });
 });
 
 describe('rc.8 会话控制状态 seam: selection-mode 事件持久化与恢复', () => {
+  it('全新空 Session 在首次决策前可用显式当前 route 持久切换', async () => {
+    const dir = mkdtempSync(join(root, 'selection-empty-session'));
+    const db = new GovernorDatabase(join(dir, 'governor.db'));
+    const repository = new GovernorRepository(db);
+    {
+      const { ctx, dispose } = await bootPersisted(dir);
+      const session = ctx.sessions.create('sel-empty', { meta: { cwd: dir } });
+      expect(session.events).toHaveLength(0);
+      const pipeline = new AuditPipeline(
+        repository,
+        new SessionStoreSink(
+          (id) => ctx.sessions.get(id),
+          (live) => ctx.sessions.flush(live),
+          () => ctx.sessions.list(),
+        ),
+      );
+      await pipeline.commitSelectionMode(
+        session.id,
+        {
+          schemaVersion: GOVERNOR_SESSION_EVENT_SCHEMA_VERSION,
+          selectionRevision: 1,
+          mode: 'auto',
+          changedAt: Date.now(),
+        },
+        { provider: 'fake-provider', model: 'model-a' },
+      );
+      const carrier = session.events[0];
+      expect(carrier?.type).toBe('request/context');
+      if (carrier?.type === 'request/context') {
+        expect(carrier.data).toMatchObject({
+          provider: 'fake-provider',
+          model: 'model-a',
+          governorSelection: { selectionRevision: 1, mode: 'auto' },
+        });
+      }
+      await dispose();
+    }
+    {
+      const { ctx, dispose } = await bootPersisted(dir);
+      const loaded = await ctx.sessionPersistence.load('sel-empty');
+      expect(restoreGovernorSelection(loaded.events)?.mode).toBe('auto');
+      await dispose();
+    }
+    db.close();
+  });
+
+  it('selection-mode 投影持久化后可跨进程冷恢复', async () => {
+    const dir = mkdtempSync(join(root, 'selection-cold-read'));
+    {
+      const { ctx, dispose } = await bootPersisted(dir);
+      const session = ctx.sessions.create('sel-cold', { meta: { cwd: dir } });
+      appendGovernorSelectionMode(session, {
+        schemaVersion: GOVERNOR_SESSION_EVENT_SCHEMA_VERSION,
+        selectionRevision: 1,
+        mode: 'auto',
+        lastManualRoute: 'fake-provider:model-a',
+        changedAt: Date.now(),
+      });
+      await ctx.sessions.flush(session);
+      await dispose();
+    }
+    {
+      const { ctx, dispose } = await bootPersisted(dir);
+      const loaded = await ctx.sessionPersistence.load('sel-cold');
+      expect(restoreGovernorSelection(loaded.events)).toEqual({
+        mode: 'auto',
+        lastManualRoute: 'fake-provider:model-a',
+        selectionRevision: 1,
+      });
+      await dispose();
+    }
+  });
+
   it('selection-mode 事件写入 log，幂等重放不重复', async () => {
     const ctx = new Context();
     const store = ctx.plugin(SessionStore);
@@ -258,6 +374,7 @@ describe('rc.8 会话控制状态 seam: selection-mode 事件持久化与恢复'
       schemaVersion: GOVERNOR_SESSION_EVENT_SCHEMA_VERSION,
       selectionRevision: 1,
       mode: 'auto',
+      lastManualRoute: 'fake-provider:model-a',
       changedAt: Date.now(),
     });
     const count = session.events.length;
@@ -265,6 +382,7 @@ describe('rc.8 会话控制状态 seam: selection-mode 事件持久化与恢复'
       schemaVersion: GOVERNOR_SESSION_EVENT_SCHEMA_VERSION,
       selectionRevision: 1,
       mode: 'auto',
+      lastManualRoute: 'fake-provider:model-a',
       changedAt: Date.now() + 1,
     });
     expect(session.events.length).toBe(count);
@@ -289,6 +407,7 @@ describe('rc.8 会话控制状态 seam: selection-mode 事件持久化与恢复'
       schemaVersion: GOVERNOR_SESSION_EVENT_SCHEMA_VERSION,
       selectionRevision: 1,
       mode: 'auto',
+      lastManualRoute: 'fake-provider:model-a',
       changedAt: Date.now(),
     });
     appendGovernorSelectionMode(parent, {

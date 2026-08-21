@@ -12,7 +12,16 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { execSync } from 'node:child_process';
-import { mkdtempSync, readdirSync, rmSync, existsSync, readFileSync } from 'node:fs';
+import {
+  cpSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Context, Service } from '../../src/dsh-adapter/mod.js';
@@ -27,12 +36,34 @@ const projectRoot = process.cwd();
 let workDir: string;
 /** 解压后的 package 目录。 */
 let packageDir: string;
+let sourceDir: string;
 
 beforeAll(() => {
-  execSync('npx tsc -p tsconfig.json', { cwd: projectRoot, stdio: 'inherit' });
-  execSync('node scripts/copy-ui-pages.mjs', { cwd: projectRoot, stdio: 'inherit' });
   workDir = mkdtempSync(join(tmpdir(), 'dsh-gov-install-'));
-  execSync(`pnpm pack --pack-destination "${workDir}"`, { cwd: projectRoot, stdio: 'inherit' });
+  sourceDir = join(workDir, 'source');
+  mkdirSync(sourceDir);
+  for (const entry of [
+    'package.json',
+    'pnpm-lock.yaml',
+    'pnpm-workspace.yaml',
+    'tsconfig.json',
+    'vitest.config.ts',
+    'cordis.patch.yml',
+    'LICENSE',
+    'README.md',
+    'src',
+    'scripts',
+    'test',
+  ]) {
+    cpSync(join(projectRoot, entry), join(sourceDir, entry), { recursive: true });
+  }
+  symlinkSync(join(projectRoot, 'node_modules'), join(sourceDir, 'node_modules'), 'dir');
+  execSync('npm run build', { cwd: sourceDir, stdio: 'inherit' });
+  execSync(`pnpm pack --pack-destination "${workDir}"`, {
+    cwd: sourceDir,
+    stdio: 'inherit',
+    env: { ...process.env, npm_config_ignore_scripts: 'true' },
+  });
   const tgzs = readdirSync(workDir).filter((f) => f.endsWith('.tgz'));
   if (tgzs.length !== 1) throw new Error(`预期一个 tgz，实际：${tgzs.join(', ')}`);
   execSync(`tar -xzf "${join(workDir, tgzs[0]!)}" -C "${workDir}"`, { stdio: 'inherit' });
@@ -263,9 +294,9 @@ describe('运行时 UI 挂载与默认存储路径', () => {
     });
     // 等待异步 JSON 响应
     await new Promise((resolve) => setImmediate(resolve));
-    expect(res.statusCode).toBe(200);
-    const payload = JSON.parse(res.body) as { data: Array<{ routeId: string }> };
-    expect(payload.data.some((m) => m.routeId === 'fake-provider:model-a')).toBe(true);
+    expect(res.statusCode).toBe(401);
+    const payload = JSON.parse(res.body) as { code: string };
+    expect(payload.code).toBe('UNAUTHORIZED');
 
     await (govFiber as unknown as { dispose: () => Promise<void> }).dispose();
     await wsFiber.dispose();

@@ -411,8 +411,16 @@ describe('GET /api/usage', () => {
       inputTokens: 200,
       outputTokens: 100,
     };
+    const oldEvent: UsageEvent = {
+      ...event1,
+      id: 'ev-old',
+      requestId: 'req-usage-old',
+      userId: 'old-user',
+      createdAt: '2026-01-01T00:00:00.000Z',
+    };
     harness.governor!.recordUsage(event1);
     harness.governor!.recordUsage(event2);
+    harness.governor!.recordUsage(oldEvent);
   });
 
   it('返回全部 usage 事件', async () => {
@@ -421,6 +429,18 @@ describe('GET /api/usage', () => {
     const body = res.body as { data: Array<{ requestId: string }>; total: number };
     expect(body.total).toBeGreaterThanOrEqual(2);
     expect(body.data.some((e) => e.requestId === 'req-usage-1')).toBe(true);
+    expect(body.data.some((e) => e.requestId === 'req-usage-old')).toBe(false);
+  });
+
+  it('Host 拒绝超过 31 天或超过 200 行的无界查询', async () => {
+    const wide = await request(
+      `/api/usage?from=${encodeURIComponent('2026-01-01T00:00:00.000Z')}&to=${encodeURIComponent('2026-08-20T00:00:00.000Z')}`,
+    );
+    expect(wide.status).toBe(400);
+    expect((wide.body as { code: string }).code).toBe('INVALID_REQUEST');
+    const excessiveLimit = await request('/api/usage?limit=201');
+    expect(excessiveLimit.status).toBe(400);
+    expect((excessiveLimit.body as { code: string }).code).toBe('INVALID_REQUEST');
   });
 
   it('按 userId 过滤', async () => {

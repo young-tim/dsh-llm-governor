@@ -16,7 +16,16 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readdirSync, readFileSync, rmSync, existsSync } from 'node:fs';
+import {
+  cpSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -29,6 +38,7 @@ const dshBin = join(projectRoot, 'node_modules', '@deepseek-ai', 'dsh', 'lib', '
 let workDir: string;
 /** tarball 绝对路径。 */
 let tarballPath: string;
+let sourceDir: string;
 /** 临时 DSH_HOME。 */
 let dshHome: string;
 /** 测试 profile 名。 */
@@ -49,11 +59,35 @@ beforeAll(() => {
   }
   workDir = mkdtempSync(join(tmpdir(), 'dsh-gov-real-'));
   dshHome = join(workDir, 'home');
-  // prepack 会执行完整 build（tsc + 复制 UI 页面）
-  execFileSync('pnpm', ['pack', '--pack-destination', workDir], {
-    cwd: projectRoot,
+  sourceDir = join(workDir, 'source');
+  mkdirSync(sourceDir);
+  for (const entry of [
+    'package.json',
+    'pnpm-lock.yaml',
+    'pnpm-workspace.yaml',
+    'tsconfig.json',
+    'vitest.config.ts',
+    'cordis.patch.yml',
+    'LICENSE',
+    'README.md',
+    'src',
+    'scripts',
+    'test',
+  ]) {
+    cpSync(join(projectRoot, entry), join(sourceDir, entry), { recursive: true });
+  }
+  symlinkSync(join(projectRoot, 'node_modules'), join(sourceDir, 'node_modules'), 'dir');
+  // 在临时源码副本执行完整 build，不改动仓库 dist/**。
+  execFileSync('npm', ['run', 'build'], {
+    cwd: sourceDir,
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  execFileSync('pnpm', ['pack', '--pack-destination', workDir], {
+    cwd: sourceDir,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: { ...process.env, npm_config_ignore_scripts: 'true' },
   });
   const tgzs = readdirSync(workDir).filter((f) => f.endsWith('.tgz'));
   if (tgzs.length !== 1) throw new Error(`预期一个 tgz，实际：${tgzs.join(', ')}`);

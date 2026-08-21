@@ -120,6 +120,62 @@ describe('GOV-CONFIG-001 配置权威与 Revision', () => {
     }
   });
 
+  it('用户额度与 allow 同事务更新，拒绝非法额度且重启回读一致', async () => {
+    const dbDir = mkdtempSync(join(tmpdir(), 'dsh-gov-user-policy-'));
+    const dbPath = join(dbDir, 'governor.db');
+    const config: GovernorPluginConfig = {
+      ...baseConfig(),
+      users: { u1: { monthly_credits: 10, allow: ['p:a'] } },
+    };
+    const db1 = new GovernorDatabase(dbPath);
+    try {
+      const repo1 = new GovernorRepository(db1);
+      const service1 = new GovernorService(new Context(), config, repo1, {});
+      const before = service1.configRevision;
+      await expect(service1.updateUser('u1', { monthlyCredits: -1 })).rejects.toThrow(
+        'INVALID_MONTHLY_CREDITS',
+      );
+      await expect(service1.updateUser('u1', { monthlyCredits: 1.5 })).rejects.toThrow(
+        'INVALID_MONTHLY_CREDITS',
+      );
+      await expect(service1.updateUser('u1', { allow: ['not-a-route'] })).rejects.toThrow(
+        'INVALID_USER_ALLOW',
+      );
+      expect(service1.configRevision).toBe(before);
+
+      const updated = await service1.updateUser('u1', {
+        monthlyCredits: 23,
+        allow: ['p:b', 'p:a', 'p:b'],
+      });
+      expect(updated).toMatchObject({
+        monthlyCredits: 23,
+        allow: ['p:a', 'p:b'],
+        configRevision: before + 1,
+      });
+      expect(repo1.listUserAllow('u1')).toEqual(['p:a', 'p:b']);
+      expect((await service1.listAuditEntries(10))[0]?.changedFields).toEqual([
+        'monthlyCredits',
+        'allow',
+      ]);
+    } finally {
+      db1.close();
+    }
+
+    const db2 = new GovernorDatabase(dbPath);
+    try {
+      const service2 = new GovernorService(new Context(), config, new GovernorRepository(db2), {});
+      expect((await service2.listUsers()).find((user) => user.userId === 'u1')).toMatchObject({
+        monthlyCredits: 23,
+        allow: ['p:a', 'p:b'],
+        usedCredits: 0,
+        usedCreditNanos: '0',
+      });
+    } finally {
+      db2.close();
+      rmSync(dbDir, { recursive: true, force: true });
+    }
+  });
+
   it('单事务：updateModel 审计写失败时数据与 revision 整体回滚，内存不提交', async () => {
     const h = await bootService(baseConfig());
     try {

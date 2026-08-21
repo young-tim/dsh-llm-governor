@@ -1,9 +1,6 @@
 /**
- * GOV-TRACE-002 / GOV-SELECT-001 / GOV-UI-001：Client 侧注册对象的单元测试。
- *
- * SEAM-5：浏览器 bundle 无法在 Node 实例化，因此这里直接测试注册对象的
- * 纯逻辑（match/start/update/buildViewNode、视图构建器、selector 注入面、
- * registerClientSurface 接线），运行时挂载验证随 B-3 浏览器 E2E 交付。
+ * GOV-TRACE-002 / GOV-SELECT-001 / GOV-UI-001 的共享契约单测。
+ * 真实 `dsh.client` bundle 及挂载/HMR/卸载在 contracts 与 ui 项目另行验证。
  */
 import { describe, expect, it } from 'vitest';
 import {
@@ -12,7 +9,6 @@ import {
   governorModelSeatSpec,
   governorSettingsSection,
   governorTrajectoryDefinition,
-  registerClientSurface,
 } from '../../src/plugin/client-registration.js';
 import type { GovernorService } from '../../src/plugin/service.js';
 import type {
@@ -55,6 +51,20 @@ function decisionEvent(overrides: Record<string, unknown> = {}) {
   };
 }
 
+/** 将同一决策放入 rc.8 冷恢复兼容的 request/context carrier。 */
+function decisionCarrier(overrides: Record<string, unknown> = {}) {
+  const legacy = decisionEvent(overrides);
+  return {
+    type: 'request/context',
+    seq: legacy.seq,
+    data: {
+      provider: 'p',
+      model: 'best',
+      governorDecision: legacy.data,
+    },
+  };
+}
+
 /** 构造 start 的 match 参数（start 只读 match.event）。 */
 function matchOf(event: { type: string; data: unknown }): ConversationMatch {
   return { event, role: 'start', location: { kind: 'session' } } as unknown as ConversationMatch;
@@ -62,7 +72,20 @@ function matchOf(event: { type: string; data: unknown }): ConversationMatch {
 
 /** 构造 buildViewNode 的 context 参数。 */
 function contextOf(state: unknown): ConversationNodeContext<unknown> {
-  return { state } as unknown as ConversationNodeContext<unknown>;
+  const decisionId =
+    typeof state === 'object' && state !== null && 'decisionId' in state
+      ? String((state as { decisionId: unknown }).decisionId)
+      : 'unknown';
+  const kind = 'governor-routing-decision';
+  return {
+    key: `${kind.length}:${kind}${decisionId}`,
+    kind,
+    id: decisionId,
+    matches: [],
+    start: undefined,
+    state,
+    current: new Map(),
+  } as ConversationNodeContext<unknown>;
 }
 
 describe('GOV-TRACE-002 Trajectory 卡片 Definition', () => {
@@ -71,6 +94,22 @@ describe('GOV-TRACE-002 Trajectory 卡片 Definition', () => {
     expect(governorTrajectoryDefinition.match({ type: 'user/message', data: {} })).toBeNull();
     const matched = governorTrajectoryDefinition.match(decisionEvent());
     expect(matched).toEqual({ id: 'req-1:0', role: 'start' });
+  });
+
+  it('request/context.governorDecision carrier 与 legacy envelope 构建同一轨迹卡片', () => {
+    expect(governorTrajectoryDefinition.match(decisionCarrier())).toEqual({
+      id: 'req-1:0',
+      role: 'start',
+    });
+    const state = governorTrajectoryDefinition.start(
+      contextOf(undefined),
+      matchOf(decisionCarrier()),
+    ) as unknown as Record<string, unknown>;
+    expect(state).toMatchObject({
+      decisionId: 'req-1:0',
+      selectedRoute: 'p:best',
+      selectionMode: 'auto',
+    });
   });
 
   it('match：损坏事件缺 decisionId 时回退事件 seq（卡片仍可挂载）', () => {
@@ -161,7 +200,7 @@ describe('GOV-TRACE-002 Trajectory 卡片 Definition', () => {
     );
     const node = governorTrajectoryDefinition.buildViewNode(contextOf(state));
     expect(node).toMatchObject({
-      key: 'governor-routing-decision:req-1:0',
+      key: '25:governor-routing-decisionreq-1:0',
       kind: 'governor-routing-decision',
       id: 'req-1:0',
       target: 'governor-decision',
@@ -237,7 +276,7 @@ describe('GOV-TRACE-002 governor-decision 视图构建器', () => {
   /** 构造一个卡片视图节点。 */
   function nodeOf(id: string): ConversationViewNode {
     return {
-      key: `governor-routing-decision:${id}`,
+      key: `25:governor-routing-decision${id}`,
       kind: 'governor-routing-decision',
       id,
       target: 'governor-decision',
@@ -327,106 +366,7 @@ describe('GOV-SELECT-001 Composer Auto selector 注册', () => {
   });
 });
 
-describe('registerClientSurface 接线（SEAM-5：Node 安全跳过）', () => {
-  /** 构造浏览器注册面 fake（模拟 ctx.get(name) 可选服务读取）。 */
-  function browserRegistries() {
-    const registered: { kind: string; payload: unknown }[] = [];
-    const store: Record<string, unknown> = {
-      conversationEvents: {
-        registerFallback: (definition: unknown) => {
-          registered.push({ kind: 'event', payload: definition });
-          return () =>
-            registered.splice(
-              registered.findIndex((r) => r.kind === 'event'),
-              1,
-            );
-        },
-      },
-      conversationViews: {
-        register: (definition: unknown) => {
-          registered.push({ kind: 'view', payload: definition });
-          return () =>
-            registered.splice(
-              registered.findIndex((r) => r.kind === 'view'),
-              1,
-            );
-        },
-      },
-      slots: {
-        register: (spec: unknown, component: unknown) => {
-          registered.push({ kind: 'slot', payload: { spec, component } });
-          return () =>
-            registered.splice(
-              registered.findIndex((r) => r.kind === 'slot'),
-              1,
-            );
-        },
-      },
-      settings: {
-        section: (section: unknown) => {
-          registered.push({ kind: 'settings', payload: section });
-          return () =>
-            registered.splice(
-              registered.findIndex((r) => r.kind === 'settings'),
-              1,
-            );
-        },
-      },
-    };
-    return {
-      registered,
-      ctx: { get: (name: string) => store[name] },
-    };
-  }
-
-  it('Host/Node 上下文（无注册面）安全跳过，返回空数组', () => {
-    expect(registerClientSurface({})).toEqual([]);
-    expect(registerClientSurface(undefined)).toEqual([]);
-    // 有 get 但服务未提供（Host/Node 的 Cordis 上下文）：同样跳过
-    expect(registerClientSurface({ get: () => undefined })).toEqual([]);
-  });
-
-  it('浏览器注册面 + service + 组件齐备：注册全部四个面，disposer 逐项清理', () => {
-    const { ctx, registered } = browserRegistries();
-    const service = {
-      getSessionSelectionMode: () => ({
-        mode: 'auto' as const,
-        selectionRevision: 1,
-        isDefault: false,
-      }),
-      setSessionSelectionMode: async () => ({ mode: 'auto' as const, selectionRevision: 2 }),
-    } as unknown as GovernorService;
-    const component = { fake: 'component' };
-    const disposers = registerClientSurface(ctx, { service, selectorComponent: component });
-    expect(disposers).toHaveLength(4);
-    expect(registered.map((r) => r.kind)).toEqual(['event', 'view', 'slot', 'settings']);
-    // selector 注册携带 spec（座席名 + Host 方法接线）与浏览器组件
-    const slot = registered.find((r) => r.kind === 'slot')!.payload as {
-      spec: { name: string };
-      component: unknown;
-    };
-    expect(slot.spec.name).toBe('conversation.input.model');
-    expect(slot.component).toBe(component);
-    // disposer 全部生效（HMR/卸载清理，GOV-UI-001 AC 7）
-    for (const dispose of disposers) dispose();
-    expect(registered).toEqual([]);
-  });
-
-  it('浏览器注册面但缺组件：不注册 selector（不以假组件抢占官方 occupant）', () => {
-    const { ctx, registered } = browserRegistries();
-    const service = {
-      getSessionSelectionMode: () => ({
-        mode: 'auto' as const,
-        selectionRevision: 1,
-        isDefault: false,
-      }),
-      setSessionSelectionMode: async () => ({ mode: 'auto' as const, selectionRevision: 2 }),
-    } as unknown as GovernorService;
-    const disposers = registerClientSurface(ctx, { service });
-    expect(disposers).toHaveLength(3);
-    expect(registered.map((r) => r.kind)).toEqual(['event', 'view', 'settings']);
-  });
-
+describe('浏览器注册共享契约', () => {
   it('Settings 分区声明：P0 范围四分区，usage 只读（GOV-UI-001）', () => {
     expect(governorSettingsSection.name).toBe('governor');
     expect(

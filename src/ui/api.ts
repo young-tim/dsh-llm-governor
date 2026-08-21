@@ -20,8 +20,10 @@ import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { randomBytes } from 'node:crypto';
-import type { GovernorService } from '../plugin/service.js';
+import type { GovernorService, GovernorUsageQuery } from '../plugin/service.js';
+import { normalizeGovernorUsageQuery } from '../plugin/service.js';
 import { RoutingError } from '../routing/types.js';
+import type { GovernorCapability } from '../security/governor-capabilities.js';
 
 /** 模块所在目录，用于定位 pages 子目录中的 HTML 文件。 */
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -31,8 +33,7 @@ const pagesDir = join(__dirname, 'pages');
 /** 请求体上限（字节）：Remote/兼容 API 256 KiB（优化文档 7.1）。 */
 export const MAX_REQUEST_BODY_BYTES = 256 * 1024;
 
-/** Governor 管理能力（GOV-SEC-001 三项最小 capability）。 */
-export type GovernorCapability = 'governor.read' | 'governor.manage' | 'governor.audit';
+export type { GovernorCapability } from '../security/governor-capabilities.js';
 
 /** 已认证主体。 */
 export interface GovernorActor {
@@ -58,12 +59,6 @@ export interface GovernorApiServerOptions {
   allowedOrigin?: string;
   /** 强制 loopback peer（兼容 API 独立监听时必须为 true）。 */
   requireLoopback?: boolean;
-  /**
-   * 无 Authorization 请求的默认能力（仅用于 DSH webServer 受信前缀通道，
-   * 授予 governor.read 使原生页面可读；manage/audit 仍需 Bearer）。
-   * rc.8 SEAM-3 阻断下“DSH 登录主体解析”的显式降级（见 BLOCKED.md B-2）。
-   */
-  defaultCapabilities?: GovernorCapability[];
   /** 兼容旧配置的管理员令牌（映射为全能力主体；已废弃，仅为迁移保留）。 */
   adminToken?: string;
 }
@@ -145,8 +140,8 @@ export function createGovernorRequestHandler(
   }
 
   /**
-   * 解析请求主体：Authorization: Bearer <token>；无凭证时返回默认主体
-   * （仅 DSH webServer 受信前缀通道配置 defaultCapabilities 时）。
+   * 解析请求主体：Authorization: Bearer <token>。Host 可达性不是认证，
+   * 因此无凭证请求一律 fail closed，不授予隐式 read。
    *
    * @param req - HTTP 请求对象。
    * @returns 已认证主体；未认证返回 undefined。
@@ -154,9 +149,6 @@ export function createGovernorRequestHandler(
   function authenticate(req: http.IncomingMessage): GovernorActor | undefined {
     const header = req.headers['authorization'];
     if (typeof header !== 'string' || !header.startsWith('Bearer ')) {
-      if ((opts?.defaultCapabilities?.length ?? 0) > 0) {
-        return { id: 'dsh-webserver-channel', capabilities: new Set(opts?.defaultCapabilities) };
-      }
       return undefined;
     }
     const token = header.slice('Bearer '.length);
@@ -269,6 +261,10 @@ export function createGovernorRequestHandler(
       } else if (code === 'INVALID_MULTIPLIER') {
         // GOV-UI-002：Host 拒绝超界值
         sendError(res, 400, 'INVALID_MULTIPLIER');
+      } else if (code === 'INVALID_MONTHLY_CREDITS' || code === 'INVALID_USER_ALLOW') {
+        sendError(res, 400, code);
+      } else if (code === 'INVALID_REQUEST') {
+        sendError(res, 400, 'INVALID_REQUEST');
       } else if (code === 'UNAUTHORIZED' || code === 'FORBIDDEN') {
         sendError(res, 403, code);
       } else {
@@ -424,9 +420,12 @@ export function createGovernorRequestHandler(
           return;
         }
         const userId = decodeURIComponent(path.slice('/api/users/'.length));
-        let patch: { monthlyCredits?: number };
+        let patch: { monthlyCredits?: number; allow?: string[] };
         try {
-          patch = JSON.parse((await readBody(req)) || '{}') as { monthlyCredits?: number };
+          patch = JSON.parse((await readBody(req)) || '{}') as {
+            monthlyCredits?: number;
+            allow?: string[];
+          };
         } catch (err) {
           if (err instanceof Error && err.message === 'PAYLOAD_TOO_LARGE') handleError(res, err);
           else sendError(res, 400, 'INVALID_JSON');
@@ -455,12 +454,25 @@ export function createGovernorRequestHandler(
           );
           return;
         }
-        const query: { userId?: string; provider?: string } = {};
+        const query: GovernorUsageQuery = {};
         const userIdParam = url.searchParams.get('userId');
         const providerParam = url.searchParams.get('provider');
+        const fromParam = url.searchParams.get('from');
+        const toParam = url.searchParams.get('to');
+        const limitParam = url.searchParams.get('limit');
         if (userIdParam !== null) query.userId = userIdParam;
         if (providerParam !== null) query.provider = providerParam;
-        const events = await governor.queryUsage(query);
+        if (fromParam !== null) query.from = fromParam;
+        if (toParam !== null) query.to = toParam;
+        if (limitParam !== null) query.limit = Number(limitParam);
+        let boundedQuery: GovernorUsageQuery;
+        try {
+          boundedQuery = normalizeGovernorUsageQuery(query);
+        } catch (err) {
+          handleError(res, err);
+          return;
+        }
+        const events = await governor.queryUsage(boundedQuery);
         const data = events.map((e) => ({
           requestId: e.requestId,
           provider: e.provider,
@@ -470,6 +482,7 @@ export function createGovernorRequestHandler(
           credits: Number(e.creditNanos) / 1_000_000_000,
           success: e.success,
           latencyMs: e.latencyMs,
+          createdAt: e.createdAt,
         }));
         sendJson(res, 200, { data, total: data.length });
         return;

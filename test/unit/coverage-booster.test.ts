@@ -14,7 +14,10 @@ import {
   AuditPipeline,
   selectionFromSession,
 } from '../../src/plugin/audit-pipeline.js';
-import { appendGovernorSelectionMode } from '../../src/dsh-adapter/session-events.js';
+import {
+  appendGovernorSelectionMode,
+  governorDecisionFromEvent,
+} from '../../src/dsh-adapter/session-events.js';
 import { sealDecision } from '../../src/routing/decision.js';
 import { GovernorDatabase } from '../../src/storage/database.js';
 import { GovernorRepository } from '../../src/storage/repository.js';
@@ -63,12 +66,16 @@ describe('GOV-TRACE-001 SessionStoreSink（内存 Session 的完整双写）', (
     );
     const d = decision('req-sink');
     await sink.appendDecision(d, { sessionId: 'sink-1' });
-    expect(session.events.some((e) => e.type === 'governor/routing-decision')).toBe(true);
+    expect(
+      session.events.some((e) => governorDecisionFromEvent(e)?.decisionId === 'req-sink:0'),
+    ).toBe(true);
     expect(await sink.hasDecision('req-sink:0')).toBe(true);
     expect(await sink.hasDecision('nonexistent:0')).toBe(false);
     // 幂等：重复 append 不产生第二条
     await sink.appendDecision(d, { sessionId: 'sink-1' });
-    const count = session.events.filter((e) => e.type === 'governor/routing-decision').length;
+    const count = session.events.filter(
+      (e) => governorDecisionFromEvent(e)?.decisionId === 'req-sink:0',
+    ).length;
     expect(count).toBe(1);
     await store.dispose();
   });
@@ -143,13 +150,16 @@ describe('GOV-TRACE-001 SessionStoreSink（内存 Session 的完整双写）', (
       configRevision: 2,
     });
     await sink.appendDecision(rejected, { sessionId: 'sink-3' });
-    const event = session.events.find((e) => e.type === 'governor/routing-decision');
-    expect(event).toBeDefined();
-    expect(event!.data['outcome']).toBe('rejected');
-    expect(event!.data['errorCode']).toBe('NO_MODEL_MATCHED');
-    expect(event!.data['minimumQuality']).toBe(92);
-    expect((event!.data['candidates'] as unknown[]).length).toBe(1);
-    expect((event!.data['excluded'] as unknown[]).length).toBe(1);
+    const event = session.events.find(
+      (e) => governorDecisionFromEvent(e)?.decisionId === 'req-rej:1',
+    );
+    const eventData = event === undefined ? undefined : governorDecisionFromEvent(event);
+    expect(eventData).toBeDefined();
+    expect(eventData!.outcome).toBe('rejected');
+    expect(eventData!.errorCode).toBe('NO_MODEL_MATCHED');
+    expect(eventData!.minimumQuality).toBe(92);
+    expect(eventData!.candidates).toHaveLength(1);
+    expect(eventData!.excluded).toHaveLength(1);
     await store.dispose();
   });
 });
@@ -307,6 +317,7 @@ describe('GOV-TRACE-001 AuditPipeline 对账分支', () => {
       schemaVersion: 1,
       selectionRevision: 1,
       mode: 'auto',
+      lastManualRoute: 'p:m',
       changedAt: Date.now(),
     });
     appendGovernorSelectionMode(session, {

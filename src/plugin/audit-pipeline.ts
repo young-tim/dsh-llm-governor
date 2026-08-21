@@ -10,8 +10,8 @@
  *
  * 严格 fail-closed：NullSessionEventSink 在 appendDecision/appendSelectionMode 时
  * 抛 AUDIT_PERSIST_FAILED——不写轨迹就不能标 committed。生产接线（mod.ts apply）
- * 注入 SessionStoreSink 以接通真实 DSH Session；SEAM-1/2 阻断仅影响持久化冷读回
- * （docs/UPSTREAM_SEAMS.md），不影响内存 Session 的实时双写。
+ * 注入 SessionStoreSink 以接通真实 DSH Session；新写入使用 rc.8 已知的
+ * `request/context` carrier，真实持久化冷读与恢复均由合同测试覆盖。
  */
 import type { GovernorRepository, DecisionQueryResult } from '../storage/repository.js';
 import type { SealedDecision } from '../routing/decision.js';
@@ -21,20 +21,36 @@ import {
   appendGovernorDecision,
   appendGovernorSelectionMode,
   findGovernorDecision,
+  governorDecisionFromEvent,
   GOVERNOR_SESSION_EVENT_SCHEMA_VERSION,
   restoreGovernorSelection,
   type GovernorSessionSelectionState,
   type GovernorSelectionModeEventData,
+  type GovernorEventCarrierRoute,
 } from '../dsh-adapter/session-events.js';
+
+/** Session 审计事件的归属与 rc.8 `request/context` carrier route。 */
+export interface SessionAuditContext {
+  sessionId: string;
+  /**
+   * 当次 DSH 请求的真实 proposal/selected route。拒绝决策没有
+   * selectedRoute，因此由调用方显式传入，禁止使用虚拟 provider/model。
+   */
+  route?: GovernorEventCarrierRoute;
+}
 
 /** Session Event 写入端抽象（双写协议的 Session 侧）。 */
 export interface SessionEventSink {
   /** 幂等追加一条决策事件并返回 durable acknowledgement；失败抛错。 */
-  appendDecision(decision: SealedDecision, context: { sessionId: string }): Promise<void>;
+  appendDecision(decision: SealedDecision, context: SessionAuditContext): Promise<void>;
   /** 幂等追加一条 selection-mode 事件并返回 durable acknowledgement；失败抛错。 */
-  appendSelectionMode(sessionId: string, data: GovernorSelectionModeEventData): Promise<void>;
+  appendSelectionMode(
+    sessionId: string,
+    data: GovernorSelectionModeEventData,
+    route?: GovernorEventCarrierRoute,
+  ): Promise<void>;
   /** 查询指定 decisionId 的 Session Event 是否已存在（对账用）。 */
-  hasDecision(decisionId: string): Promise<boolean>;
+  hasDecision(decisionId: string, expectedHash?: string): Promise<boolean>;
 }
 
 /** 写入决策事件时的会话查找函数（由接线层提供 session 解析）。 */
@@ -61,7 +77,7 @@ export class SessionStoreSink implements SessionEventSink {
   }
 
   /** 幂等追加决策事件并等待 durable ack。 */
-  async appendDecision(decision: SealedDecision, context: { sessionId: string }): Promise<void> {
+  async appendDecision(decision: SealedDecision, context: SessionAuditContext): Promise<void> {
     const session = this._resolve(context.sessionId);
     if (session === undefined) {
       throw new RoutingError(
@@ -69,7 +85,14 @@ export class SessionStoreSink implements SessionEventSink {
         `session ${context.sessionId} not live for decision append`,
       );
     }
-    appendGovernorDecision(session, this._toEventData(decision));
+    try {
+      appendGovernorDecision(session, this._toEventData(decision), context.route);
+    } catch (error) {
+      if (String(error).includes('DECISION_CONFLICT')) {
+        throw new RoutingError('DECISION_CONFLICT', String(error));
+      }
+      throw error;
+    }
     const participated = await this._flush(session);
     if (!participated) {
       throw new RoutingError(
@@ -80,9 +103,18 @@ export class SessionStoreSink implements SessionEventSink {
   }
 
   /** 查询 Session log 中是否已存在该决策事件。 */
-  async hasDecision(decisionId: string): Promise<boolean> {
+  async hasDecision(decisionId: string, expectedHash?: string): Promise<boolean> {
     for (const session of this._sessions()) {
-      if (findGovernorDecision(session, decisionId) !== undefined) return true;
+      const event = findGovernorDecision(session, decisionId);
+      if (event === undefined) continue;
+      const actualHash = governorDecisionFromEvent(event)?.decisionHash;
+      if (expectedHash !== undefined && actualHash !== expectedHash) {
+        throw new RoutingError(
+          'DECISION_CONFLICT',
+          `decision ${decisionId} session hash ${String(actualHash)} conflicts with ${expectedHash}`,
+        );
+      }
+      return true;
     }
     return false;
   }
@@ -91,6 +123,7 @@ export class SessionStoreSink implements SessionEventSink {
   async appendSelectionMode(
     sessionId: string,
     data: GovernorSelectionModeEventData,
+    route?: GovernorEventCarrierRoute,
   ): Promise<void> {
     const session = this._resolve(sessionId);
     if (session === undefined) {
@@ -99,7 +132,7 @@ export class SessionStoreSink implements SessionEventSink {
         `session ${sessionId} not live for selection-mode append`,
       );
     }
-    appendGovernorSelectionMode(session, data);
+    appendGovernorSelectionMode(session, data, route);
     const participated = await this._flush(session);
     if (!participated) {
       throw new RoutingError(
@@ -203,7 +236,7 @@ export class AuditPipeline {
    * @param context - 会话上下文（sessionId）。
    * @throws 任一步失败时抛 AUDIT_PERSIST_FAILED（fail closed，调用方不得分发 Provider）。
    */
-  async commitDecision(decision: SealedDecision, context: { sessionId: string }): Promise<void> {
+  async commitDecision(decision: SealedDecision, context: SessionAuditContext): Promise<void> {
     if (this._repository === undefined) return;
     try {
       this._repository.insertSealedDecision(decision, context);
@@ -216,6 +249,7 @@ export class AuditPipeline {
     try {
       await this._sink.appendDecision(decision, context);
     } catch (err) {
+      if (err instanceof RoutingError && err.code === 'DECISION_CONFLICT') throw err;
       throw new RoutingError(
         'AUDIT_PERSIST_FAILED',
         `decision ${decision.decisionId} session event append failed: ${String(err)}`,
@@ -252,10 +286,11 @@ export class AuditPipeline {
   async commitSelectionMode(
     sessionId: string,
     data: GovernorSelectionModeEventData,
+    route?: GovernorEventCarrierRoute,
   ): Promise<void> {
     if (this._repository === undefined) return;
     try {
-      await this._sink.appendSelectionMode(sessionId, data);
+      await this._sink.appendSelectionMode(sessionId, data, route);
     } catch (err) {
       if (err instanceof RoutingError && err.code === 'AUDIT_PERSIST_FAILED') throw err;
       throw new RoutingError(
@@ -282,13 +317,25 @@ export class AuditPipeline {
         result.pending += 1;
         continue;
       }
-      const exists = await this._sink.hasDecision(row.decisionId);
+      let exists: boolean;
+      try {
+        exists = await this._sink.hasDecision(row.decisionId, row.decisionHash);
+      } catch (error) {
+        if (error instanceof RoutingError && error.code === 'DECISION_CONFLICT') {
+          result.conflicts.push(row.decisionId);
+        }
+        result.pending += 1;
+        continue;
+      }
       if (!exists) {
         try {
           await this._sink.appendDecision(this._reconstruct(row), {
             sessionId: row.sessionId ?? 'unknown',
           });
-        } catch {
+        } catch (error) {
+          if (error instanceof RoutingError && error.code === 'DECISION_CONFLICT') {
+            result.conflicts.push(row.decisionId);
+          }
           // 会话不可写：保留 pending（诊断视图显示“审计未完成”）。
           result.pending += 1;
           continue;

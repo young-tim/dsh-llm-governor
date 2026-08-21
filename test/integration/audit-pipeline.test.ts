@@ -20,12 +20,17 @@ import { successScript } from '../../src/dsh-adapter/fake-adapter.js';
 import { wireGovernorEvents } from '../../src/plugin/mod.js';
 import { GovernorService } from '../../src/plugin/service.js';
 import type { GovernorPluginConfig } from '../../src/plugin/service.js';
-import type { SessionEventSink } from '../../src/plugin/audit-pipeline.js';
+import {
+  AuditPipeline,
+  SessionStoreSink,
+  type SessionEventSink,
+} from '../../src/plugin/audit-pipeline.js';
 import { GovernorDatabase } from '../../src/storage/database.js';
 import { GovernorRepository } from '../../src/storage/repository.js';
 import { sealDecision } from '../../src/routing/decision.js';
 import SessionStore from '@deepseek-ai/dsh-session';
 import type { Session } from '@deepseek-ai/dsh-session';
+import JsonlPersistence from '@deepseek-ai/dsh-session-persistence-jsonl';
 
 const providers = ['fake-provider'];
 const models: LlmModelInfo[] = [
@@ -174,6 +179,105 @@ async function runAttempt(
 }
 
 describe('GOV-TRACE-001 双写协议 fail closed（反向验证）', () => {
+  it('真实 rc.8 JSONL：Session durable ack 后才提交 SQLite，关闭重启可冷读', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-gov-audit-cold-'));
+    const db = new GovernorDatabase(join(dir, 'governor.db'));
+    const repo = new GovernorRepository(db);
+    const decision = sealDecision({
+      requestId: 'cold-audit-req',
+      turn: 1,
+      step: 1,
+      fallbackIndex: 0,
+      causes: ['initial'],
+      changedFields: ['selected_route'],
+      selectionMode: 'auto',
+      effectiveStrategy: 'credit_first',
+      candidates: [{ routeId: 'fake-provider:model-a', quality: 90, multiplierPpm: 1_000_000 }],
+      excluded: [],
+      outcome: 'selected',
+      selectedRoute: 'fake-provider:model-a',
+      configRevision: 1,
+    });
+
+    try {
+      const first = new Context();
+      const storePlugin = first.plugin(SessionStore);
+      await storePlugin;
+      const jsonlPlugin = first.plugin(JsonlPersistence, { root: dir, compression: 'none' });
+      await jsonlPlugin;
+      const session = first.sessions.create('audit-cold-session', { meta: { cwd: dir } });
+      const sink = new SessionStoreSink(
+        (id) => first.sessions.get(id),
+        (live) => first.sessions.flush(live),
+        () => first.sessions.list(),
+      );
+      const pipeline = new AuditPipeline(repo, sink);
+      // 全新空 Session：首次模型决策前切 Auto，显式传入 Composer 当前真实 route。
+      await pipeline.commitSelectionMode(
+        session.id,
+        {
+          schemaVersion: 1,
+          selectionRevision: 1,
+          mode: 'auto',
+          changedAt: Date.now(),
+        },
+        { provider: 'fake-provider', model: 'model-a' },
+      );
+      expect(
+        session.events.some(
+          (event) =>
+            event.type === 'request/context' &&
+            event.data.governorSelection?.selectionRevision === 1,
+        ),
+      ).toBe(true);
+      session.append('turn/start', { turn: 1 });
+      session.append('step/start', { turn: 1, step: 1 });
+      await pipeline.commitDecision(decision, {
+        sessionId: session.id,
+        route: { provider: 'fake-provider', model: 'model-a' },
+      });
+      expect(repo.getDecisions(decision.requestId)[0]?.auditState).toBe('committed');
+      const liveCarrier = session.events.find(
+        (event) =>
+          event.type === 'request/context' &&
+          event.data.governorDecision?.decisionId === decision.decisionId,
+      );
+      expect(liveCarrier).toBeDefined();
+      session.append('step/end', { turn: 1, step: 1 });
+      session.append('turn/end', { turn: 1, reason: { kind: 'completed' } });
+      await first.sessions.flush(session);
+      await jsonlPlugin.dispose();
+      await storePlugin.dispose();
+
+      const restarted = new Context();
+      const restartedStore = restarted.plugin(SessionStore);
+      await restartedStore;
+      const restartedJsonl = restarted.plugin(JsonlPersistence, {
+        root: dir,
+        compression: 'none',
+      });
+      await restartedJsonl;
+      const loaded = await restarted.sessionPersistence.load('audit-cold-session');
+      const restoredCarrier = loaded.events.find(
+        (event) =>
+          event.type === 'request/context' &&
+          event.data.governorDecision?.decisionId === decision.decisionId,
+      );
+      expect(restoredCarrier?.type).toBe('request/context');
+      expect(
+        loaded.events.some(
+          (event) =>
+            event.type === 'request/context' && event.data.governorSelection?.mode === 'auto',
+        ),
+      ).toBe(true);
+      await restartedJsonl.dispose();
+      await restartedStore.dispose();
+    } finally {
+      db.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('SQLite 写失败：selectModel 抛 AUDIT_PERSIST_FAILED 且 fake Provider 调用数为 0', async () => {
     const h = await bootFaultHarness();
     try {

@@ -1,26 +1,8 @@
 /**
- * DSH Client 侧原生注册：Trajectory 决策卡片、Composer Auto selector、Settings 分区。
- *
- * SEAM-5（docs/UPSTREAM_SEAMS.md）：dsh-client-runtime 的 client 入口是浏览器
- * bundle（`window.__ModuleLoader__.load(...)`），Node 无法实例化。本模块交付两层：
- *
- * 1. 契约完整的注册对象（类型直接取自 `@deepseek-ai/dsh-client-runtime/client`
- *    的公开契约，tsc 编译期校验）：
- *    - `governorTrajectoryDefinition`：Trajectory 卡片的完整
- *      `ConversationNodeDefinition` 实现——含 `buildViewNode` 渲染实现
- *      （GOV-TRACE-002 卡片摘要 + 详情抽屉视图模型）；
- *    - `governorDecisionViewDefinition`：`governor-decision` target 的
- *      `ConversationViewDefinition`（per-session 增量视图构建器）；
- *    - `governorModelSeatSpec` / `governorModelSeatInject`：Composer 单占位
- *      模型选择座席（`conversation.input.model`）的注册 spec 与注入面——
- *      选择 Auto 调用与 `/model auto` 同一 Host 方法（GOV-SELECT-001 AC 7）；
- *    - `governorSettingsSection`：Settings 分区声明（GOV-UI-001）。
- *
- * 2. `registerClientSurface(ctx, options)` 接线函数：浏览器 client 上下文
- *    （`ctx.conversationEvents` / `ctx.conversationViews` / `ctx.slots` /
- *    settings 面可用时）执行注册并返回 disposer 列表；Host/Node 环境安全
- *    跳过（SEAM-5，合同测试以发布物取证）。React 组件与运行时挂载验证
- *    随 B-3 的浏览器 E2E harness 交付（BLOCKED.md）。
+ * Shared browser contracts for the Governor trajectory, Composer selector and
+ * Settings surfaces.  `src/client/index.ts` consumes these definitions from a
+ * real rc.8 `dsh.client` bundle; the host client-module registry discovers that
+ * bundle from the live Loader package entry and owns its HMR lifecycle.
  */
 import type {
   ConversationMatch,
@@ -31,7 +13,10 @@ import type {
   ConversationViewDefinition,
   ConversationViewNode,
 } from '@deepseek-ai/dsh-client-runtime/client';
-import type { GovernorRoutingDecisionEventData } from '../dsh-adapter/session-events.js';
+import {
+  governorDecisionFromEvent,
+  type GovernorRoutingDecisionEventData,
+} from '../dsh-adapter/session-events.js';
 import type { GovernorService } from './service.js';
 
 /** Trajectory 卡片 Definition 的唯一 kind（会话引擎内的 Context 类别）。 */
@@ -279,7 +264,9 @@ function buildCardViewData(state: GovernorDecisionCardState): GovernorDecisionCa
 }
 
 /**
- * Governor 轨迹卡片 Definition：匹配 `governor/routing-decision` 事件，
+ * Governor 轨迹卡片 Definition：匹配 rc.8 兼容的
+ * `request/context.data.governorDecision`，并保留旧 `governor/routing-decision`
+ * 的只读兼容，
  * 为每个 decisionId 建立独立 Context，`buildViewNode` 产出卡片视图节点。
  *
  * 事件是纯信息记录且自包含（无 update 事件）：`update` 恒返回既有状态；
@@ -294,8 +281,9 @@ export const governorTrajectoryDefinition: ConversationNodeDefinition<GovernorDe
     id: string;
     role: 'start';
   } | null {
-    if (event.type !== 'governor/routing-decision') return null;
-    const data = event.data as Record<string, unknown>;
+    const decision = governorDecisionFromEvent(event as never);
+    if (decision === undefined) return null;
+    const data = decision as unknown as Record<string, unknown>;
     const decisionId = readString(data['decisionId']);
     // 旧 schema/损坏事件缺 decisionId：回退到事件 seq（会话内单调唯一），
     // 保证卡片仍可挂载（GOV-TRACE-002 AC 5：显示「未知」而非丢事件）。
@@ -312,11 +300,12 @@ export const governorTrajectoryDefinition: ConversationNodeDefinition<GovernorDe
     _context: ConversationNodeContext<GovernorDecisionCardState>,
     match: ConversationMatch,
   ): GovernorDecisionCardState {
-    const event = match.event as { type: string; data: unknown };
-    if (event.type !== 'governor/routing-decision') {
+    const event = match.event;
+    const decision = governorDecisionFromEvent(event);
+    if (decision === undefined) {
       throw new Error(`GOVERNOR_CARD_STATE: unexpected event type ${event.type}`);
     }
-    return toCardState(event.data as GovernorRoutingDecisionEventData);
+    return toCardState(decision);
   },
   /** 无更新事件：决策事件自包含，update 恒返回既有状态。 */
   update(
@@ -333,9 +322,11 @@ export const governorTrajectoryDefinition: ConversationNodeDefinition<GovernorDe
     const state = context.state;
     if (state === undefined) return null;
     return {
-      key: `${GOVERNOR_DECISION_KIND}:${state.decisionId}`,
-      kind: GOVERNOR_DECISION_KIND,
-      id: state.decisionId,
+      // The assembler owns identity (including the seq fallback for a damaged
+      // legacy event) and rejects a node reconstructed from state identity.
+      key: context.key,
+      kind: context.kind,
+      id: context.id,
       target: GOVERNOR_DECISION_TARGET,
       data: buildCardViewData(state),
     };
@@ -410,12 +401,18 @@ export interface GovernorModelSeatInjected {
 export function governorModelSeatInject(
   service: GovernorService,
   sessionId: string,
+  currentRoute?: string,
 ): GovernorModelSeatInjected {
   return {
     available: true,
     selectionMode: service.getSessionSelectionMode(sessionId).mode,
     lastManualRoute: service.getSessionSelectionMode(sessionId).lastManualRoute ?? null,
-    selectAuto: () => service.setSessionSelectionMode(sessionId, 'auto'),
+    selectAuto: () =>
+      service.setSessionSelectionMode(
+        sessionId,
+        'auto',
+        currentRoute !== undefined ? { currentRoute } : undefined,
+      ),
   };
 }
 
@@ -423,8 +420,8 @@ export function governorModelSeatInject(
  * 单占位 selector 注册 spec（`conversation.input.model` 座席）。
  *
  * 选项「自动（Governor）」置顶显示，不伪造成 Provider 模型；选择具体模型
- * 的路径（Manual + DSH 既有 `session.selectModel`）由浏览器组件复刻
- * （GOV-SELECT-001 AC 11 的完整合同随 B-3 浏览器 E2E 交付）。
+ * 的路径（Manual + DSH 既有 model directory select）由浏览器组件保留；
+ * 两种加载顺序、HMR 与卸载恢复见 browser-client UI 测试。
  */
 export function governorModelSeatSpec(service: GovernorService): {
   name: string;
@@ -453,121 +450,3 @@ export const governorSettingsSection = {
     { key: 'usage', title: '用量', readOnly: true },
   ],
 };
-
-// ===== 接线 =====
-
-/** 浏览器 client 上下文上的注册面（经 `ctx.get(name)` 可选读取；Node/Host 不存在）。 */
-interface ClientRegistries {
-  conversationEvents?:
-    | {
-        registerFallback(definition: unknown): () => void;
-      }
-    | undefined;
-  conversationViews?:
-    | {
-        register(definition: unknown): () => void;
-      }
-    | undefined;
-  slots?:
-    | {
-        register(spec: unknown, component: unknown): () => void;
-      }
-    | undefined;
-  settings?:
-    | {
-        section(section: unknown): () => void;
-      }
-    | undefined;
-}
-
-/**
- * 从 Cordis 上下文安全读取 client 注册面。
- *
- * Cordis Context 是 Proxy：未声明 inject 直接读属性会抛
- * `cannot get property ... without inject`，因此统一经 `ctx.get(name)`
- * 可选服务面读取（与 mod.ts 访问 webServer/sessions 同一模式）；
- * 非 Cordis 上下文（无 get 方法）或服务未提供时返回 undefined。
- */
-function lookupRegistries(ctx: unknown): ClientRegistries {
-  const get = (ctx as { get?: (name: string) => unknown } | undefined)?.get;
-  if (typeof get !== 'function') return {};
-  const read = (name: string): unknown => {
-    try {
-      return get(name);
-    } catch {
-      // 上下文未提供该服务（如 Host/Node 环境）：安全跳过。
-      return undefined;
-    }
-  };
-  const registries: ClientRegistries = {
-    conversationEvents: read('conversationEvents') as ClientRegistries['conversationEvents'],
-    conversationViews: read('conversationViews') as ClientRegistries['conversationViews'],
-    slots: read('slots') as ClientRegistries['slots'],
-    settings: read('settings') as ClientRegistries['settings'],
-  };
-  return registries;
-}
-
-/** registerClientSurface 的可选参数。 */
-export interface RegisterClientSurfaceOptions {
-  /** Host 方法面（Auto selector 调用 setSessionSelectionMode 等）。 */
-  service?: GovernorService;
-  /**
-   * Auto selector 的浏览器组件（B-3：React 组件随浏览器 E2E harness 交付；
-   * 缺省时不注册 selector——不注册假组件，不抢占官方 occupant）。
-   */
-  selectorComponent?: unknown;
-}
-
-/**
- * 注册 Governor Client 侧原生体验（Trajectory / Auto selector / Settings）。
- *
- * 浏览器环境（注册面可用）执行注册并返回 disposer 列表；Node/Host 环境
- * （SEAM-5）安全跳过，返回空数组。调用方（mod.ts apply）在 ctx.effect 中
- * 注册 disposer，确保 HMR/卸载时清理（GOV-UI-001 AC 7）。
- *
- * @param ctx - Cordis 上下文（浏览器 client 上下文时注册面可用）。
- * @param options - service 与浏览器组件注入。
- * @returns disposer 函数列表（卸载时调用）。
- */
-export function registerClientSurface(
-  ctx: unknown,
-  options?: RegisterClientSurfaceOptions,
-): Array<() => void> {
-  const disposers: Array<() => void> = [];
-  const client = lookupRegistries(ctx);
-
-  // Trajectory 卡片注册（fallback：不抢占官方节点，作为补充视图）。
-  if (client?.conversationEvents?.registerFallback !== undefined) {
-    const dispose = client.conversationEvents.registerFallback(governorTrajectoryDefinition);
-    disposers.push(dispose);
-  }
-
-  // 视图注册：governor-decision target 的 per-session 构建器。
-  if (client?.conversationViews?.register !== undefined) {
-    const dispose = client.conversationViews.register(governorDecisionViewDefinition);
-    disposers.push(dispose);
-  }
-
-  // Composer Auto selector 注册：需要 slots 注册面 + Host service + 浏览器组件
-  // （三者齐备才注册；组件缺失时不以假组件抢占官方 occupant——B-3）。
-  if (
-    client?.slots?.register !== undefined &&
-    options?.service !== undefined &&
-    options.selectorComponent !== undefined
-  ) {
-    const dispose = client.slots.register(
-      governorModelSeatSpec(options.service),
-      options.selectorComponent,
-    );
-    disposers.push(dispose);
-  }
-
-  // Settings 分区注册。
-  if (client?.settings?.section !== undefined) {
-    const dispose = client.settings.section(governorSettingsSection);
-    disposers.push(dispose);
-  }
-
-  return disposers;
-}

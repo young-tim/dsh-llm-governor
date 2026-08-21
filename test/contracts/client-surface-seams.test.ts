@@ -1,12 +1,9 @@
 /**
- * 任务1 合同测试：DSH rc.8 client 侧接缝（六项契约第 4、5、6 项）。
+ * DSH rc.8 client 侧接缝合同。
  *
- * 证明/证伪（全部从 node_modules 发布物取证，不修改上游包）：
- * - Trajectory definition：`ctx.conversationEvents` / `ctx.conversationViews`
- *   注册表存在于 dsh-client-runtime 的 client 契约（ConversationNodeDefinition /
- *   ConversationViewDefinition）；但 client 入口是浏览器 bundle
- *   （`window.__ModuleLoader__`），Node 合同测试无法实例化（见
- *   docs/UPSTREAM_SEAMS.md SEAM-5），运行时行为验证需浏览器 E2E。
+ * 除发布物取证外，本文件使用 rc.8 真实 ClientModuleRegistry 扫描
+ * Governor 的 `dsh.client` 声明、解析 `./client` 导出并物化 bundle 工厂，
+ * 防止再把公开第三方客户端通道误判为 SEAM-5 阻断。
  * - 单占位 model selector：`conversation.input.model` 槽位在 SlotMap 中声明
  *   `kind: 'single'`（scope 'session'），官方 occupant 由
  *   dsh-client-ui-model-selection 唯一贡献；声明即占用（declaring is claiming）。
@@ -14,12 +11,31 @@
  *   存在，但 `RemoteMethodMarker` 只有 method/exportName/invocation 三个字段，
  *   没有 capability/permission 声明面——SEAM-3 缺失的运行时与发布物证据。
  */
-import { readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { createRequire } from 'node:module';
+import { runInNewContext } from 'node:vm';
 import { describe, expect, it } from 'vitest';
 import { bindTypertRemote, remoteMethods } from '@deepseek-ai/dsh-typert-protocol';
+import { ClientModuleRegistry } from '@deepseek-ai/dsh-client-modules';
 import { Context, Service } from '@deepseek-ai/cordis';
+import * as React from 'react';
+import * as CordisRuntime from '@deepseek-ai/cordis';
+import * as SlotRuntime from '@deepseek-ai/dsh-client-ui-slots';
+import {
+  governorDecisionViewDefinition,
+  governorTrajectoryDefinition,
+} from '../../src/plugin/client-registration.js';
 
 const require = createRequire(import.meta.url);
 
@@ -71,9 +87,213 @@ describe('rc.8 Trajectory definition seam（发布物取证）', () => {
     expect(view).toContain('register(definition: ConversationViewDefinition): () => void');
   });
 
-  it('client 入口是浏览器 bundle：window.__ModuleLoader__ 阻止 Node 实例化（SEAM-5 证据）', () => {
+  it('client 入口使用 rc.8 window.__ModuleLoader__ bundle 协议', () => {
     const clientJs = pkgFile('@deepseek-ai/dsh-client-runtime', 'lib/client.js');
     expect(clientJs.startsWith('window.__ModuleLoader__.load(')).toBe(true);
+  });
+
+  it('rc.8 真实 ConversationNodeAssembler 可 flush request/context 载体与损坏旧事件', () => {
+    const source = pkgFile('@deepseek-ai/dsh-client-runtime', 'lib/client.js');
+    let registration:
+      { id: string; factory: (require: (specifier: string) => unknown) => unknown } | undefined;
+    runInNewContext(source, {
+      window: {
+        __ModuleLoader__: { load: (value: typeof registration) => (registration = value) },
+      },
+      queueMicrotask,
+      setTimeout,
+      clearTimeout,
+      AbortController,
+      URL,
+      TextEncoder,
+      TextDecoder,
+      structuredClone,
+      console,
+    });
+    const runtime = registration!.factory((specifier) => {
+      if (specifier === '@deepseek-ai/cordis') return CordisRuntime;
+      if (specifier === '@deepseek-ai/dsh-client-ui-slots') return SlotRuntime;
+      throw new Error(`unexpected runtime external: ${specifier}`);
+    }) as {
+      ConversationNodeAssembler: new (
+        events: { entries(): readonly unknown[]; fallbackEntry(): undefined },
+        views: { entries(): readonly unknown[] },
+      ) => {
+        replaceWindow(entries: readonly unknown[], hasMore: boolean): unknown;
+        flush(): boolean;
+        snapshot(target: string): unknown;
+      };
+    };
+    const assembler = new runtime.ConversationNodeAssembler(
+      { entries: () => [governorTrajectoryDefinition], fallbackEntry: () => undefined },
+      { entries: () => [governorDecisionViewDefinition] },
+    );
+    const decision = {
+      schemaVersion: 1,
+      decisionId: 'req-assembler:0',
+      requestId: 'req-assembler',
+      turn: 2,
+      step: 1,
+      fallbackIndex: 0,
+      selectionMode: 'auto',
+      effectiveStrategy: 'quality_first',
+      outcome: 'selected',
+      selectedRoute: 'p:a',
+      candidates: [{ routeId: 'p:a', quality: 90, multiplierPpm: 1_000_000 }],
+    };
+    assembler.replaceWindow(
+      [
+        {
+          event: {
+            type: 'request/context',
+            seq: 42,
+            data: { provider: 'p', model: 'a', governorDecision: decision },
+          },
+        },
+        {
+          event: {
+            type: 'governor/routing-decision',
+            seq: 43,
+            data: { schemaVersion: 1, requestId: 'damaged' },
+          },
+        },
+        {
+          event: {
+            type: 'request/context',
+            seq: 44,
+            data: {
+              provider: 'p',
+              model: 'a',
+              governorDecision: {
+                ...decision,
+                decisionId: 'req-assembler:1',
+                fallbackIndex: 1,
+                outcome: 'rejected',
+                selectedRoute: undefined,
+                candidates: [],
+                errorCode: 'NO_MODEL_MATCHED',
+              },
+            },
+          },
+        },
+      ],
+      false,
+    );
+    expect(assembler.flush()).toBe(true);
+    const snapshot = assembler.snapshot('governor-decision') as {
+      nodes: Array<{ key: string; id: string; data: unknown }>;
+    };
+    expect(snapshot.nodes).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          key: '25:governor-routing-decisionreq-assembler:0',
+          id: 'req-assembler:0',
+        }),
+        expect.objectContaining({
+          key: '25:governor-routing-decisionseq-43',
+          id: 'seq-43',
+        }),
+        expect.objectContaining({
+          key: '25:governor-routing-decisionreq-assembler:1',
+          id: 'req-assembler:1',
+          data: expect.objectContaining({
+            summary: expect.objectContaining({ outcome: 'rejected' }),
+          }),
+        }),
+      ]),
+    );
+  });
+
+  it('ClientModuleRegistry 扫描 Governor + 3 个官方客户端，并物化真实 bundle', async () => {
+    const governorRoot = pkgRoot('dsh-llm-governor');
+    const fixtureRoot = mkdtempSync(join(tmpdir(), 'governor-client-scan-'));
+    const fixtureModules = join(fixtureRoot, 'node_modules');
+    const fixturePackage = join(fixtureModules, 'dsh-llm-governor');
+    mkdirSync(join(fixturePackage, 'dist'), { recursive: true });
+    mkdirSync(join(fixtureRoot, 'test'), { recursive: true });
+    writeFileSync(
+      join(fixturePackage, 'package.json'),
+      readFileSync(join(governorRoot, 'package.json')),
+    );
+    symlinkSync(
+      join(governorRoot, 'node_modules', '@deepseek-ai'),
+      join(fixtureModules, '@deepseek-ai'),
+    );
+    const fixtureClient = join(fixturePackage, 'dist', 'client.js');
+    execFileSync(process.execPath, ['scripts/build-client.mjs'], {
+      cwd: governorRoot,
+      env: { ...process.env, DSH_GOVERNOR_CLIENT_OUTFILE: fixtureClient },
+      stdio: 'pipe',
+    });
+
+    const liveNames = [
+      '@deepseek-ai/dsh-client-runtime',
+      '@deepseek-ai/dsh-client-ui-conversation',
+      '@deepseek-ai/dsh-client-ui-model-selection',
+      'dsh-llm-governor',
+    ];
+    const loader = {
+      entries: () =>
+        liveNames.map((name) => ({
+          options: { name },
+          fiber: {},
+          disabled: false,
+        })),
+    };
+    const routes: Array<{ kind: string; path: string; handler: unknown }> = [];
+    const webServer = {
+      register: (route: { kind: string; path: string; handler: unknown }) => {
+        routes.push(route);
+        return () => {};
+      },
+      tapIndex: () => () => {},
+    };
+    const root = new Context().extend({ baseUrl: join(fixtureRoot, 'test', 'scan.js') });
+    root.provide('loader', loader);
+    root.provide('webServer', webServer);
+    const fiber = root.plugin(ClientModuleRegistry);
+    await fiber;
+    try {
+      const registry = root.get('clientModules') as ClientModuleRegistry;
+      const graph = registry.graph();
+      expect(graph.entries.map((entry) => entry.id)).toEqual(expect.arrayContaining(liveNames));
+      const governor = graph.entries.find((entry) => entry.id === 'dsh-llm-governor');
+      expect(governor).toMatchObject({
+        id: 'dsh-llm-governor',
+        inject: expect.arrayContaining([
+          '@deepseek-ai/dsh-client-ui-conversation',
+          '@deepseek-ai/dsh-client-ui-model-selection',
+          '@deepseek-ai/dsh-client-ui-settings',
+        ]),
+      });
+      expect(registry.clientPath('dsh-llm-governor')).toBe(realpathSync(fixtureClient));
+      expect(routes).toHaveLength(1);
+
+      const source = readFileSync(registry.clientPath('dsh-llm-governor')!, 'utf8');
+      let registration:
+        { id: string; factory: (require: (specifier: string) => unknown) => unknown } | undefined;
+      runInNewContext(source, {
+        window: {
+          __ModuleLoader__: {
+            load: (value: typeof registration) => {
+              registration = value;
+            },
+          },
+        },
+      });
+      expect(registration?.id).toBe('dsh-llm-governor');
+      const exports = registration!.factory((specifier) => {
+        if (specifier === 'react') return React;
+        throw new Error(`unexpected client external: ${specifier}`);
+      }) as Record<string, unknown>;
+      expect(exports['inject']).toEqual(
+        expect.arrayContaining(['conversationEvents', 'conversationViews', 'slots', 'remote']),
+      );
+      expect(exports['apply']).toEqual(expect.any(Function));
+    } finally {
+      await fiber.dispose();
+      rmSync(fixtureRoot, { recursive: true, force: true });
+    }
   });
 });
 

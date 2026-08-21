@@ -74,15 +74,15 @@ Governor 不在 Provider 与 DSH 之间增加 HTTP 转发层。它只在 DSH 已
 
 ## 4. DSH 集成点
 
-| DSH 契约 | Governor 用途 | 限制 |
-| --- | --- | --- |
-| `ctx.llm.listProviders()` | 活动 Provider 路由 | 只表示已注册，不代表健康 |
-| `ctx.llm.listModels(provider)` | 建议模型目录与输入模态 | 目录是 advisory，缺席不等于模型非法 |
-| `agent/pre-step` | 捕获本步新消息、Hint、图片并分类 | 不改写 Prompt，不记录正文 |
-| `agent/request` | 读取下游 LlmCallConfig，执行准入并返回 provider/model | Waterfall 返回新对象，禁止原地修改 |
-| `llm/stream` | 观察真实 attempt、Token、finish、首个语义 chunk、时延 | 必须保持 AsyncIterable 顺序和取消语义 |
-| `agent/request-error` | 判断失败能否 Fallback，持久化排除集并返回 retry | Governor 启用时只能有一个 Recovery Owner |
-| `session/event` | 关联 assistant usage、step/end、turn/end 与清理状态 | 通过 declaration merge 增加 Governor 事件 |
+| DSH 契约                       | Governor 用途                                         | 限制                                      |
+| ------------------------------ | ----------------------------------------------------- | ----------------------------------------- |
+| `ctx.llm.listProviders()`      | 活动 Provider 路由                                    | 只表示已注册，不代表健康                  |
+| `ctx.llm.listModels(provider)` | 建议模型目录与输入模态                                | 目录是 advisory，缺席不等于模型非法       |
+| `agent/pre-step`               | 捕获本步新消息、Hint、图片并分类                      | 不改写 Prompt，不记录正文                 |
+| `agent/request`                | 读取下游 LlmCallConfig，执行准入并返回 provider/model | Waterfall 返回新对象，禁止原地修改        |
+| `llm/stream`                   | 观察真实 attempt、Token、finish、首个语义 chunk、时延 | 必须保持 AsyncIterable 顺序和取消语义     |
+| `agent/request-error`          | 判断失败能否 Fallback，持久化排除集并返回 retry       | Governor 启用时只能有一个 Recovery Owner  |
+| `session/event`                | 关联 assistant usage、step/end、turn/end 与清理状态   | 通过 declaration merge 增加 Governor 事件 |
 
 ### 4.1 为什么要统一 Recovery Owner
 
@@ -121,20 +121,20 @@ Access、Capability、Quota 和 Availability，不能复用已经过期的准入
 
 ## 6. 模块边界
 
-| 模块 | 职责 |
-| --- | --- |
-| `identity` | Local/Header/JWT/Custom，session 与 user_id 绑定 |
-| `model` | 合并 DSH 目录与治理画像，生成 canonical route |
-| `access` | 默认模型集合和用户 allow list |
-| `credits` | 定点换算、月度窗口、准入查询 |
-| `routing` | 四种策略、候选过滤、稳定排序、Decision Record |
-| `classifier` | Hint / Rule / LLM、缓存、复杂度和置信度 |
-| `fallback` | 错误分类、排除集、attempt 上限、部分输出保护 |
-| `usage` | Stream 观察、attempt 聚合、统计查询 |
-| `storage` | SQLite migration、repository、事务和幂等 |
-| `dsh-adapter` | DSH 类型、事件、目录与 stream glue |
-| `plugin` | Cordis apply/dispose、service 和 bundle 入口 |
-| `ui` | Web Models / Users / Usage 页面与 host Remote |
+| 模块          | 职责                                             |
+| ------------- | ------------------------------------------------ |
+| `identity`    | Local/Header/JWT/Custom，session 与 user_id 绑定 |
+| `model`       | 合并 DSH 目录与治理画像，生成 canonical route    |
+| `access`      | 默认模型集合和用户 allow list                    |
+| `credits`     | 定点换算、月度窗口、准入查询                     |
+| `routing`     | 四种策略、候选过滤、稳定排序、Decision Record    |
+| `classifier`  | Hint / Rule / LLM、缓存、复杂度和置信度          |
+| `fallback`    | 错误分类、排除集、attempt 上限、部分输出保护     |
+| `usage`       | Stream 观察、attempt 聚合、统计查询              |
+| `storage`     | SQLite migration、repository、事务和幂等         |
+| `dsh-adapter` | DSH 类型、事件、目录与 stream glue               |
+| `plugin`      | Cordis apply/dispose、service 和 bundle 入口     |
+| `ui`          | Web Models / Users / Usage 页面与 host Remote    |
 
 ## 7. 模型目录与治理画像
 
@@ -361,7 +361,7 @@ interface UsageEvent {
   httpStatus?: number;
   latencyMs: number;
   fallbackIndex: number;
-  attemptOrigin: "provider" | "middleware_or_unknown";
+  attemptOrigin: 'provider' | 'middleware_or_unknown';
   usageMissing: boolean;
   createdAt: string;
 }
@@ -384,16 +384,16 @@ Stream observer 用 try/finally 包装 AsyncIterable，不能提前消费。看�
 数据库默认位于 `$DSH_HOME/dsh-llm-governor/governor.db`，目录和文件 owner-only，
 本地磁盘使用 WAL。迁移失败时插件 fail closed，不以空库继续。
 
-| 表 | 关键字段 | 用途 |
-| --- | --- | --- |
-| `schema_migrations` | version, applied_at | 显式迁移 |
-| `model_policies` | route_id PK, provider, model, enabled, multiplier_ppm, quality_json | 模型画像 |
-| `user_policies` | user_id PK, monthly_credit_nanos | 用户额度 |
-| `user_model_allow` | user_id + route_id UNIQUE | 白名单 |
-| `session_identities` | session_id PK, user_id, source, expires_at | 身份绑定与恢复 |
-| `routing_decisions` | request_id + fallback_index UNIQUE | 可解释决策 |
-| `usage_events` | request_id + fallback_index UNIQUE | attempt 计量 |
-| `classifier_cache` | input_hash + config_revision UNIQUE | 稳定分类 |
+| 表                   | 关键字段                                                            | 用途           |
+| -------------------- | ------------------------------------------------------------------- | -------------- |
+| `schema_migrations`  | version, applied_at                                                 | 显式迁移       |
+| `model_policies`     | route_id PK, provider, model, enabled, multiplier_ppm, quality_json | 模型画像       |
+| `user_policies`      | user_id PK, monthly_credit_nanos                                    | 用户额度       |
+| `user_model_allow`   | user_id + route_id UNIQUE                                           | 白名单         |
+| `session_identities` | session_id PK, user_id, source, expires_at                          | 身份绑定与恢复 |
+| `routing_decisions`  | request_id + fallback_index UNIQUE                                  | 可解释决策     |
+| `usage_events`       | request_id + fallback_index UNIQUE                                  | attempt 计量   |
+| `classifier_cache`   | input_hash + config_revision UNIQUE                                 | 稳定分类       |
 
 `usage_events` 建索引 `(user_id, created_at)`、`(route_id, created_at)`、
 `(routing_mode, created_at)` 和 `request_id`。JSON 字段写入前验证、规范化并限制大小。
@@ -464,16 +464,16 @@ SQL 细节。
 
 ## 18. 关键风险与缓解
 
-| 风险 | 影响 | 缓解 |
-| --- | --- | --- |
-| DSH RC API 漂移 | 插件无法加载或路由错误 | rc.8 直接依赖锁定、同包单版本检查、adapter 隔离、pack smoke；未来版本在隔离 workspace 验证 |
-| Header/JWT 无稳定入站 Hook | 无法安全获得 user_id | Phase 0 companion ingress；不从 Agent 事件猜身份 |
-| 双 Recovery Owner | 重复调用、费用失控 | Governor 独占 recovery，dump-config + 故障计数测试 |
-| Partial output 后切模型 | 重复文本或 Tool 副作用 | 默认禁止，记录明确错误 |
-| 并发额度超限 | 最终用量略超月额 | 明确 admission 语义；硬 reservation 延后 |
-| LLM 分类不稳定/有成本 | 决策漂移、隐性 Credits | Hint/Rule 优先、temperature=0、缓存、分类用量计费 |
-| 模型目录不完整 | 错误排除有效模型 | 尊重 advisory 语义，配置模型只要求 Provider 活动 |
-| SQLite 损坏/迁移失败 | 无法治理与计费 | fail closed、WAL、备份说明、原子迁移 |
+| 风险                       | 影响                   | 缓解                                                                                       |
+| -------------------------- | ---------------------- | ------------------------------------------------------------------------------------------ |
+| DSH RC API 漂移            | 插件无法加载或路由错误 | rc.8 直接依赖锁定、同包单版本检查、adapter 隔离、pack smoke；未来版本在隔离 workspace 验证 |
+| Header/JWT 无稳定入站 Hook | 无法安全获得 user_id   | Phase 0 companion ingress；不从 Agent 事件猜身份                                           |
+| 双 Recovery Owner          | 重复调用、费用失控     | Governor 独占 recovery，dump-config + 故障计数测试                                         |
+| Partial output 后切模型    | 重复文本或 Tool 副作用 | 默认禁止，记录明确错误                                                                     |
+| 并发额度超限               | 最终用量略超月额       | 明确 admission 语义；硬 reservation 延后                                                   |
+| LLM 分类不稳定/有成本      | 决策漂移、隐性 Credits | Hint/Rule 优先、temperature=0、缓存、分类用量计费                                          |
+| 模型目录不完整             | 错误排除有效模型       | 尊重 advisory 语义，配置模型只要求 Provider 活动                                           |
+| SQLite 损坏/迁移失败       | 无法治理与计费         | fail closed、WAL、备份说明、原子迁移                                                       |
 
 ## 19. 验收映射
 
@@ -504,10 +504,9 @@ Web Remote 权限、七类 Eval Dataset 和 package smoke。
   `pending → Session Event（durable ack）→ CAS committed`；任一步失败
   `AUDIT_PERSIST_FAILED` fail closed（fake Provider 调用数为 0）；启动对账
   `reconcile()`（补 append/补 commit/保留 pending + 告警）。
-  rc.8 SEAM-1/2（Session `ignorable` 写入 API 缺失）下默认
-  `NullSessionEventSink`（不破坏 DSH Session 持久化恢复，SQLite 双阶段照常），
-  内存 Session 场景用 `SessionStoreSink` 验证完整协议。见
-  docs/UPSTREAM_SEAMS.md 与 BLOCKED.md B-1。
+  生产接线使用 `SessionStoreSink`，把投影写入已知 `request/context` carrier；
+  `NullSessionEventSink` 仅是缺少 Session service 时的 fail-closed 默认值。
+  真实 JSONL 持久化/冷恢复与重启对账均有合同和集成测试。
 - storage migration v2/v3：`routing_decisions` 重建（decisionId PK、
   audit_state、trigger/causes/changedFields/selection_mode/effective_strategy/
   classifier_source/outcome/error_code、截断元数据；v1 备份表保留）、
@@ -533,15 +532,15 @@ Web Remote 权限、七类 Eval Dataset 和 package smoke。
 - `compat_api` 默认 `enabled=false`（零新增监听端口）；显式开启仅监听
   IPv4/IPv6 loopback（requireLoopback 拒绝非回环 peer）；token 未配置时
   生成 256 bit 随机值落盘 owner-only（日志不打印 token）。
-- DSH webServer 前缀通道（受信面）默认授予 read（SEAM-3 阻断下
-  "DSH 登录主体解析"的显式降级，见 BLOCKED.md B-2）；manage/audit 仍需
-  Bearer。
+- 原生 Typert Remote 在 Host 内解析 principal，方法不接收浏览器 actor；local
+  profile 绑定进程 owner，其他模式缺可信 provider 时 fail-closed。compat web
+  API 继续使用 Bearer，并与原生 Remote 分离。
 
 ### 21.4 分类缓存与用量种类
 
 - `src/classifier/sqlite-cache.ts`：缓存键
   `HMAC-SHA256(canonicalInput) + classifierRoute + promptVersion +
-  configRevision + tenantScope`（HMAC key 存 governor_kv 可轮换；整键哈希
+configRevision + tenantScope`（HMAC key 存 governor_kv 可轮换；整键哈希
   入库保证任一成分变化即 miss）；TTL 7 天；single-flight 并发去重；
   低置信度/失败/超时/非法 JSON 不缓存。
 - `usageKind=conversation|classifier` + `parentRequestId`：分类器调用
@@ -556,8 +555,16 @@ Web Remote 权限、七类 Eval Dataset 和 package smoke。
   Configured Quality Retention（配置分值估算）、Request Success Rate；
   有效样本 <100 或 usage_missing >5% → insufficientSample（隐藏百分比）。
 
-### 21.6 已知上游阻断
+### 21.6 rc.8 接缝复核结果
 
-rc.8 公开接缝缺口（Session Event `ignorable` 写入、插件事件类型注册面、
-方法级 Remote capability、浏览器侧注册表的 Node 可测性）及可复现证据见
-docs/UPSTREAM_SEAMS.md；影响与缓解见 BLOCKED.md。
+- Session 审计新写入统一使用已知的 `request/context` envelope，并在
+  `governorDecision` / `governorSelection` 命名投影中保存纯信息；旧
+  `governor/*` 只读兼容。真实 JSONL 冷恢复无需 `ignorable` 或修改已知类型集。
+- Governor Typert Remote 在 Host 内部解析 principal；浏览器不能传 actor。local
+  profile 使用进程 owner，其他身份模式缺少可信 provider 时 fail-closed。
+- `@deepseek-ai/dsh-client-modules` 会发现已安装包的 `dsh.client` manifest 和
+  `./client` export。Governor client bundle 通过该公开链路注册 Auto selector、
+  原生 Settings 与 Trajectory，并用真实 SlotCore/ConversationNodeAssembler 及
+  HMR disposer 测试验证。
+
+历史误判与更正证据见 docs/UPSTREAM_SEAMS.md；当前无 B-1/B-2/B-3 发布阻断。

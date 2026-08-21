@@ -3,6 +3,8 @@
 `dsh-llm-governor` 是 DeepSeek Harness 的多模型治理插件。它在 DSH 现有模型调用链上
 提供模型画像、用户访问控制、月度 Credits、Manual / Quality First / Credit First /
 Auto Routing、失败重路由和 Usage 审计；它不代理模型请求，也不管理 Provider 凭证。
+模型选择直接进入 Composer（含 Auto），治理配置进入 DSH 原生 Settings，决策记录在
+同一 Session 的 Governor Trajectory 视图中展示；默认不启动独立管理服务。
 
 ## 文档
 
@@ -58,7 +60,7 @@ dsh plugin --profile web add https://github.com/young-tim/dsh-llm-governor
 
 ```bash
 pnpm install          # 安装依赖
-pnpm build            # tsc 编译 + 复制 UI 页面到 dist/ui/pages
+pnpm build            # tsc 编译 + 构建 client bundle + 复制兼容 UI 页面
 pnpm typecheck        # 类型检查
 pnpm lint             # ESLint（--max-warnings 0）
 pnpm format:check     # Prettier 检查
@@ -88,6 +90,7 @@ pnpm test:package     # tarball / 安装 smoke / 真实安装
 src/
 ├── access/       # 访问控制与能力过滤
 ├── classifier/   # Hint/Rule/LLM 分类器与缓存
+├── client/       # Composer Auto、原生 Settings 与 Trajectory 浏览器入口
 ├── config/       # 严格 Schema 校验与规范化
 ├── credits/      # Credits 计算与月度额度
 ├── dsh-adapter/  # DSH 类型与事件隔离层（含 FakeLlmAdapter）
@@ -99,7 +102,7 @@ src/
 ├── plugin/       # Cordis 插件入口、GovernorService 与双写审计管道
 ├── routing/      # Manual/Quality First/Credit First 策略与不可变 Decision
 ├── storage/      # SQLite Repository（WAL、迁移、幂等、审计状态）
-├── ui/           # Models/Users/Usage 页面与 host API
+├── ui/           # 显式兼容模式使用的页面与 Bearer host API
 └── usage/        # Usage 计量与聚合
 
 test/
@@ -123,3 +126,5 @@ test/
 5. No provider proxy：真实模型调用仍由 DSH 的 `ctx.llm` 和 Provider Adapter 完成。
 6. Default no extra socket：默认零新增监听端口；兼容 API 仅在显式
    `compatApi.enabled=true` 时监听 loopback（Bearer 鉴权 + capability 矩阵）。
+7. Native DSH surfaces：日常模型选择、治理设置和决策追溯复用 DSH 的 Composer、
+   Settings 与 Conversation 扩展面；Host service 负责权威状态与权限，不另起默认服务。

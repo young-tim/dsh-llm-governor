@@ -1,8 +1,9 @@
 /**
  * 打包安装 smoke 测试：
- * - 先运行 `pnpm build` 确保 dist/ 存在
+ * - 在临时源码副本运行 `pnpm build`，不改动仓库 dist/
  * - 使用 `pnpm pack --pack-destination <临时目录>` 打包
  * - 解压 tarball 到临时目录
+ * - 在临时 consumer 中真实安装 tarball 并导入 Remote export
  * - 验证 tarball 包含 package.json、dist/index.js 以及 dist 下所有 JS 文件
  * - 验证 dist/ 中有编译后的 JS 文件
  * - 验证 package.json 的 peerDependencies 正确
@@ -11,7 +12,19 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { execSync } from 'node:child_process';
-import { mkdtempSync, readdirSync, readFileSync, existsSync, rmSync, statSync } from 'node:fs';
+import {
+  cpSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -24,6 +37,11 @@ let workDir: string;
 let packageDir: string;
 /** tarball 文件路径。 */
 let tarballPath: string;
+/** 临时源码副本与真实安装 consumer。 */
+let sourceDir: string;
+let consumerDir: string;
+let rootDistBefore: string;
+let rootDistAfter: string;
 
 /** 递归收集目录下所有文件路径（相对路径）。 */
 function listFilesRecursive(root: string, base = ''): string[] {
@@ -39,19 +57,51 @@ function listFilesRecursive(root: string, base = ''): string[] {
   return out;
 }
 
+/** 对仓库 dist 做稳定内容摘要，验证 smoke 自身没有写入白名单外产物。 */
+function directoryDigest(root: string): string {
+  const hash = createHash('sha256');
+  if (!existsSync(root)) return hash.update('<missing>').digest('hex');
+  for (const file of listFilesRecursive(root).sort()) {
+    hash.update(file);
+    hash.update(readFileSync(join(root, file)));
+  }
+  return hash.digest('hex');
+}
+
 // beforeAll 执行 tsc 编译 + pnpm pack + tar 解压（实测合计约 3 秒），
 // 默认 hook 超时即可覆盖，不得放宽超时规避门禁失败。
 beforeAll(() => {
-  // 1. 先运行 tsc 确保 dist/ 存在（绕过 pnpm deps status check）
-  execSync('npx tsc -p tsconfig.json', { cwd: projectRoot, stdio: 'inherit' });
-
-  // 2. 创建临时工作目录（不触碰真实 DSH_HOME / Profile / 凭证）
+  // 1. 创建临时工作目录（不触碰仓库 dist/、真实 DSH_HOME / Profile / 凭证）
   workDir = mkdtempSync(join(tmpdir(), 'dsh-gov-pack-'));
+  sourceDir = join(workDir, 'source');
+  mkdirSync(sourceDir);
+  for (const entry of [
+    'package.json',
+    'pnpm-lock.yaml',
+    'pnpm-workspace.yaml',
+    'tsconfig.json',
+    'vitest.config.ts',
+    'cordis.patch.yml',
+    'LICENSE',
+    'README.md',
+    'src',
+    'scripts',
+    'test',
+  ]) {
+    cpSync(join(projectRoot, entry), join(sourceDir, entry), { recursive: true });
+  }
+  // 只复用已安装依赖；构建与 prepack 的全部输出仍位于临时副本。
+  symlinkSync(join(projectRoot, 'node_modules'), join(sourceDir, 'node_modules'), 'dir');
+  rootDistBefore = directoryDigest(join(projectRoot, 'dist'));
+
+  // 2. 在临时源码副本构建完整 Host、Remote 与 browser client。
+  execSync('npm run build', { cwd: sourceDir, stdio: 'inherit' });
 
   // 3. 打包到临时目录
   execSync(`pnpm pack --pack-destination "${workDir}"`, {
-    cwd: projectRoot,
+    cwd: sourceDir,
     stdio: 'inherit',
+    env: { ...process.env, npm_config_ignore_scripts: 'true' },
   });
 
   // 4. 找到 tarball（命名格式 <name>-<version>.tgz）
@@ -66,6 +116,70 @@ beforeAll(() => {
     stdio: 'inherit',
   });
   packageDir = join(workDir, 'package');
+
+  // 6. 真实 production 安装 tarball 与 Host peers；禁止依赖仓库 devDependencies。
+  consumerDir = join(workDir, 'consumer');
+  mkdirSync(consumerDir);
+  writeFileSync(join(consumerDir, 'package.json'), '{"name":"governor-smoke","private":true}');
+  execSync(
+    `pnpm add --offline --ignore-scripts --config.auto-install-peers=false "${tarballPath}"`,
+    { cwd: consumerDir, stdio: 'inherit' },
+  );
+  // DSH Host 提供 peer runtime；用当前 rc.8 安装树模拟平台，而非让包偷用 devDependency。
+  const peerScope = join(consumerDir, 'node_modules', '@deepseek-ai');
+  mkdirSync(peerScope, { recursive: true });
+  for (const peer of [
+    'cordis',
+    'dsh-agent',
+    'dsh-llm',
+    'dsh-session',
+    'dsh-typert-protocol',
+    'dsh-typert-registry',
+    'dsh-api-gateway',
+  ]) {
+    const destination = join(peerScope, peer);
+    if (!existsSync(destination)) {
+      symlinkSync(join(projectRoot, 'node_modules', '@deepseek-ai', peer), destination, 'dir');
+    }
+  }
+  writeFileSync(
+    join(consumerDir, 'production-smoke.mjs'),
+    `import GovernorPlugin from 'dsh-llm-governor';
+import { TYPERT } from 'dsh-llm-governor/typert';
+import { GOVERNOR_REMOTE_CONTRIBUTION } from 'dsh-llm-governor/remote';
+import { Context } from '@deepseek-ai/cordis';
+import { LlmRuntime } from '@deepseek-ai/dsh-llm';
+import TypertRegistry from '@deepseek-ai/dsh-typert-registry';
+import TypertGatewayService from '@deepseek-ai/dsh-api-gateway';
+
+const ctx = new Context();
+const registry = ctx.plugin(TypertRegistry);
+await registry;
+const unregister = ctx.typert.register(TYPERT);
+const llm = ctx.plugin(LlmRuntime);
+await llm;
+const governor = ctx.plugin(GovernorPlugin, {
+  schema_version: 1,
+  identity: { provider: 'local', local_user_id: 'owner' },
+  storage: { enabled: false },
+  ui: { enabled: false },
+  models: { 'p:a': { enabled: true, multiplier: 1 } },
+});
+await governor;
+const gateway = ctx.plugin(TypertGatewayService);
+await gateway;
+const models = await ctx.typertGateway.invoke({ namespace: 'governor', method: 'listModels', args: {} });
+if (!Array.isArray(models) || models[0]?.routeId !== 'p:a') process.exitCode = 2;
+if (GOVERNOR_REMOTE_CONTRIBUTION.package !== 'dsh-llm-governor') process.exitCode = 3;
+await gateway.dispose();
+await governor.dispose();
+await llm.dispose();
+await unregister();
+await registry.dispose();
+`,
+  );
+  execSync('node production-smoke.mjs', { cwd: consumerDir, stdio: 'inherit' });
+  rootDistAfter = directoryDigest(join(projectRoot, 'dist'));
 });
 
 afterAll(() => {
@@ -75,6 +189,10 @@ afterAll(() => {
 });
 
 describe('package smoke (pnpm pack + dist)', () => {
+  it('临时构建与打包不修改仓库 dist/**', () => {
+    expect(rootDistAfter).toBe(rootDistBefore);
+  });
+
   it('仓库直接 DSH 依赖统一为 rc.8 且不存在版本别名', () => {
     const pkg = JSON.parse(readFileSync(join(projectRoot, 'package.json'), 'utf8')) as {
       devDependencies?: Record<string, string>;
@@ -139,6 +257,9 @@ describe('package smoke (pnpm pack + dist)', () => {
     expect(jsFiles.some((f) => f.startsWith('routing/'))).toBe(true);
     expect(jsFiles.some((f) => f.startsWith('fallback/'))).toBe(true);
     expect(jsFiles.some((f) => f.startsWith('identity/'))).toBe(true);
+    expect(jsFiles).toContain('plugin/typert-host.js');
+    expect(jsFiles).toContain('plugin/typert-remote-client.js');
+    expect(jsFiles).toContain('client.js');
   });
 
   it('dist/index.js 是有效的 ESM 产物（含 export 语句）', () => {
@@ -156,6 +277,7 @@ describe('package smoke (pnpm pack + dist)', () => {
     expect(peer?.['@deepseek-ai/dsh-agent']).toBe('>=0.1.0-rc.8 <0.2.0-0');
     expect(peer?.['@deepseek-ai/dsh-llm']).toBe('>=0.1.0-rc.8 <0.2.0-0');
     expect(peer?.['@deepseek-ai/dsh-session']).toBe('>=0.1.0-rc.8 <0.2.0-0');
+    expect(peer?.['@deepseek-ai/dsh-typert-protocol']).toBe('>=0.1.0-rc.8 <0.2.0-0');
   });
 
   it('package.json 包含正确的 name/version/type/license 元数据', () => {

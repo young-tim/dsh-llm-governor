@@ -192,10 +192,15 @@ describe('GOV-SELECT-001 会话选择模式', () => {
         schemaVersion: GOVERNOR_SESSION_EVENT_SCHEMA_VERSION,
         selectionRevision: 1,
         mode: 'auto',
+        lastManualRoute: 'fake-provider:model-a',
         changedAt: Date.now(),
       });
       const child = ctx.sessions.fork(parent, undefined, 'child-1');
-      expect(child.events.some((e) => e.type === 'governor/selection-mode')).toBe(true);
+      expect(
+        child.events.some(
+          (e) => e.type === 'request/context' && e.data.governorSelection?.mode === 'auto',
+        ),
+      ).toBe(true);
     } finally {
       await store.dispose();
     }

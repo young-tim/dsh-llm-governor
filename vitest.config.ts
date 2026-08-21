@@ -32,6 +32,12 @@ export default defineConfig({
         test: {
           name: 'package',
           include: ['test/package/**/*.test.ts'],
+          // Each package file performs a real build/pack/install in its own
+          // temporary source tree. Running those builds concurrently makes the
+          // unchanged 10 s hook gate depend on CPU contention rather than the
+          // package operation itself, so keep the files serial while retaining
+          // every smoke check and its original timeout.
+          fileParallelism: false,
           testTimeout: 60000,
         },
       },

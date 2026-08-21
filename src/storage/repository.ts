@@ -200,6 +200,12 @@ export class GovernorRepository {
     stmt.run(userId, routeId);
   }
 
+  /** 原子替换用户允许的 route 集合；调用方应置于配置事务内。 */
+  replaceUserAllow(userId: string, routeIds: readonly string[]): void {
+    this._db.prepare('DELETE FROM user_model_allow WHERE user_id = ?').run(userId);
+    for (const routeId of routeIds) this.addUserAllow(userId, routeId);
+  }
+
   /** 获取用户允许的 route 列表。 */
   listUserAllow(userId: string): string[] {
     const stmt = this._db.prepare(
@@ -637,6 +643,18 @@ export class GovernorRepository {
       .run(key, value);
   }
 
+  /**
+   * 写入运行时权威 KV。调用方必须在配置事务内同时提交 configRevision 与审计。
+   */
+  setGovernorKv(key: string, value: string): void {
+    this._db
+      .prepare(
+        `INSERT INTO governor_kv (key, value) VALUES (?, ?)
+         ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
+      )
+      .run(key, value);
+  }
+
   // ===== attempt 生命周期（GOV-ATTEMPT-001） =====
 
   /** 幂等写入 attempt 状态（状态机收敛由调用方保证）。 */
@@ -719,6 +737,8 @@ export class GovernorRepository {
   queryUsage(opts: {
     userId?: string;
     provider?: string;
+    from?: string;
+    to?: string;
     usageKind?: 'conversation' | 'classifier';
     limit?: number;
   }): UsageEventRow[] {
@@ -731,6 +751,14 @@ export class GovernorRepository {
     if (opts.provider) {
       sql += ' AND provider = ?';
       params.push(opts.provider);
+    }
+    if (opts.from !== undefined) {
+      sql += ' AND created_at >= ?';
+      params.push(opts.from);
+    }
+    if (opts.to !== undefined) {
+      sql += ' AND created_at <= ?';
+      params.push(opts.to);
     }
     if (opts.usageKind !== undefined) {
       sql += ' AND usage_kind = ?';

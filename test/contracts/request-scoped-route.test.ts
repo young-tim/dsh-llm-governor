@@ -141,9 +141,20 @@ describe('rc.8 request-scoped route override seam', () => {
       expect(typeof config.model).toBe('string');
       // request-scoped 证明：Session log 不出现持久模型选择事件（governor/selection-mode）；
       // 模型持久选择属于 DSH selectModel 能力，Governor 不得越权代写。
-      // 审计双写协议写入 governor/routing-decision（决策审计轨迹）是预期行为。
+      // 审计双写协议写入 request/context.governorDecision
+      // （rc.8 旧 reader 可冷恢复的决策审计投影）是预期行为。
       const persistedTypes = h.session.events.map((e) => e.type);
       expect(persistedTypes).not.toContain('governor/selection-mode');
+      const carrier = h.session.events.find(
+        (event) => event.type === 'request/context' && event.data.governorDecision !== undefined,
+      );
+      expect(carrier?.type).toBe('request/context');
+      if (carrier?.type === 'request/context') {
+        expect({ provider: carrier.data.provider, model: carrier.data.model }).toEqual(config);
+        expect(carrier.data.governorDecision?.selectedRoute).toBe(
+          `${config.provider}:${config.model}`,
+        );
+      }
     } finally {
       await h.dispose();
     }
