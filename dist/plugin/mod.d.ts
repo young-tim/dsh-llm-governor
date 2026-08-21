@@ -13,7 +13,8 @@ export type { IdentityProvider } from '../identity/types.js';
  * - 创建 SQLite 仓库（默认 $DSH_HOME/dsh-llm-governor/governor.db，迁移失败 fail closed）。
  * - header/jwt 模式构建 IdentityProvider 实例并暴露 /governor/api/bind 入站绑定端点。
  * - 注册 agent/pre-step、agent/request、llm/stream、agent/request-error 监听器。
- * - UI 挂载：有 ctx.webServer 时注册 /governor 前缀路由，否则按 ui.port 独立监听。
+ * - UI 挂载：有 ctx.webServer 时注册 /governor 兼容前缀；独立监听仅在显式启用
+ *   compatApi 时启动，默认不新增 socket。
  */
 /**
  * 事件接线：把 Governor service 挂到 DSH 事件瀑布（pre-step/request/stream/

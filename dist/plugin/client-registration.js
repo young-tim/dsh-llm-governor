@@ -1,3 +1,4 @@
+import { governorDecisionFromEvent, } from '../dsh-adapter/session-events.js';
 /** Trajectory 卡片 Definition 的唯一 kind（会话引擎内的 Context 类别）。 */
 const GOVERNOR_DECISION_KIND = 'governor-routing-decision';
 /** 卡片视图的唯一 target（视图构建器注册名）。 */
@@ -158,7 +159,9 @@ function buildCardViewData(state) {
     };
 }
 /**
- * Governor 轨迹卡片 Definition：匹配 `governor/routing-decision` 事件，
+ * Governor 轨迹卡片 Definition：匹配 rc.8 兼容的
+ * `request/context.data.governorDecision`，并保留旧 `governor/routing-decision`
+ * 的只读兼容，
  * 为每个 decisionId 建立独立 Context，`buildViewNode` 产出卡片视图节点。
  *
  * 事件是纯信息记录且自包含（无 update 事件）：`update` 恒返回既有状态；
@@ -170,9 +173,10 @@ export const governorTrajectoryDefinition = {
     target: GOVERNOR_DECISION_TARGET,
     /** 提取本 Definition 的业务身份：decisionId（幂等键，稳定且唯一）。 */
     match(event) {
-        if (event.type !== 'governor/routing-decision')
+        const decision = governorDecisionFromEvent(event);
+        if (decision === undefined)
             return null;
-        const data = event.data;
+        const data = decision;
         const decisionId = readString(data['decisionId']);
         // 旧 schema/损坏事件缺 decisionId：回退到事件 seq（会话内单调唯一），
         // 保证卡片仍可挂载（GOV-TRACE-002 AC 5：显示「未知」而非丢事件）。
@@ -186,10 +190,11 @@ export const governorTrajectoryDefinition = {
     /** 从 start Match 构建卡片状态（防御性解析，缺失字段 → unknown）。 */
     start(_context, match) {
         const event = match.event;
-        if (event.type !== 'governor/routing-decision') {
+        const decision = governorDecisionFromEvent(event);
+        if (decision === undefined) {
             throw new Error(`GOVERNOR_CARD_STATE: unexpected event type ${event.type}`);
         }
-        return toCardState(event.data);
+        return toCardState(decision);
     },
     /** 无更新事件：决策事件自包含，update 恒返回既有状态。 */
     update(context) {
@@ -201,9 +206,11 @@ export const governorTrajectoryDefinition = {
         if (state === undefined)
             return null;
         return {
-            key: `${GOVERNOR_DECISION_KIND}:${state.decisionId}`,
-            kind: GOVERNOR_DECISION_KIND,
-            id: state.decisionId,
+            // The assembler owns identity (including the seq fallback for a damaged
+            // legacy event) and rejects a node reconstructed from state identity.
+            key: context.key,
+            kind: context.kind,
+            id: context.id,
             target: GOVERNOR_DECISION_TARGET,
             data: buildCardViewData(state),
         };
@@ -237,20 +244,20 @@ export const governorDecisionViewDefinition = {
  * 构建单占位 selector 的注入面（sessionId 级；官方 occupant 之外的
  * Governor 侧接线，spec 由 `governorModelSeatSpec` 携带）。
  */
-export function governorModelSeatInject(service, sessionId) {
+export function governorModelSeatInject(service, sessionId, currentRoute) {
     return {
         available: true,
         selectionMode: service.getSessionSelectionMode(sessionId).mode,
         lastManualRoute: service.getSessionSelectionMode(sessionId).lastManualRoute ?? null,
-        selectAuto: () => service.setSessionSelectionMode(sessionId, 'auto'),
+        selectAuto: () => service.setSessionSelectionMode(sessionId, 'auto', currentRoute !== undefined ? { currentRoute } : undefined),
     };
 }
 /**
  * 单占位 selector 注册 spec（`conversation.input.model` 座席）。
  *
  * 选项「自动（Governor）」置顶显示，不伪造成 Provider 模型；选择具体模型
- * 的路径（Manual + DSH 既有 `session.selectModel`）由浏览器组件复刻
- * （GOV-SELECT-001 AC 11 的完整合同随 B-3 浏览器 E2E 交付）。
+ * 的路径（Manual + DSH 既有 model directory select）由浏览器组件保留；
+ * 两种加载顺序、HMR 与卸载恢复见 browser-client UI 测试。
  */
 export function governorModelSeatSpec(service) {
     return {
@@ -273,71 +280,3 @@ export const governorSettingsSection = {
         { key: 'usage', title: '用量', readOnly: true },
     ],
 };
-/**
- * 从 Cordis 上下文安全读取 client 注册面。
- *
- * Cordis Context 是 Proxy：未声明 inject 直接读属性会抛
- * `cannot get property ... without inject`，因此统一经 `ctx.get(name)`
- * 可选服务面读取（与 mod.ts 访问 webServer/sessions 同一模式）；
- * 非 Cordis 上下文（无 get 方法）或服务未提供时返回 undefined。
- */
-function lookupRegistries(ctx) {
-    const get = ctx?.get;
-    if (typeof get !== 'function')
-        return {};
-    const read = (name) => {
-        try {
-            return get(name);
-        }
-        catch {
-            // 上下文未提供该服务（如 Host/Node 环境）：安全跳过。
-            return undefined;
-        }
-    };
-    const registries = {
-        conversationEvents: read('conversationEvents'),
-        conversationViews: read('conversationViews'),
-        slots: read('slots'),
-        settings: read('settings'),
-    };
-    return registries;
-}
-/**
- * 注册 Governor Client 侧原生体验（Trajectory / Auto selector / Settings）。
- *
- * 浏览器环境（注册面可用）执行注册并返回 disposer 列表；Node/Host 环境
- * （SEAM-5）安全跳过，返回空数组。调用方（mod.ts apply）在 ctx.effect 中
- * 注册 disposer，确保 HMR/卸载时清理（GOV-UI-001 AC 7）。
- *
- * @param ctx - Cordis 上下文（浏览器 client 上下文时注册面可用）。
- * @param options - service 与浏览器组件注入。
- * @returns disposer 函数列表（卸载时调用）。
- */
-export function registerClientSurface(ctx, options) {
-    const disposers = [];
-    const client = lookupRegistries(ctx);
-    // Trajectory 卡片注册（fallback：不抢占官方节点，作为补充视图）。
-    if (client?.conversationEvents?.registerFallback !== undefined) {
-        const dispose = client.conversationEvents.registerFallback(governorTrajectoryDefinition);
-        disposers.push(dispose);
-    }
-    // 视图注册：governor-decision target 的 per-session 构建器。
-    if (client?.conversationViews?.register !== undefined) {
-        const dispose = client.conversationViews.register(governorDecisionViewDefinition);
-        disposers.push(dispose);
-    }
-    // Composer Auto selector 注册：需要 slots 注册面 + Host service + 浏览器组件
-    // （三者齐备才注册；组件缺失时不以假组件抢占官方 occupant——B-3）。
-    if (client?.slots?.register !== undefined &&
-        options?.service !== undefined &&
-        options.selectorComponent !== undefined) {
-        const dispose = client.slots.register(governorModelSeatSpec(options.service), options.selectorComponent);
-        disposers.push(dispose);
-    }
-    // Settings 分区注册。
-    if (client?.settings?.section !== undefined) {
-        const dispose = client.settings.section(governorSettingsSection);
-        disposers.push(dispose);
-    }
-    return disposers;
-}

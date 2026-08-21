@@ -3,7 +3,7 @@
  * 集成 config、model、access、credits、routing、classifier、fallback、usage 领域模块。
  */
 import { Service } from '../dsh-adapter/mod.js';
-import { buildModelDirectory } from '../model/canonical.js';
+import { buildModelDirectory, parseRoute } from '../model/canonical.js';
 import { monthWindow } from '../credits/quota.js';
 import { RoutingError } from '../routing/types.js';
 import { routeManual, routeQualityFirst, routeCreditFirst, routeAuto, } from '../routing/strategies.js';
@@ -16,6 +16,33 @@ import { SQLiteClassifierCache } from '../classifier/sqlite-cache.js';
 import { FallbackState, isRetryable } from '../fallback/mod.js';
 import { GovernorExtensionRegistry } from '../extensions/registry.js';
 import { UsageAggregator } from '../usage/aggregator.js';
+/** 所有管理入口共用的 Usage 扫描边界。 */
+export const GOVERNOR_USAGE_MAX_DAYS = 31;
+export const GOVERNOR_USAGE_MAX_ROWS = 200;
+/** 生成有界 Usage 查询；缺省为截至当前时刻的最近 31 天。 */
+export function normalizeGovernorUsageQuery(query, now = Date.now()) {
+    const toMs = query.to === undefined ? now : Date.parse(query.to);
+    const fromMs = query.from === undefined
+        ? toMs - GOVERNOR_USAGE_MAX_DAYS * 24 * 60 * 60 * 1000
+        : Date.parse(query.from);
+    const maxWindowMs = GOVERNOR_USAGE_MAX_DAYS * 24 * 60 * 60 * 1000;
+    const limit = query.limit ?? GOVERNOR_USAGE_MAX_ROWS;
+    if (!Number.isFinite(fromMs) ||
+        !Number.isFinite(toMs) ||
+        fromMs > toMs ||
+        toMs - fromMs > maxWindowMs ||
+        !Number.isInteger(limit) ||
+        limit < 1 ||
+        limit > GOVERNOR_USAGE_MAX_ROWS) {
+        throw new Error('INVALID_REQUEST');
+    }
+    return {
+        ...query,
+        from: new Date(fromMs).toISOString(),
+        to: new Date(toMs).toISOString(),
+        limit,
+    };
+}
 /**
  * Governor 核心服务。集成全部领域模块，提供事件监听器所需的方法和 Client Remote API。
  */
@@ -117,8 +144,10 @@ export class GovernorService extends Service {
             this._bootstrapConfigRevision(repository);
             this._importInitialPolicies(repository);
             this._loadPoliciesFromRepository(repository);
+            this._loadRoutingSettingsFromRepository(repository);
         }
-        // 双写审计管线：Session Event sink 默认 Null（SEAM-1/2 阻断，见 BLOCKED.md B-1）
+        // 双写审计管线：运行时由 mod.ts 注入 request/context carrier sink；
+        // 缺少 Session service 时 Null sink 严格 fail-closed。
         this._audit = new AuditPipeline(repository, options?.sessionEventSink ?? new NullSessionEventSink());
         // 从配置构建初始模型目录（DSH advisory 在 refreshModelDirectory 时合并）
         this._modelDirectory = this._buildDirectoryFromConfig();
@@ -180,6 +209,19 @@ export class GovernorService extends Service {
         }
         if (users.size > 0)
             this._users = users;
+    }
+    /** 重启时恢复管理面写入的路由配置；损坏值 fail closed 为启动配置。 */
+    _loadRoutingSettingsFromRepository(repository) {
+        const raw = repository.getGovernorKv('routing_settings_v1');
+        if (raw === undefined)
+            return;
+        try {
+            const parsed = JSON.parse(raw);
+            this._applyRoutingSettingsPatch(parsed);
+        }
+        catch {
+            // 不让损坏的管理 KV 产生半应用状态；启动配置仍是完整安全默认。
+        }
     }
     /** 从配置构建模型目录（无 DSH advisory 时的初始视图）。 */
     _buildDirectoryFromConfig() {
@@ -552,7 +594,10 @@ export class GovernorService extends Service {
                 selectedRoute: result.selected.routeId,
                 configRevision: snapshotRevision,
             });
-            await this._audit.commitDecision(sealed, { sessionId });
+            await this._audit.commitDecision(sealed, {
+                sessionId,
+                route: { provider: result.selected.provider, model: result.selected.model },
+            });
             state.lastDecisionConfigRevision = snapshotRevision;
             // initial 只属于首个 attempt：后续 attempt 的 causes 回落到 step/fallback。
             if (state.baseCauses.length > 0)
@@ -607,14 +652,22 @@ export class GovernorService extends Service {
                         }
                         : {}),
                     candidates: [],
-                    excluded: [],
+                    excluded: [
+                        {
+                            routeId: `${defaultConfig.provider}:${defaultConfig.model}`,
+                            reason: 'excluded_in_request',
+                        },
+                    ],
                     outcome: 'rejected',
                     errorCode: err.code,
                     configRevision: snapshotRevision,
                 });
                 // 审计写入失败时保留原始错误（fail closed：不产生 Provider 调用）
                 try {
-                    await this._audit.commitDecision(rejected, { sessionId });
+                    await this._audit.commitDecision(rejected, {
+                        sessionId,
+                        route: { provider: defaultConfig.provider, model: defaultConfig.model },
+                    });
                 }
                 catch {
                     // 原始 RoutingError 优先抛出
@@ -791,7 +844,186 @@ export class GovernorService extends Service {
         return this._extensions;
     }
     // ===== Client Remote API =====
+    /** 读取当前路由/Auto/Fallback 设置（管理面单一运行时权威）。 */
+    async getRoutingSettings() {
+        return {
+            default: this._defaultRouting,
+            creditFirst: {
+                minimumQuality: this._minimumQuality,
+                onNoMatch: this._onNoMatch,
+            },
+            auto: {
+                confidenceThreshold: this._confidenceThreshold,
+                qualityThreshold: { ...this._qualityThresholds },
+            },
+            fallback: {
+                enabled: this._fallbackEnabled,
+                maxAttempts: this._maxAttempts,
+                afterPartialOutput: this._afterPartialOutput,
+                strategy: this._fallbackStrategy,
+            },
+            configRevision: this.configRevision,
+        };
+    }
+    /**
+     * 事务更新路由设置。数据、revision、管理审计在同一 SQLite 事务提交，
+     * 持久化成功后才替换内存状态。
+     */
+    async updateRoutingSettings(patch, options) {
+        const currentRevision = this.configRevision;
+        if (options?.expectedRevision !== undefined && options.expectedRevision !== currentRevision) {
+            throw new RoutingError('REVISION_CONFLICT', `expected config revision ${options.expectedRevision} but current is ${currentRevision}`);
+        }
+        const current = await this.getRoutingSettings();
+        const next = this._routingSettingsWithPatch(current, patch);
+        const changedFields = this._routingChangedFields(current, next);
+        let newRevision = currentRevision;
+        if (changedFields.length > 0 && this._repository !== undefined) {
+            const repository = this._repository;
+            newRevision = repository.transaction(() => {
+                const revision = currentRevision + 1;
+                repository.setGovernorKv('routing_settings_v1', JSON.stringify(this._routingPersisted(next)));
+                repository.setConfigRevision(revision);
+                repository.insertAuditEntry({
+                    actor: options?.actor ?? 'local',
+                    action: 'updateRouting',
+                    target: 'routing',
+                    changedFields,
+                    oldRevision: currentRevision,
+                    newRevision: revision,
+                    result: 'success',
+                    createdAt: new Date().toISOString(),
+                });
+                return revision;
+            });
+        }
+        if (changedFields.length > 0)
+            this._applyRoutingSettingsPatch(this._routingPersisted(next));
+        return { ...(await this.getRoutingSettings()), configRevision: newRevision };
+    }
+    /** 合并并验证路由设置，返回完整候选快照，不修改内存。 */
+    _routingSettingsWithPatch(current, patch) {
+        const next = {
+            default: patch.default ?? current.default,
+            creditFirst: {
+                minimumQuality: patch.creditFirst?.minimumQuality ?? current.creditFirst.minimumQuality,
+                onNoMatch: patch.creditFirst?.onNoMatch ?? current.creditFirst.onNoMatch,
+            },
+            auto: {
+                confidenceThreshold: patch.auto?.confidenceThreshold ?? current.auto.confidenceThreshold,
+                qualityThreshold: {
+                    low: patch.auto?.qualityThreshold?.low ?? current.auto.qualityThreshold.low,
+                    medium: patch.auto?.qualityThreshold?.medium ?? current.auto.qualityThreshold.medium,
+                    high: patch.auto?.qualityThreshold?.high ?? current.auto.qualityThreshold.high,
+                },
+            },
+            fallback: {
+                enabled: patch.fallback?.enabled ?? current.fallback.enabled,
+                maxAttempts: patch.fallback?.maxAttempts ?? current.fallback.maxAttempts,
+                afterPartialOutput: patch.fallback?.afterPartialOutput ?? current.fallback.afterPartialOutput,
+                strategy: patch.fallback?.strategy ?? current.fallback.strategy,
+            },
+            configRevision: current.configRevision,
+        };
+        const modes = ['manual', 'quality_first', 'credit_first', 'auto'];
+        if (!modes.includes(next.default))
+            throw new Error('INVALID_ROUTING_MODE');
+        if (!Number.isFinite(next.creditFirst.minimumQuality) ||
+            next.creditFirst.minimumQuality < 0 ||
+            next.creditFirst.minimumQuality > 100) {
+            throw new Error('INVALID_MINIMUM_QUALITY');
+        }
+        if (!['quality_first', 'none'].includes(next.creditFirst.onNoMatch)) {
+            throw new Error('INVALID_ON_NO_MATCH');
+        }
+        if (!Number.isFinite(next.auto.confidenceThreshold) ||
+            next.auto.confidenceThreshold < 0 ||
+            next.auto.confidenceThreshold > 1) {
+            throw new Error('INVALID_CONFIDENCE_THRESHOLD');
+        }
+        const { low, medium, high } = next.auto.qualityThreshold;
+        if ([low, medium, high].some((value) => !Number.isFinite(value) || value < 0 || value > 100) ||
+            low > medium ||
+            medium > high) {
+            throw new Error('INVALID_QUALITY_THRESHOLDS');
+        }
+        if (!Number.isInteger(next.fallback.maxAttempts) || next.fallback.maxAttempts < 1) {
+            throw new Error('INVALID_MAX_ATTEMPTS');
+        }
+        if (!['quality_first', 'credit_first', 'auto'].includes(next.fallback.strategy)) {
+            throw new Error('INVALID_FALLBACK_STRATEGY');
+        }
+        return next;
+    }
+    /** 将完整快照投影为持久补丁（排除派生的 configRevision）。 */
+    _routingPersisted(settings) {
+        return {
+            default: settings.default,
+            creditFirst: { ...settings.creditFirst },
+            auto: {
+                confidenceThreshold: settings.auto.confidenceThreshold,
+                qualityThreshold: { ...settings.auto.qualityThreshold },
+            },
+            fallback: { ...settings.fallback },
+        };
+    }
+    /** 应用已验证的路由补丁。 */
+    _applyRoutingSettingsPatch(patch) {
+        const current = {
+            default: this._defaultRouting,
+            creditFirst: { minimumQuality: this._minimumQuality, onNoMatch: this._onNoMatch },
+            auto: {
+                confidenceThreshold: this._confidenceThreshold,
+                qualityThreshold: { ...this._qualityThresholds },
+            },
+            fallback: {
+                enabled: this._fallbackEnabled,
+                maxAttempts: this._maxAttempts,
+                afterPartialOutput: this._afterPartialOutput,
+                strategy: this._fallbackStrategy,
+            },
+            configRevision: this.configRevision,
+        };
+        const next = this._routingSettingsWithPatch(current, patch);
+        this._defaultRouting = next.default;
+        this._minimumQuality = next.creditFirst.minimumQuality;
+        this._onNoMatch = next.creditFirst.onNoMatch;
+        this._confidenceThreshold = next.auto.confidenceThreshold;
+        this._qualityThresholds = { ...next.auto.qualityThreshold };
+        this._fallbackEnabled = next.fallback.enabled;
+        this._maxAttempts = next.fallback.maxAttempts;
+        this._afterPartialOutput = next.fallback.afterPartialOutput;
+        this._fallbackStrategy = next.fallback.strategy;
+    }
+    /** 配置审计的字段路径。 */
+    _routingChangedFields(current, next) {
+        const fields = [];
+        if (current.default !== next.default)
+            fields.push('default');
+        if (current.creditFirst.minimumQuality !== next.creditFirst.minimumQuality)
+            fields.push('creditFirst.minimumQuality');
+        if (current.creditFirst.onNoMatch !== next.creditFirst.onNoMatch)
+            fields.push('creditFirst.onNoMatch');
+        if (current.auto.confidenceThreshold !== next.auto.confidenceThreshold)
+            fields.push('auto.confidenceThreshold');
+        if (current.auto.qualityThreshold.low !== next.auto.qualityThreshold.low)
+            fields.push('auto.qualityThreshold.low');
+        if (current.auto.qualityThreshold.medium !== next.auto.qualityThreshold.medium)
+            fields.push('auto.qualityThreshold.medium');
+        if (current.auto.qualityThreshold.high !== next.auto.qualityThreshold.high)
+            fields.push('auto.qualityThreshold.high');
+        if (current.fallback.enabled !== next.fallback.enabled)
+            fields.push('fallback.enabled');
+        if (current.fallback.maxAttempts !== next.fallback.maxAttempts)
+            fields.push('fallback.maxAttempts');
+        if (current.fallback.afterPartialOutput !== next.fallback.afterPartialOutput)
+            fields.push('fallback.afterPartialOutput');
+        if (current.fallback.strategy !== next.fallback.strategy)
+            fields.push('fallback.strategy');
+        return fields;
+    }
     async listModels() {
+        const configRevision = this.configRevision;
         return this._modelDirectory.map((s) => ({
             routeId: s.routeId,
             provider: s.provider,
@@ -800,6 +1032,7 @@ export class GovernorService extends Service {
             multiplierPpm: s.multiplierPpm,
             capabilities: [...s.capabilities],
             quality: s.quality,
+            configRevision,
         }));
     }
     /**
@@ -895,11 +1128,18 @@ export class GovernorService extends Service {
         };
     }
     async listUsers() {
-        return [...this._users.entries()].map(([userId, u]) => ({
-            userId,
-            allow: u.allow,
-            monthlyCredits: u.monthlyCredits,
-        }));
+        const configRevision = this.configRevision;
+        return [...this._users.entries()].map(([userId, u]) => {
+            const usedNanos = this.getQuotaStatus(userId).usedNanos;
+            return {
+                userId,
+                allow: [...u.allow],
+                monthlyCredits: u.monthlyCredits,
+                usedCredits: Number(usedNanos) / 1_000_000_000,
+                usedCreditNanos: usedNanos.toString(),
+                configRevision,
+            };
+        });
     }
     /**
      * 更新用户策略（管理员写入；GOV-CONFIG-001：数据与新 revision 同事务提交）。
@@ -912,26 +1152,52 @@ export class GovernorService extends Service {
         if (!user) {
             throw new Error('USER_NOT_FOUND');
         }
+        if (patch.monthlyCredits !== undefined &&
+            (!Number.isSafeInteger(patch.monthlyCredits) || patch.monthlyCredits < 0)) {
+            throw new Error('INVALID_MONTHLY_CREDITS');
+        }
+        let nextAllow = [...user.allow].sort();
+        if (patch.allow !== undefined) {
+            try {
+                if (patch.allow.some((routeId) => routeId.length === 0 || routeId !== routeId.trim())) {
+                    throw new Error('INVALID_USER_ALLOW');
+                }
+                for (const routeId of patch.allow)
+                    parseRoute(routeId);
+            }
+            catch {
+                throw new Error('INVALID_USER_ALLOW');
+            }
+            nextAllow = [...new Set(patch.allow)].sort();
+        }
         const currentRevision = this.configRevision;
         if (options?.expectedRevision !== undefined && options.expectedRevision !== currentRevision) {
             throw new RoutingError('REVISION_CONFLICT', `expected config revision ${options.expectedRevision} but current is ${currentRevision}`);
         }
         let newRevision = currentRevision;
-        if (patch.monthlyCredits !== undefined && patch.monthlyCredits !== user.monthlyCredits) {
-            const newCredits = patch.monthlyCredits;
+        const newCredits = patch.monthlyCredits ?? user.monthlyCredits;
+        const changedFields = [];
+        if (newCredits !== user.monthlyCredits)
+            changedFields.push('monthlyCredits');
+        if (nextAllow.length !== user.allow.length ||
+            nextAllow.some((routeId, index) => routeId !== [...user.allow].sort()[index])) {
+            changedFields.push('allow');
+        }
+        if (changedFields.length > 0) {
             // 管理写入持久化：数据与新 revision、审计条目在同一 SQLite 事务提交
             // （GOV-CONFIG-001：任一写入失败整体回滚，revision 不递增，内存不提交）。
             if (this._repository !== undefined) {
                 const repository = this._repository;
                 newRevision = repository.transaction(() => {
-                    repository.upsertUserPolicy(userId, BigInt(Math.max(0, Math.floor(newCredits))) * 1000000000n);
+                    repository.upsertUserPolicy(userId, BigInt(newCredits) * 1000000000n);
+                    repository.replaceUserAllow(userId, nextAllow);
                     const next = currentRevision + 1;
                     repository.setConfigRevision(next);
                     repository.insertAuditEntry({
                         actor: options?.actor ?? 'local',
                         action: 'updateUser',
                         target: userId,
-                        changedFields: ['monthlyCredits'],
+                        changedFields,
                         oldRevision: currentRevision,
                         newRevision: next,
                         result: 'success',
@@ -942,18 +1208,24 @@ export class GovernorService extends Service {
             }
             // 持久化成功后才提交内存状态（失败路径内存与 SQLite 同为旧值）。
             user.monthlyCredits = newCredits;
+            user.allow = nextAllow;
         }
+        const usedNanos = this.getQuotaStatus(userId).usedNanos;
         return {
             userId,
-            allow: user.allow,
+            allow: [...user.allow],
             monthlyCredits: user.monthlyCredits,
+            usedCredits: Number(usedNanos) / 1_000_000_000,
+            usedCreditNanos: usedNanos.toString(),
             configRevision: newRevision,
         };
     }
     async queryUsage(query) {
         // 有仓库时从 SQLite 读取（含历史进程的持久化事件），否则用内存聚合
         if (this._repository !== undefined) {
-            return this._repository.queryUsage({ ...query, limit: 1000 }).map((r) => ({
+            return this._repository
+                .queryUsage({ ...query, limit: query.limit ?? 1000 })
+                .map((r) => ({
                 id: `${r.requestId}:${r.fallbackIndex}`,
                 requestId: r.requestId,
                 sessionId: r.sessionId,
@@ -980,7 +1252,16 @@ export class GovernorService extends Service {
                 createdAt: r.createdAt,
             }));
         }
-        return this._usageAggregator.listEvents(query);
+        const fromMs = query.from === undefined ? undefined : Date.parse(query.from);
+        const toMs = query.to === undefined ? undefined : Date.parse(query.to);
+        return this._usageAggregator
+            .listEvents(query)
+            .filter((event) => {
+            const createdAt = Date.parse(event.createdAt);
+            return ((fromMs === undefined || createdAt >= fromMs) && (toMs === undefined || createdAt <= toMs));
+        })
+            .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
+            .slice(0, query.limit ?? Number.MAX_SAFE_INTEGER);
     }
     /**
      * 按 requestId 查询完整 attempt 集合（GOV-DECISION-001：优先读 Repository，
@@ -1099,30 +1380,25 @@ export class GovernorService extends Service {
         }
         const existing = this._selectionStates.get(sessionId);
         const nextRevision = current.selectionRevision + 1;
+        const nextLastManualRoute = options?.lastManualRoute ?? options?.currentRoute ?? existing?.lastManualRoute;
+        const carrierRouteId = options?.currentRoute ?? nextLastManualRoute;
+        const carrierRoute = carrierRouteId !== undefined ? parseRoute(carrierRouteId) : undefined;
         // 先追加持久 selection-mode 事件（durable ack 后才更新内存状态与 UI 确认）。
         // 无 repository 时 audit 跳过（内存模式，不需要持久事件）。
         await this._audit.commitSelectionMode(sessionId, {
             schemaVersion: GOVERNOR_SESSION_EVENT_SCHEMA_VERSION,
             selectionRevision: nextRevision,
             mode,
-            ...(mode === 'manual' && options?.lastManualRoute !== undefined
-                ? { lastManualRoute: options.lastManualRoute }
-                : existing?.lastManualRoute !== undefined
-                    ? { lastManualRoute: existing.lastManualRoute }
-                    : {}),
+            ...(nextLastManualRoute !== undefined ? { lastManualRoute: nextLastManualRoute } : {}),
             ...(existing?.lastDecisionConfigRevision !== undefined
                 ? { lastDecisionConfigRevision: existing.lastDecisionConfigRevision }
                 : {}),
             changedAt: Date.now(),
-        });
+        }, carrierRoute);
         this._selectionStates.set(sessionId, {
             mode,
             selectionRevision: nextRevision,
-            ...(mode === 'manual' && options?.lastManualRoute !== undefined
-                ? { lastManualRoute: options.lastManualRoute }
-                : existing?.lastManualRoute !== undefined
-                    ? { lastManualRoute: existing.lastManualRoute }
-                    : {}),
+            ...(nextLastManualRoute !== undefined ? { lastManualRoute: nextLastManualRoute } : {}),
             ...(existing?.lastDecisionConfigRevision !== undefined
                 ? { lastDecisionConfigRevision: existing.lastDecisionConfigRevision }
                 : {}),

@@ -20,6 +20,64 @@ interface ModelConfig {
     capabilities?: string[];
     quality?: Record<string, number>;
 }
+/** 管理面可回读、可事务更新的路由配置快照。 */
+export interface GovernorRoutingSettings {
+    default: RoutingMode;
+    creditFirst: {
+        minimumQuality: number;
+        onNoMatch: 'quality_first' | 'none';
+    };
+    auto: {
+        confidenceThreshold: number;
+        qualityThreshold: {
+            low: number;
+            medium: number;
+            high: number;
+        };
+    };
+    fallback: {
+        enabled: boolean;
+        maxAttempts: number;
+        afterPartialOutput: boolean;
+        strategy: 'quality_first' | 'credit_first' | 'auto';
+    };
+    configRevision: number;
+}
+/** 路由配置的管理补丁；全部字段由 Host 复核范围。 */
+export interface GovernorRoutingSettingsPatch {
+    default?: RoutingMode;
+    creditFirst?: {
+        minimumQuality?: number;
+        onNoMatch?: 'quality_first' | 'none';
+    };
+    auto?: {
+        confidenceThreshold?: number;
+        qualityThreshold?: {
+            low?: number;
+            medium?: number;
+            high?: number;
+        };
+    };
+    fallback?: {
+        enabled?: boolean;
+        maxAttempts?: number;
+        afterPartialOutput?: boolean;
+        strategy?: 'quality_first' | 'credit_first' | 'auto';
+    };
+}
+/** Usage 查询条件；时间使用可排序的 ISO 8601 字符串。 */
+export interface GovernorUsageQuery {
+    userId?: string;
+    provider?: string;
+    from?: string;
+    to?: string;
+    limit?: number;
+}
+/** 所有管理入口共用的 Usage 扫描边界。 */
+export declare const GOVERNOR_USAGE_MAX_DAYS = 31;
+export declare const GOVERNOR_USAGE_MAX_ROWS = 200;
+/** 生成有界 Usage 查询；缺省为截至当前时刻的最近 31 天。 */
+export declare function normalizeGovernorUsageQuery(query: GovernorUsageQuery, now?: number): Required<Pick<GovernorUsageQuery, 'from' | 'to' | 'limit'>> & GovernorUsageQuery;
 /** 插件配置。 */
 export interface GovernorPluginConfig {
     models?: Record<string, ModelConfig>;
@@ -96,7 +154,7 @@ export interface GovernorServiceOptions {
     classifierBackend?: LlmClassifierBackend;
     /** 分类结果缓存（默认 InMemoryClassifierCache）。 */
     classifierCache?: ClassifierCache;
-    /** Session Event 写入端（默认 Null：SEAM-1/2 阻断下的 fail safe 降级）。 */
+    /** Session Event 写入端（缺少 Session service 时默认 Null 并严格 fail closed）。 */
     sessionEventSink?: SessionEventSink;
 }
 /**
@@ -147,6 +205,8 @@ export declare class GovernorService extends Service {
     private _importInitialPolicies;
     /** 从 DB 加载模型与用户策略（DB 优先于 YAML）。 */
     private _loadPoliciesFromRepository;
+    /** 重启时恢复管理面写入的路由配置；损坏值 fail closed 为启动配置。 */
+    private _loadRoutingSettingsFromRepository;
     /** 从配置构建模型目录（无 DSH advisory 时的初始视图）。 */
     private _buildDirectoryFromConfig;
     /** 请求键。 */
@@ -276,6 +336,24 @@ export declare class GovernorService extends Service {
      * RoutingStrategy（按 name 接管非 Manual 模式）、ModelQualityProvider。
      */
     get extensions(): GovernorExtensionRegistry;
+    /** 读取当前路由/Auto/Fallback 设置（管理面单一运行时权威）。 */
+    getRoutingSettings(): Promise<GovernorRoutingSettings>;
+    /**
+     * 事务更新路由设置。数据、revision、管理审计在同一 SQLite 事务提交，
+     * 持久化成功后才替换内存状态。
+     */
+    updateRoutingSettings(patch: GovernorRoutingSettingsPatch, options?: {
+        expectedRevision?: number;
+        actor?: string;
+    }): Promise<GovernorRoutingSettings>;
+    /** 合并并验证路由设置，返回完整候选快照，不修改内存。 */
+    private _routingSettingsWithPatch;
+    /** 将完整快照投影为持久补丁（排除派生的 configRevision）。 */
+    private _routingPersisted;
+    /** 应用已验证的路由补丁。 */
+    private _applyRoutingSettingsPatch;
+    /** 配置审计的字段路径。 */
+    private _routingChangedFields;
     listModels(): Promise<{
         routeId: string;
         provider: string;
@@ -284,6 +362,7 @@ export declare class GovernorService extends Service {
         multiplierPpm: number;
         capabilities: string[];
         quality: Readonly<Partial<Record<"general" | "coding" | "reasoning" | "writing" | "data_analysis" | "vision" | "tool_use", number>>>;
+        configRevision: number;
     }[]>;
     /**
      * 更新模型策略（管理员写入；GOV-CONFIG-001：数据与新 revision 同事务提交）。
@@ -313,6 +392,9 @@ export declare class GovernorService extends Service {
         userId: string;
         allow: string[];
         monthlyCredits: number;
+        usedCredits: number;
+        usedCreditNanos: string;
+        configRevision: number;
     }[]>;
     /**
      * 更新用户策略（管理员写入；GOV-CONFIG-001：数据与新 revision 同事务提交）。
@@ -322,6 +404,7 @@ export declare class GovernorService extends Service {
      */
     updateUser(userId: string, patch: {
         monthlyCredits?: number;
+        allow?: string[];
     }, options?: {
         expectedRevision?: number;
         actor?: string;
@@ -329,12 +412,11 @@ export declare class GovernorService extends Service {
         userId: string;
         allow: string[];
         monthlyCredits: number;
+        usedCredits: number;
+        usedCreditNanos: string;
         configRevision: number;
     }>;
-    queryUsage(query: {
-        userId?: string;
-        provider?: string;
-    }): Promise<UsageEvent[]>;
+    queryUsage(query: GovernorUsageQuery): Promise<UsageEvent[]>;
     /**
      * 按 requestId 查询完整 attempt 集合（GOV-DECISION-001：优先读 Repository，
      * 进程重启后仍可查询；指定 fallbackIndex 时只返回一个 attempt）。
@@ -403,6 +485,8 @@ export declare class GovernorService extends Service {
     setSessionSelectionMode(sessionId: string, mode: 'auto' | 'manual', options?: {
         expectedRevision?: number;
         lastManualRoute?: string;
+        /** DSH Composer/命令当前真实 route，用于全新 Session 的持久 carrier。 */
+        currentRoute?: string;
     }): Promise<{
         mode: 'auto' | 'manual';
         selectionRevision: number;

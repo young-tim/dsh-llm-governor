@@ -2,18 +2,19 @@
  * Governor 自有 Session Event：类型合并、幂等 append 与会话控制状态重建。
  *
  * 本模块是 rc.8 Session Event 接缝的 Governor 侧封装：
- * - 通过 declaration merge 向 `SessionEventMap` 注入 `governor/routing-decision`
- *   与 `governor/selection-mode` 两个纯信息事件（不参与消息重建）。
- * - 提供「扫描持久 log + append」的持久层幂等 append：rc.8 的
- *   `Session.append(type, data)` 没有幂等键参数，同一 decisionId 的重试必须由
- *   插件在持久层去重（见 docs/UPSTREAM_SEAMS.md SEAM-1/SEAM-2）。
+ * - 通过 declaration merge 在 rc.8 已知、非 surface 的 `request/context`
+ *   envelope 上增加 `governorDecision` / `governorSelection` 命名投影。
+ *   `request/context` 只投影路由元数据，不参与 Prompt/消息重建；旧 rc.8
+ *   reader 认识该 envelope 并保留额外 JSON 字段，因而卸载 Governor 后仍能冷恢复。
+ * - 提供「扫描持久 log + append」的幂等 append：rc.8 的
+ *   `Session.append(type, data)` 没有幂等键参数，同一 decisionId 的重试由
+ *   Governor 扫描会话 log 去重。
  * - 提供从事件流重建 `governor.session.v1` 会话控制状态（selection mode）的
  *   纯函数，供 restore/fork 后恢复 Governor 选择模式。
  *
- * 注意：rc.8 `Session.append` 无法写入 envelope 级 `ignorable` 标记，因此这些
- * 事件一旦被持久化，冷读回会被 dsh-session-persistence 拒绝
- * （SessionFormatUnsupportedError）。合同测试 test/contracts/session-event-seams.test.ts
- * 固化了该红灯证据；在 seam 补齐前，Governor 不向可持久化会话写入这些事件。
+ * 早期开发版写过的 `governor/*` envelope 仅作读取兼容，不再新写。
+ * 这避免了 rc.8 未知事件必须有 `ignorable: true` 但 append API 又无法写入
+ * 该 envelope 字段的断层，也不需要修改 node_modules 或动态篡改已知类型集。
  */
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session';
 /** Governor Session Event 的 schema 版本（稳定码随版本演进，只增不改）。 */
@@ -94,15 +95,37 @@ export interface GovernorSelectionModeEventData {
     /** 事件时间（毫秒）。 */
     changedAt: number;
 }
-/** 向 rc.8 SessionEventMap 注入 Governor 事件类型（与官方插件同一合并面）。 */
+/**
+ * 在 rc.8 公开 RequestContext 扩展面上携带 Governor 的纯信息投影。
+ *
+ * 旧 `governor/*` 声明仅用于读取开发期内存 seed；新写入统一使用
+ * `request/context` carrier，保证 rc.8 persistence 冷读与插件卸载兼容。
+ */
 declare module '@deepseek-ai/dsh-session/types' {
+    interface RequestContext {
+        /** Governor 决策审计投影；纯信息，不参与 request reconstruction。 */
+        governorDecision?: GovernorRoutingDecisionEventData;
+        /** Governor 会话选择状态投影；纯信息。 */
+        governorSelection?: GovernorSelectionModeEventData;
+    }
     interface SessionEventMap {
+        /** @deprecated 仅读取兼容；新写入使用 request/context.governorDecision。 */
         'governor/routing-decision': GovernorRoutingDecisionEventData;
+        /** @deprecated 仅读取兼容；新写入使用 request/context.governorSelection。 */
         'governor/selection-mode': GovernorSelectionModeEventData;
     }
 }
+/** `request/context` carrier 必须携带的真实 DSH route。 */
+export interface GovernorEventCarrierRoute {
+    provider: string;
+    model: string;
+}
+/** 从新 carrier 或旧 governor/* envelope 读取统一决策 payload。 */
+export declare function governorDecisionFromEvent(event: SessionEvent): GovernorRoutingDecisionEventData | undefined;
+/** 从新 carrier 或旧 governor/* envelope 读取统一选择状态 payload。 */
+export declare function governorSelectionFromEvent(event: SessionEvent): GovernorSelectionModeEventData | undefined;
 /**
- * 幂等追加一条 `governor/routing-decision` 事件。
+ * 幂等追加一条携带 `governorDecision` 投影的 `request/context` 事件。
  *
  * 持久层幂等实现：append 前扫描 session log，若已存在相同 decisionId 的事件
  * 则直接返回该事件，不产生第二条逻辑记录；decisionId 不同但 hash 相同属于
@@ -113,9 +136,9 @@ declare module '@deepseek-ai/dsh-session/types' {
  * @param data - 决策事件数据。
  * @returns 追加（或已存在）的事件。
  */
-export declare function appendGovernorDecision(session: Session, data: GovernorRoutingDecisionEventData): SessionEvent<'governor/routing-decision'>;
+export declare function appendGovernorDecision(session: Session, data: GovernorRoutingDecisionEventData, carrierRoute?: GovernorEventCarrierRoute): SessionEvent<'request/context'>;
 /**
- * 幂等追加一条 `governor/selection-mode` 事件。
+ * 幂等追加一条携带 `governorSelection` 投影的 `request/context` 事件。
  *
  * 同一 selectionRevision 的重复提交（保存确认重试、乱序回调）不产生第二条
  * 记录；revision 更大时正常追加。revision 回退由调用方（Host 持久化层）用
@@ -125,7 +148,7 @@ export declare function appendGovernorDecision(session: Session, data: GovernorR
  * @param data - 选择模式事件数据。
  * @returns 追加（或已存在）的事件。
  */
-export declare function appendGovernorSelectionMode(session: Session, data: GovernorSelectionModeEventData): SessionEvent<'governor/selection-mode'>;
+export declare function appendGovernorSelectionMode(session: Session, data: GovernorSelectionModeEventData, carrierRoute?: GovernorEventCarrierRoute): SessionEvent<'request/context'>;
 /**
  * 在 session log 中查找指定 decisionId 的 Governor 决策事件。
  *
@@ -133,7 +156,11 @@ export declare function appendGovernorSelectionMode(session: Session, data: Gove
  * @param decisionId - 幂等键 `<requestId>:<fallbackIndex>`。
  * @returns 已存在的事件；不存在返回 undefined。
  */
-export declare function findGovernorDecision(session: Session, decisionId: string): SessionEvent<'governor/routing-decision'> | undefined;
+export declare function findGovernorDecision(session: Session, decisionId: string): SessionEvent<'governor/routing-decision'> | (SessionEvent<'request/context'> & {
+    data: SessionEvent<'request/context'>['data'] & {
+        governorDecision: GovernorRoutingDecisionEventData;
+    };
+}) | undefined;
 /**
  * 在 session log 中查找指定 selectionRevision 的选择模式事件。
  *
@@ -141,7 +168,11 @@ export declare function findGovernorDecision(session: Session, decisionId: strin
  * @param selectionRevision - 会话 selection 状态版本。
  * @returns 已存在的事件；不存在返回 undefined。
  */
-export declare function findGovernorSelectionMode(session: Session, selectionRevision: number): SessionEvent<'governor/selection-mode'> | undefined;
+export declare function findGovernorSelectionMode(session: Session, selectionRevision: number): SessionEvent<'governor/selection-mode'> | (SessionEvent<'request/context'> & {
+    data: SessionEvent<'request/context'>['data'] & {
+        governorSelection: GovernorSelectionModeEventData;
+    };
+}) | undefined;
 /** 从事件流重建的 `governor.session.v1` 会话控制状态。 */
 export interface GovernorSessionSelectionState {
     /** 当前选择模式。 */

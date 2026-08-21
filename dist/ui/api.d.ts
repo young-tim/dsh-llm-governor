@@ -17,10 +17,10 @@
  */
 import http from 'node:http';
 import type { GovernorService } from '../plugin/service.js';
+import type { GovernorCapability } from '../security/governor-capabilities.js';
 /** 请求体上限（字节）：Remote/兼容 API 256 KiB（优化文档 7.1）。 */
 export declare const MAX_REQUEST_BODY_BYTES: number;
-/** Governor 管理能力（GOV-SEC-001 三项最小 capability）。 */
-export type GovernorCapability = 'governor.read' | 'governor.manage' | 'governor.audit';
+export type { GovernorCapability } from '../security/governor-capabilities.js';
 /** 已认证主体。 */
 export interface GovernorActor {
     /** 主体标识（token 的稳定摘要，不回传 token 本身）。 */
@@ -43,12 +43,6 @@ export interface GovernorApiServerOptions {
     allowedOrigin?: string;
     /** 强制 loopback peer（兼容 API 独立监听时必须为 true）。 */
     requireLoopback?: boolean;
-    /**
-     * 无 Authorization 请求的默认能力（仅用于 DSH webServer 受信前缀通道，
-     * 授予 governor.read 使原生页面可读；manage/audit 仍需 Bearer）。
-     * rc.8 SEAM-3 阻断下“DSH 登录主体解析”的显式降级（见 BLOCKED.md B-2）。
-     */
-    defaultCapabilities?: GovernorCapability[];
     /** 兼容旧配置的管理员令牌（映射为全能力主体；已废弃，仅为迁移保留）。 */
     adminToken?: string;
 }

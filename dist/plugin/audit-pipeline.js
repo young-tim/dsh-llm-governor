@@ -1,5 +1,5 @@
 import { RoutingError } from '../routing/types.js';
-import { appendGovernorDecision, appendGovernorSelectionMode, findGovernorDecision, GOVERNOR_SESSION_EVENT_SCHEMA_VERSION, restoreGovernorSelection, } from '../dsh-adapter/session-events.js';
+import { appendGovernorDecision, appendGovernorSelectionMode, findGovernorDecision, governorDecisionFromEvent, GOVERNOR_SESSION_EVENT_SCHEMA_VERSION, restoreGovernorSelection, } from '../dsh-adapter/session-events.js';
 /**
  * 内存/测试用 Session Event sink：向给定 Session 幂等 append 并 flush。
  *
@@ -20,27 +20,41 @@ export class SessionStoreSink {
         if (session === undefined) {
             throw new RoutingError('AUDIT_PERSIST_FAILED', `session ${context.sessionId} not live for decision append`);
         }
-        appendGovernorDecision(session, this._toEventData(decision));
+        try {
+            appendGovernorDecision(session, this._toEventData(decision), context.route);
+        }
+        catch (error) {
+            if (String(error).includes('DECISION_CONFLICT')) {
+                throw new RoutingError('DECISION_CONFLICT', String(error));
+            }
+            throw error;
+        }
         const participated = await this._flush(session);
         if (!participated) {
             throw new RoutingError('AUDIT_PERSIST_FAILED', `no durability listener participated for session ${context.sessionId}`);
         }
     }
     /** 查询 Session log 中是否已存在该决策事件。 */
-    async hasDecision(decisionId) {
+    async hasDecision(decisionId, expectedHash) {
         for (const session of this._sessions()) {
-            if (findGovernorDecision(session, decisionId) !== undefined)
-                return true;
+            const event = findGovernorDecision(session, decisionId);
+            if (event === undefined)
+                continue;
+            const actualHash = governorDecisionFromEvent(event)?.decisionHash;
+            if (expectedHash !== undefined && actualHash !== expectedHash) {
+                throw new RoutingError('DECISION_CONFLICT', `decision ${decisionId} session hash ${String(actualHash)} conflicts with ${expectedHash}`);
+            }
+            return true;
         }
         return false;
     }
     /** 幂等追加 selection-mode 事件并等待 durable ack。 */
-    async appendSelectionMode(sessionId, data) {
+    async appendSelectionMode(sessionId, data, route) {
         const session = this._resolve(sessionId);
         if (session === undefined) {
             throw new RoutingError('AUDIT_PERSIST_FAILED', `session ${sessionId} not live for selection-mode append`);
         }
-        appendGovernorSelectionMode(session, data);
+        appendGovernorSelectionMode(session, data, route);
         const participated = await this._flush(session);
         if (!participated) {
             throw new RoutingError('AUDIT_PERSIST_FAILED', `no durability listener participated for session ${sessionId}`);
@@ -131,6 +145,8 @@ export class AuditPipeline {
             await this._sink.appendDecision(decision, context);
         }
         catch (err) {
+            if (err instanceof RoutingError && err.code === 'DECISION_CONFLICT')
+                throw err;
             throw new RoutingError('AUDIT_PERSIST_FAILED', `decision ${decision.decisionId} session event append failed: ${String(err)}`);
         }
         const committed = this._repository.markDecisionCommitted(decision.decisionId, decision.decisionHash);
@@ -154,11 +170,11 @@ export class AuditPipeline {
      * @param data - selection-mode 事件数据。
      * @throws sink 不可写时抛 AUDIT_PERSIST_FAILED。
      */
-    async commitSelectionMode(sessionId, data) {
+    async commitSelectionMode(sessionId, data, route) {
         if (this._repository === undefined)
             return;
         try {
-            await this._sink.appendSelectionMode(sessionId, data);
+            await this._sink.appendSelectionMode(sessionId, data, route);
         }
         catch (err) {
             if (err instanceof RoutingError && err.code === 'AUDIT_PERSIST_FAILED')
@@ -184,14 +200,27 @@ export class AuditPipeline {
                 result.pending += 1;
                 continue;
             }
-            const exists = await this._sink.hasDecision(row.decisionId);
+            let exists;
+            try {
+                exists = await this._sink.hasDecision(row.decisionId, row.decisionHash);
+            }
+            catch (error) {
+                if (error instanceof RoutingError && error.code === 'DECISION_CONFLICT') {
+                    result.conflicts.push(row.decisionId);
+                }
+                result.pending += 1;
+                continue;
+            }
             if (!exists) {
                 try {
                     await this._sink.appendDecision(this._reconstruct(row), {
                         sessionId: row.sessionId ?? 'unknown',
                     });
                 }
-                catch {
+                catch (error) {
+                    if (error instanceof RoutingError && error.code === 'DECISION_CONFLICT') {
+                        result.conflicts.push(row.decisionId);
+                    }
                     // 会话不可写：保留 pending（诊断视图显示“审计未完成”）。
                     result.pending += 1;
                     continue;

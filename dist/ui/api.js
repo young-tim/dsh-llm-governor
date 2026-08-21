@@ -20,6 +20,7 @@ import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { randomBytes } from 'node:crypto';
+import { normalizeGovernorUsageQuery } from '../plugin/service.js';
 import { RoutingError } from '../routing/types.js';
 /** 模块所在目录，用于定位 pages 子目录中的 HTML 文件。 */
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -97,8 +98,8 @@ export function createGovernorRequestHandler(governor, opts) {
         }
     }
     /**
-     * 解析请求主体：Authorization: Bearer <token>；无凭证时返回默认主体
-     * （仅 DSH webServer 受信前缀通道配置 defaultCapabilities 时）。
+     * 解析请求主体：Authorization: Bearer <token>。Host 可达性不是认证，
+     * 因此无凭证请求一律 fail closed，不授予隐式 read。
      *
      * @param req - HTTP 请求对象。
      * @returns 已认证主体；未认证返回 undefined。
@@ -106,9 +107,6 @@ export function createGovernorRequestHandler(governor, opts) {
     function authenticate(req) {
         const header = req.headers['authorization'];
         if (typeof header !== 'string' || !header.startsWith('Bearer ')) {
-            if ((opts?.defaultCapabilities?.length ?? 0) > 0) {
-                return { id: 'dsh-webserver-channel', capabilities: new Set(opts?.defaultCapabilities) };
-            }
             return undefined;
         }
         const token = header.slice('Bearer '.length);
@@ -215,6 +213,12 @@ export function createGovernorRequestHandler(governor, opts) {
             else if (code === 'INVALID_MULTIPLIER') {
                 // GOV-UI-002：Host 拒绝超界值
                 sendError(res, 400, 'INVALID_MULTIPLIER');
+            }
+            else if (code === 'INVALID_MONTHLY_CREDITS' || code === 'INVALID_USER_ALLOW') {
+                sendError(res, 400, code);
+            }
+            else if (code === 'INVALID_REQUEST') {
+                sendError(res, 400, 'INVALID_REQUEST');
             }
             else if (code === 'UNAUTHORIZED' || code === 'FORBIDDEN') {
                 sendError(res, 403, code);
@@ -378,11 +382,28 @@ export function createGovernorRequestHandler(governor, opts) {
                 const query = {};
                 const userIdParam = url.searchParams.get('userId');
                 const providerParam = url.searchParams.get('provider');
+                const fromParam = url.searchParams.get('from');
+                const toParam = url.searchParams.get('to');
+                const limitParam = url.searchParams.get('limit');
                 if (userIdParam !== null)
                     query.userId = userIdParam;
                 if (providerParam !== null)
                     query.provider = providerParam;
-                const events = await governor.queryUsage(query);
+                if (fromParam !== null)
+                    query.from = fromParam;
+                if (toParam !== null)
+                    query.to = toParam;
+                if (limitParam !== null)
+                    query.limit = Number(limitParam);
+                let boundedQuery;
+                try {
+                    boundedQuery = normalizeGovernorUsageQuery(query);
+                }
+                catch (err) {
+                    handleError(res, err);
+                    return;
+                }
+                const events = await governor.queryUsage(boundedQuery);
                 const data = events.map((e) => ({
                     requestId: e.requestId,
                     provider: e.provider,
@@ -392,6 +413,7 @@ export function createGovernorRequestHandler(governor, opts) {
                     credits: Number(e.creditNanos) / 1_000_000_000,
                     success: e.success,
                     latencyMs: e.latencyMs,
+                    createdAt: e.createdAt,
                 }));
                 sendJson(res, 200, { data, total: data.length });
                 return;

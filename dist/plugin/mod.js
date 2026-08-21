@@ -15,7 +15,8 @@ import { createGovernorRequestHandler } from '../ui/api.js';
 import { resolveConfig } from '../config/index.js';
 import { HeaderIdentityProvider, JwtIdentityProvider } from '../identity/providers.js';
 import { SessionStoreSink, NullSessionEventSink } from './audit-pipeline.js';
-import { registerClientSurface } from './client-registration.js';
+import { GovernorRemoteService } from './remote-service.js';
+import { localOwnerPrincipal } from '../security/governor-capabilities.js';
 export { GovernorExtensionRegistry } from '../extensions/registry.js';
 /** Governor UI 在 DSH webServer 上挂载的前缀。 */
 const GOVERNOR_WEB_PREFIX = '/governor';
@@ -293,7 +294,8 @@ function toRuntimeConfig(resolved) {
  * - 创建 SQLite 仓库（默认 $DSH_HOME/dsh-llm-governor/governor.db，迁移失败 fail closed）。
  * - header/jwt 模式构建 IdentityProvider 实例并暴露 /governor/api/bind 入站绑定端点。
  * - 注册 agent/pre-step、agent/request、llm/stream、agent/request-error 监听器。
- * - UI 挂载：有 ctx.webServer 时注册 /governor 前缀路由，否则按 ui.port 独立监听。
+ * - UI 挂载：有 ctx.webServer 时注册 /governor 兼容前缀；独立监听仅在显式启用
+ *   compatApi 时启动，默认不新增 socket。
  */
 /**
  * 事件接线：把 Governor service 挂到 DSH 事件瀑布（pre-step/request/stream/
@@ -492,6 +494,18 @@ export const GovernorPlugin = {
             serviceOptions.sessionEventSink = new NullSessionEventSink();
         }
         const service = new GovernorService(ctx, runtimeConfig, repository, serviceOptions);
+        // 2.2 Governor Typert Remote：严格 descriptor 由 dsh-typert-loader 从
+        //     package ./typert 导出注册。Remote 方法不接收 actor/user/role，主体仅由 Host provider
+        //     解析；local 模式回落为进程所有者，其他模式无 provider 时 fail closed。
+        const hostServices = ctx;
+        const principalProvider = hostServices.get?.('governorPrincipal');
+        const localPrincipal = resolved.identity.provider === 'local'
+            ? localOwnerPrincipal(resolved.identity.localUserId ?? 'local')
+            : undefined;
+        new GovernorRemoteService(ctx, service, async () => {
+            const principal = await principalProvider?.current();
+            return principal ?? localPrincipal;
+        });
         // 3. 从 DSH advisory 合并模型目录（初始目录从配置构建，在构造函数中完成）
         try {
             await service.refreshModelDirectory(() => ctx.llm.listProviders(), (p) => ctx.llm.listModels(p));
@@ -501,17 +515,8 @@ export const GovernorPlugin = {
         }
         // 4-8.6 事件接线与启动对账（提取为可复用函数，测试可自组环境注入故障）
         await wireGovernorEvents(ctx, service);
-        // 8.7 Client 侧原生注册：Trajectory 卡片 / Composer selector / Settings 分区。
-        //     SEAM-5：浏览器 bundle 不可用时安全跳过（合同测试以发布物取证）。
-        //     注册的 disposer 通过 ctx.effect 注册，确保 HMR/卸载时清理。
-        //     service 传递给 Auto selector 注入面（浏览器组件随 B-3 E2E 交付）。
-        const clientDisposers = registerClientSurface(ctx, { service });
-        if (clientDisposers.length > 0) {
-            ctx.effect(() => () => {
-                for (const dispose of clientDisposers)
-                    dispose();
-            });
-        }
+        // 8.7 Client 侧原生注册由 package.json#dsh.client 交给 rc.8
+        //     dsh-client-modules 扫描与分发；Host 进程无需也不应直接注册浏览器槽位。
         // 9. UI 与入站绑定挂载（GOV-UI-001）：
         //    - 默认只注册到 DSH webServer 的 /governor 前缀（受信 Host 通道），
         //      不新增任何监听端口。
@@ -536,8 +541,8 @@ export const GovernorPlugin = {
         if (runtimeConfig.ui?.enabled !== false) {
             const webServer = ctx.get?.('webServer');
             if (webServer !== undefined) {
-                // DSH webServer 受信前缀通道：无凭证请求授予默认 read（原生页面可读；
-                // manage/audit 仍需 Bearer token——GOV-UI-001 AC 5 / SEAM-3 降级，B-2）。
+                // DSH webServer 只是可达性边界，不是认证边界：兼容 HTTP API 无
+                // Bearer 时 fail closed。原生页面通过上面的 Typert Remote 读取。
                 const trustedHandle = createGovernorRequestHandler(service, {
                     ...(runtimeConfig.compatApi?.token !== undefined
                         ? {
@@ -549,7 +554,6 @@ export const GovernorPlugin = {
                             ],
                         }
                         : {}),
-                    defaultCapabilities: ['governor.read'],
                 });
                 const dispose = webServer.register({
                     kind: 'prefix',
@@ -589,7 +593,7 @@ export const GovernorPlugin = {
             }
         }
         /**
-         * webServer 前缀路由处理器：常规请求交给 API 处理器（受信通道默认 read）；
+         * webServer 前缀路由处理器：兼容 API 仍要求 Bearer，不把可达性当认证；
          * POST /api/bind 是 header/jwt 模式的入站身份绑定端点（仅本地回环可信）。
          */
         async function handleGovernorWeb(req, res, svc, provider, trustedHandle) {
@@ -652,7 +656,7 @@ export const GovernorPlugin = {
                 }
                 return;
             }
-            // 其余请求交给通用 API 处理器（剥离 /governor 前缀；受信通道默认 read）
+            // 其余请求交给通用 API 处理器（剥离 /governor 前缀；无 Bearer 时 fail closed）
             const delegate = trustedHandle ?? handle;
             await delegate(request, response, GOVERNOR_WEB_PREFIX);
         }

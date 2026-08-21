@@ -1,26 +1,8 @@
 /**
- * DSH Client 侧原生注册：Trajectory 决策卡片、Composer Auto selector、Settings 分区。
- *
- * SEAM-5（docs/UPSTREAM_SEAMS.md）：dsh-client-runtime 的 client 入口是浏览器
- * bundle（`window.__ModuleLoader__.load(...)`），Node 无法实例化。本模块交付两层：
- *
- * 1. 契约完整的注册对象（类型直接取自 `@deepseek-ai/dsh-client-runtime/client`
- *    的公开契约，tsc 编译期校验）：
- *    - `governorTrajectoryDefinition`：Trajectory 卡片的完整
- *      `ConversationNodeDefinition` 实现——含 `buildViewNode` 渲染实现
- *      （GOV-TRACE-002 卡片摘要 + 详情抽屉视图模型）；
- *    - `governorDecisionViewDefinition`：`governor-decision` target 的
- *      `ConversationViewDefinition`（per-session 增量视图构建器）；
- *    - `governorModelSeatSpec` / `governorModelSeatInject`：Composer 单占位
- *      模型选择座席（`conversation.input.model`）的注册 spec 与注入面——
- *      选择 Auto 调用与 `/model auto` 同一 Host 方法（GOV-SELECT-001 AC 7）；
- *    - `governorSettingsSection`：Settings 分区声明（GOV-UI-001）。
- *
- * 2. `registerClientSurface(ctx, options)` 接线函数：浏览器 client 上下文
- *    （`ctx.conversationEvents` / `ctx.conversationViews` / `ctx.slots` /
- *    settings 面可用时）执行注册并返回 disposer 列表；Host/Node 环境安全
- *    跳过（SEAM-5，合同测试以发布物取证）。React 组件与运行时挂载验证
- *    随 B-3 的浏览器 E2E harness 交付（BLOCKED.md）。
+ * Shared browser contracts for the Governor trajectory, Composer selector and
+ * Settings surfaces.  `src/client/index.ts` consumes these definitions from a
+ * real rc.8 `dsh.client` bundle; the host client-module registry discovers that
+ * bundle from the live Loader package entry and owns its HMR lifecycle.
  */
 import type { ConversationNodeDefinition, ConversationViewDefinition, ConversationViewNode } from '@deepseek-ai/dsh-client-runtime/client';
 import type { GovernorService } from './service.js';
@@ -130,7 +112,9 @@ export declare const GOVERNOR_CARD_LABELS: {
     };
 };
 /**
- * Governor 轨迹卡片 Definition：匹配 `governor/routing-decision` 事件，
+ * Governor 轨迹卡片 Definition：匹配 rc.8 兼容的
+ * `request/context.data.governorDecision`，并保留旧 `governor/routing-decision`
+ * 的只读兼容，
  * 为每个 decisionId 建立独立 Context，`buildViewNode` 产出卡片视图节点。
  *
  * 事件是纯信息记录且自包含（无 update 事件）：`update` 恒返回既有状态；
@@ -171,13 +155,13 @@ export interface GovernorModelSeatInjected {
  * 构建单占位 selector 的注入面（sessionId 级；官方 occupant 之外的
  * Governor 侧接线，spec 由 `governorModelSeatSpec` 携带）。
  */
-export declare function governorModelSeatInject(service: GovernorService, sessionId: string): GovernorModelSeatInjected;
+export declare function governorModelSeatInject(service: GovernorService, sessionId: string, currentRoute?: string): GovernorModelSeatInjected;
 /**
  * 单占位 selector 注册 spec（`conversation.input.model` 座席）。
  *
  * 选项「自动（Governor）」置顶显示，不伪造成 Provider 模型；选择具体模型
- * 的路径（Manual + DSH 既有 `session.selectModel`）由浏览器组件复刻
- * （GOV-SELECT-001 AC 11 的完整合同随 B-3 浏览器 E2E 交付）。
+ * 的路径（Manual + DSH 既有 model directory select）由浏览器组件保留；
+ * 两种加载顺序、HMR 与卸载恢复见 browser-client UI 测试。
  */
 export declare function governorModelSeatSpec(service: GovernorService): {
     name: string;
@@ -195,25 +179,3 @@ export declare const governorSettingsSection: {
         readOnly: boolean;
     }[];
 };
-/** registerClientSurface 的可选参数。 */
-export interface RegisterClientSurfaceOptions {
-    /** Host 方法面（Auto selector 调用 setSessionSelectionMode 等）。 */
-    service?: GovernorService;
-    /**
-     * Auto selector 的浏览器组件（B-3：React 组件随浏览器 E2E harness 交付；
-     * 缺省时不注册 selector——不注册假组件，不抢占官方 occupant）。
-     */
-    selectorComponent?: unknown;
-}
-/**
- * 注册 Governor Client 侧原生体验（Trajectory / Auto selector / Settings）。
- *
- * 浏览器环境（注册面可用）执行注册并返回 disposer 列表；Node/Host 环境
- * （SEAM-5）安全跳过，返回空数组。调用方（mod.ts apply）在 ctx.effect 中
- * 注册 disposer，确保 HMR/卸载时清理（GOV-UI-001 AC 7）。
- *
- * @param ctx - Cordis 上下文（浏览器 client 上下文时注册面可用）。
- * @param options - service 与浏览器组件注入。
- * @returns disposer 函数列表（卸载时调用）。
- */
-export declare function registerClientSurface(ctx: unknown, options?: RegisterClientSurfaceOptions): Array<() => void>;

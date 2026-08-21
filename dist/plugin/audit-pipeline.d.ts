@@ -10,23 +10,30 @@
  *
  * 严格 fail-closed：NullSessionEventSink 在 appendDecision/appendSelectionMode 时
  * 抛 AUDIT_PERSIST_FAILED——不写轨迹就不能标 committed。生产接线（mod.ts apply）
- * 注入 SessionStoreSink 以接通真实 DSH Session；SEAM-1/2 阻断仅影响持久化冷读回
- * （docs/UPSTREAM_SEAMS.md），不影响内存 Session 的实时双写。
+ * 注入 SessionStoreSink 以接通真实 DSH Session；新写入使用 rc.8 已知的
+ * `request/context` carrier，真实持久化冷读与恢复均由合同测试覆盖。
  */
 import type { GovernorRepository } from '../storage/repository.js';
 import type { SealedDecision } from '../routing/decision.js';
 import type { Session } from '../dsh-adapter/mod.js';
-import { type GovernorSessionSelectionState, type GovernorSelectionModeEventData } from '../dsh-adapter/session-events.js';
+import { type GovernorSessionSelectionState, type GovernorSelectionModeEventData, type GovernorEventCarrierRoute } from '../dsh-adapter/session-events.js';
+/** Session 审计事件的归属与 rc.8 `request/context` carrier route。 */
+export interface SessionAuditContext {
+    sessionId: string;
+    /**
+     * 当次 DSH 请求的真实 proposal/selected route。拒绝决策没有
+     * selectedRoute，因此由调用方显式传入，禁止使用虚拟 provider/model。
+     */
+    route?: GovernorEventCarrierRoute;
+}
 /** Session Event 写入端抽象（双写协议的 Session 侧）。 */
 export interface SessionEventSink {
     /** 幂等追加一条决策事件并返回 durable acknowledgement；失败抛错。 */
-    appendDecision(decision: SealedDecision, context: {
-        sessionId: string;
-    }): Promise<void>;
+    appendDecision(decision: SealedDecision, context: SessionAuditContext): Promise<void>;
     /** 幂等追加一条 selection-mode 事件并返回 durable acknowledgement；失败抛错。 */
-    appendSelectionMode(sessionId: string, data: GovernorSelectionModeEventData): Promise<void>;
+    appendSelectionMode(sessionId: string, data: GovernorSelectionModeEventData, route?: GovernorEventCarrierRoute): Promise<void>;
     /** 查询指定 decisionId 的 Session Event 是否已存在（对账用）。 */
-    hasDecision(decisionId: string): Promise<boolean>;
+    hasDecision(decisionId: string, expectedHash?: string): Promise<boolean>;
 }
 /** 写入决策事件时的会话查找函数（由接线层提供 session 解析）。 */
 export type SessionResolver = (sessionId: string) => Session | undefined;
@@ -41,13 +48,11 @@ export declare class SessionStoreSink implements SessionEventSink {
     private readonly _sessions;
     constructor(resolve: SessionResolver, flush: (session: Session) => Promise<boolean>, sessions?: () => Session[]);
     /** 幂等追加决策事件并等待 durable ack。 */
-    appendDecision(decision: SealedDecision, context: {
-        sessionId: string;
-    }): Promise<void>;
+    appendDecision(decision: SealedDecision, context: SessionAuditContext): Promise<void>;
     /** 查询 Session log 中是否已存在该决策事件。 */
-    hasDecision(decisionId: string): Promise<boolean>;
+    hasDecision(decisionId: string, expectedHash?: string): Promise<boolean>;
     /** 幂等追加 selection-mode 事件并等待 durable ack。 */
-    appendSelectionMode(sessionId: string, data: GovernorSelectionModeEventData): Promise<void>;
+    appendSelectionMode(sessionId: string, data: GovernorSelectionModeEventData, route?: GovernorEventCarrierRoute): Promise<void>;
     /** 将 SealedDecision 映射为 Session Event 数据。 */
     private _toEventData;
 }
@@ -89,9 +94,7 @@ export declare class AuditPipeline {
      * @param context - 会话上下文（sessionId）。
      * @throws 任一步失败时抛 AUDIT_PERSIST_FAILED（fail closed，调用方不得分发 Provider）。
      */
-    commitDecision(decision: SealedDecision, context: {
-        sessionId: string;
-    }): Promise<void>;
+    commitDecision(decision: SealedDecision, context: SessionAuditContext): Promise<void>;
     /**
      * 追加 selection-mode 事件到 Session（durable ack 后生效）。
      *
@@ -104,7 +107,7 @@ export declare class AuditPipeline {
      * @param data - selection-mode 事件数据。
      * @throws sink 不可写时抛 AUDIT_PERSIST_FAILED。
      */
-    commitSelectionMode(sessionId: string, data: GovernorSelectionModeEventData): Promise<void>;
+    commitSelectionMode(sessionId: string, data: GovernorSelectionModeEventData, route?: GovernorEventCarrierRoute): Promise<void>;
     /**
      * 启动对账：扫描 pending 决策。
      * - Session Event 已存在且 hash 一致 → 补 commit。

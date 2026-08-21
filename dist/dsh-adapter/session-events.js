@@ -1,7 +1,42 @@
+import { parseRoute } from '../model/canonical.js';
 /** Governor Session Event 的 schema 版本（稳定码随版本演进，只增不改）。 */
 export const GOVERNOR_SESSION_EVENT_SCHEMA_VERSION = 1;
+/** 从新 carrier 或旧 governor/* envelope 读取统一决策 payload。 */
+export function governorDecisionFromEvent(event) {
+    if (event.type === 'governor/routing-decision')
+        return event.data;
+    return event.type === 'request/context' ? event.data.governorDecision : undefined;
+}
+/** 从新 carrier 或旧 governor/* envelope 读取统一选择状态 payload。 */
+export function governorSelectionFromEvent(event) {
+    if (event.type === 'governor/selection-mode')
+        return event.data;
+    return event.type === 'request/context' ? event.data.governorSelection : undefined;
+}
+/** 从明确 route、当前 context 或 header 中解析 carrier route。 */
+function resolveCarrierRoute(session, preferred) {
+    if (preferred !== undefined && preferred.provider.length > 0 && preferred.model.length > 0) {
+        return preferred;
+    }
+    const context = session.requestContext();
+    if (context !== undefined && context.provider.length > 0 && context.model.length > 0) {
+        return { provider: context.provider, model: context.model };
+    }
+    const config = session.requestHeader()?.config;
+    if (config !== undefined && config.provider.length > 0 && config.model.length > 0) {
+        return { provider: config.provider, model: config.model };
+    }
+    throw new Error('Governor request/context carrier requires a real provider/model route');
+}
+/** 仅在 route 未变时保留 DSH 已解析的 contextWindow。 */
+function matchingContextWindow(session, route) {
+    const context = session.requestContext();
+    return context?.provider === route.provider && context.model === route.model
+        ? context.contextWindow
+        : undefined;
+}
 /**
- * 幂等追加一条 `governor/routing-decision` 事件。
+ * 幂等追加一条携带 `governorDecision` 投影的 `request/context` 事件。
  *
  * 持久层幂等实现：append 前扫描 session log，若已存在相同 decisionId 的事件
  * 则直接返回该事件，不产生第二条逻辑记录；decisionId 不同但 hash 相同属于
@@ -12,18 +47,35 @@ export const GOVERNOR_SESSION_EVENT_SCHEMA_VERSION = 1;
  * @param data - 决策事件数据。
  * @returns 追加（或已存在）的事件。
  */
-export function appendGovernorDecision(session, data) {
+export function appendGovernorDecision(session, data, carrierRoute) {
     const existing = findGovernorDecision(session, data.decisionId);
     if (existing !== undefined) {
-        if (existing.data.decisionHash !== data.decisionHash) {
+        const existingData = existing.type === 'request/context' ? existing.data.governorDecision : existing.data;
+        if (existingData.decisionHash !== data.decisionHash) {
             throw new Error(`DECISION_CONFLICT: ${data.decisionId}`);
         }
+        if (existing.type === 'request/context')
+            return existing;
+        // 历史 governor/* seed 已有同 hash：不新增第二个逻辑事件。
         return existing;
     }
-    return session.append('governor/routing-decision', data);
+    const route = resolveCarrierRoute(session, carrierRoute ??
+        (data.selectedRoute !== undefined
+            ? parseRoute(data.selectedRoute)
+            : data.candidates?.[0]?.routeId !== undefined
+                ? parseRoute(data.candidates[0].routeId)
+                : data.excluded?.[0]?.routeId !== undefined
+                    ? parseRoute(data.excluded[0].routeId)
+                    : undefined));
+    const contextWindow = matchingContextWindow(session, route);
+    return session.append('request/context', {
+        ...route,
+        ...(contextWindow !== undefined ? { contextWindow } : {}),
+        governorDecision: data,
+    });
 }
 /**
- * 幂等追加一条 `governor/selection-mode` 事件。
+ * 幂等追加一条携带 `governorSelection` 投影的 `request/context` 事件。
  *
  * 同一 selectionRevision 的重复提交（保存确认重试、乱序回调）不产生第二条
  * 记录；revision 更大时正常追加。revision 回退由调用方（Host 持久化层）用
@@ -33,11 +85,21 @@ export function appendGovernorDecision(session, data) {
  * @param data - 选择模式事件数据。
  * @returns 追加（或已存在）的事件。
  */
-export function appendGovernorSelectionMode(session, data) {
+export function appendGovernorSelectionMode(session, data, carrierRoute) {
     const existing = findGovernorSelectionMode(session, data.selectionRevision);
-    if (existing !== undefined)
+    if (existing !== undefined) {
+        if (existing.type === 'request/context')
+            return existing;
         return existing;
-    return session.append('governor/selection-mode', data);
+    }
+    const route = resolveCarrierRoute(session, carrierRoute ??
+        (data.lastManualRoute !== undefined ? parseRoute(data.lastManualRoute) : undefined));
+    const contextWindow = matchingContextWindow(session, route);
+    return session.append('request/context', {
+        ...route,
+        ...(contextWindow !== undefined ? { contextWindow } : {}),
+        governorSelection: data,
+    });
 }
 /**
  * 在 session log 中查找指定 decisionId 的 Governor 决策事件。
@@ -48,7 +110,12 @@ export function appendGovernorSelectionMode(session, data) {
  */
 export function findGovernorDecision(session, decisionId) {
     for (const event of session.events) {
-        if (event.type === 'governor/routing-decision' && event.data.decisionId === decisionId) {
+        const data = governorDecisionFromEvent(event);
+        if (data?.decisionId !== decisionId)
+            continue;
+        if (event.type === 'governor/routing-decision')
+            return event;
+        if (event.type === 'request/context') {
             return event;
         }
     }
@@ -63,8 +130,12 @@ export function findGovernorDecision(session, decisionId) {
  */
 export function findGovernorSelectionMode(session, selectionRevision) {
     for (const event of session.events) {
-        if (event.type === 'governor/selection-mode' &&
-            event.data.selectionRevision === selectionRevision) {
+        const data = governorSelectionFromEvent(event);
+        if (data?.selectionRevision !== selectionRevision)
+            continue;
+        if (event.type === 'governor/selection-mode')
+            return event;
+        if (event.type === 'request/context') {
             return event;
         }
     }
@@ -82,16 +153,15 @@ export function findGovernorSelectionMode(session, selectionRevision) {
 export function restoreGovernorSelection(events) {
     let state;
     for (const event of events) {
-        if (event.type !== 'governor/selection-mode')
+        const data = governorSelectionFromEvent(event);
+        if (data === undefined)
             continue;
         state = {
-            mode: event.data.mode,
-            selectionRevision: event.data.selectionRevision,
-            ...(event.data.lastManualRoute !== undefined
-                ? { lastManualRoute: event.data.lastManualRoute }
-                : {}),
-            ...(event.data.lastDecisionConfigRevision !== undefined
-                ? { lastDecisionConfigRevision: event.data.lastDecisionConfigRevision }
+            mode: data.mode,
+            selectionRevision: data.selectionRevision,
+            ...(data.lastManualRoute !== undefined ? { lastManualRoute: data.lastManualRoute } : {}),
+            ...(data.lastDecisionConfigRevision !== undefined
+                ? { lastDecisionConfigRevision: data.lastDecisionConfigRevision }
                 : {}),
         };
     }

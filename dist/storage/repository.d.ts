@@ -123,6 +123,8 @@ export declare class GovernorRepository {
     listUserIds(): string[];
     /** 添加用户允许的 route。 */
     addUserAllow(userId: string, routeId: string): void;
+    /** 原子替换用户允许的 route 集合；调用方应置于配置事务内。 */
+    replaceUserAllow(userId: string, routeIds: readonly string[]): void;
     /** 获取用户允许的 route 列表。 */
     listUserAllow(userId: string): string[];
     /** 绑定 session 身份。 */
@@ -195,6 +197,10 @@ export declare class GovernorRepository {
     getGovernorKv(key: string): string | undefined;
     /** 写入 kv 值（已存在时不覆盖，幂等初始化）。 */
     setGovernorKvIfAbsent(key: string, value: string): void;
+    /**
+     * 写入运行时权威 KV。调用方必须在配置事务内同时提交 configRevision 与审计。
+     */
+    setGovernorKv(key: string, value: string): void;
     /** 幂等写入 attempt 状态（状态机收敛由调用方保证）。 */
     upsertAttemptState(requestId: string, fallbackIndex: number, state: AttemptState, providerRequestId?: string): void;
     /** 读取 attempt 状态。 */
@@ -207,6 +213,8 @@ export declare class GovernorRepository {
     queryUsage(opts: {
         userId?: string;
         provider?: string;
+        from?: string;
+        to?: string;
         usageKind?: 'conversation' | 'classifier';
         limit?: number;
     }): UsageEventRow[];

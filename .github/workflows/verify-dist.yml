@@ -36,8 +36,12 @@ jobs:
 
       - name: 校验 dist 与提交的产物一致
         run: |
-          if ! git diff --exit-code dist; then
+          # `git diff` 不会报告新生成但尚未纳入版本控制的文件；这类遗漏会让
+          # GitHub URL 安装拿到缺少入口文件的过期 dist。这里同时检查 tracked
+          # diff 和 untracked files，确保完整构建产物都已经提交。
+          if ! git diff --exit-code -- dist || [ -n "$(git ls-files --others --exclude-standard -- dist)" ]; then
             echo "::error::dist/ 与源码不一致：提交的构建产物已过期。"
             echo "::error::请本地执行 pnpm build，并将 dist/ 一并提交后重试。"
+            git status --short --untracked-files=all -- dist
             exit 1
           fi
