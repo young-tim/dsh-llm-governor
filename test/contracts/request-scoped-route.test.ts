@@ -12,6 +12,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import SessionStore from '@deepseek-ai/dsh-session';
+import JsonlPersistence from '@deepseek-ai/dsh-session-persistence-jsonl';
 import { Context } from '../../src/dsh-adapter/mod.js';
 import type { LlmModelInfo } from '../../src/dsh-adapter/mod.js';
 import { FakeLlmAdapter } from '../../src/dsh-adapter/fake-adapter.js';
@@ -64,6 +65,15 @@ async function bootWithSession(): Promise<SessionHarness> {
   );
   const disposeAdapter = ctx.llm.registerAdapter(providers, adapter);
   const dbDir = mkdtempSync(join(tmpdir(), 'dsh-gov-rs-'));
+  // 加载 JsonlPersistence + SessionStore（在 Governor 之前），使 ctx.sessions 可用
+  // 且 flush 返回 true（durable ack），审计双写协议在测试中完整闭环。
+  const jsonl = ctx.plugin(JsonlPersistence, {
+    root: join(dbDir, 'sessions'),
+    compression: 'none',
+  }) as unknown as { dispose: () => Promise<void> };
+  await jsonl;
+  const store = ctx.plugin(SessionStore) as unknown as { dispose: () => Promise<void> };
+  await store;
   const gov = ctx.plugin(
     GovernorPlugin as never,
     {
@@ -73,16 +83,15 @@ async function bootWithSession(): Promise<SessionHarness> {
     } as never,
   ) as unknown as { dispose: () => Promise<void> };
   await (gov as never as PromiseLike<unknown>);
-  const store = ctx.plugin(SessionStore);
-  await store;
   const session = ctx.sessions.create('rs-session-1', { meta: { cwd: dbDir } });
   return {
     ctx,
     session,
     governor: (ctx as unknown as { governor: GovernorService }).governor,
     dispose: async () => {
-      await store.dispose();
       await gov.dispose();
+      await store.dispose();
+      await jsonl.dispose();
       disposeAdapter();
       await llm.dispose();
       rmSync(dbDir, { recursive: true, force: true });
@@ -130,11 +139,11 @@ describe('rc.8 request-scoped route override seam', () => {
       // Auto 依据 rule 分类（coding）选择达标集合中低倍率模型。
       expect(config).toMatchObject({ provider: 'fake-provider' });
       expect(typeof config.model).toBe('string');
-      // request-scoped 证明：Session log 中没有 governor 或 request 级持久化写入；
+      // request-scoped 证明：Session log 不出现持久模型选择事件（governor/selection-mode）；
       // 模型持久选择属于 DSH selectModel 能力，Governor 不得越权代写。
+      // 审计双写协议写入 governor/routing-decision（决策审计轨迹）是预期行为。
       const persistedTypes = h.session.events.map((e) => e.type);
-      expect(persistedTypes).toEqual([]);
-      expect(h.session.seq).toBe(0);
+      expect(persistedTypes).not.toContain('governor/selection-mode');
     } finally {
       await h.dispose();
     }

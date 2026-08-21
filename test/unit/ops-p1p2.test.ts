@@ -425,6 +425,30 @@ describe('GOV-OPS-003 路由效果指标', () => {
         usageMissing: false,
         createdAt: '2026-08-21T00:00:00Z',
       });
+      // 分类器 usage：关联父请求（GOV-USAGE-001 双分母），计入 classifierCreditNanos
+      repo.insertUsageEvent({
+        requestId: 'req-1:cls',
+        fallbackIndex: 0,
+        sessionId: 's1',
+        usageKind: 'classifier',
+        parentRequestId: 'req-1',
+        turn: 1,
+        step: 1,
+        userId: 'u',
+        provider: 'p',
+        model: 'cheap',
+        routingMode: 'auto',
+        inputTokens: 100,
+        outputTokens: 50,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        creditNanos: 150_000n,
+        success: true,
+        latencyMs: 5,
+        attemptOrigin: 'provider',
+        usageMissing: false,
+        createdAt: '2026-08-21T00:00:01Z',
+      });
       const directory = new Map([
         ['p:cheap', { multiplierPpm: 500_000, quality: 70 }],
         ['p:best', { multiplierPpm: 2_000_000, quality: 95 }],
@@ -436,6 +460,9 @@ describe('GOV-OPS-003 路由效果指标', () => {
       expect(samples[0]!.finalRoute).toBe('p:cheap');
       expect(samples[0]!.qualityFirstRoute.routeId).toBe('p:best');
       expect(samples[0]!.attempts[0]!.totalTokens).toBe(1000);
+      // 分类器消耗计入 classifierCreditNanos，且不进入 conversation attempts
+      expect(samples[0]!.classifierCreditNanos).toBe(150_000n);
+      expect(samples[0]!.attempts).toHaveLength(1);
     } finally {
       dispose();
     }

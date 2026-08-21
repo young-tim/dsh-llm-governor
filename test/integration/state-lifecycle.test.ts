@@ -17,6 +17,7 @@ import { successScript, rateLimitScript } from '../../src/dsh-adapter/fake-adapt
 import { GovernorService } from '../../src/plugin/service.js';
 import type { GovernorPluginConfig } from '../../src/plugin/service.js';
 import { GovernorDatabase } from '../../src/storage/database.js';
+import type { SessionEventSink } from '../../src/plugin/audit-pipeline.js';
 
 const providers = ['fake-provider'];
 const models: LlmModelInfo[] = [
@@ -37,6 +38,13 @@ function stressConfig(): GovernorPluginConfig {
   } as GovernorPluginConfig;
 }
 
+/** 测试用成功 sink：append 全部 no-op，使审计双写协议在测试中闭环（不触碰真实 Session）。 */
+const okSink: SessionEventSink = {
+  appendDecision: async () => {},
+  appendSelectionMode: async () => {},
+  hasDecision: async () => false,
+};
+
 describe('GOV-STATE-001 请求状态生命周期压测', () => {
   it(
     '10,000 请求 / 峰值并发 100 / 混合失败与 Fallback：terminal 后残留为 0',
@@ -54,7 +62,9 @@ describe('GOV-STATE-001 请求状态生命周期压测', () => {
       const dbDir = mkdtempSync(join(tmpdir(), 'dsh-gov-stress-'));
       const db = new GovernorDatabase(join(dbDir, 'governor.db'));
       const repo = new (await import('../../src/storage/repository.js')).GovernorRepository(db);
-      const service = new GovernorService(ctx, stressConfig(), repo, {});
+      const service = new GovernorService(ctx, stressConfig(), repo, {
+        sessionEventSink: okSink,
+      });
       try {
         await service.refreshModelDirectory(
           () => ctx.llm.listProviders(),
@@ -149,4 +159,26 @@ describe('GOV-STATE-001 请求状态生命周期压测', () => {
       }
     },
   );
+});
+
+describe('GOV-STATE-001 兜底清理与内存模式分支', () => {
+  it('handleSessionDispose 清理仍在途的请求状态（terminal 前的会话销毁）', async () => {
+    // 无 repository 的轻量 service：recordAttempt 建立请求状态后直接销毁
+    const ctx = new Context();
+    const service = new GovernorService(ctx, stressConfig(), undefined, {});
+    const sessionId = 'dispose-branch';
+    service.recordAttempt(sessionId, 1, 1);
+    expect(service.getRequestId(sessionId, 1, 1)).toBeDefined();
+    service.handleSessionDispose(sessionId);
+    expect(service.getRequestId(sessionId, 1, 1)).toBeUndefined();
+    // 幂等：重复 dispose 不抛错
+    service.handleSessionDispose(sessionId);
+  });
+
+  it('无 repository 时 queryUsage 走内存聚合器（返回空列表）', async () => {
+    const ctx = new Context();
+    const service = new GovernorService(ctx, stressConfig(), undefined, {});
+    const usage = await service.queryUsage({});
+    expect(usage).toEqual([]);
+  });
 });

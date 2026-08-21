@@ -54,6 +54,11 @@ class FailingSink implements SessionEventSink {
     if (this.fail) throw new Error('session event append failed (injected)');
   }
 
+  /** 按开关抛错模拟 selection-mode 事件 append 失败。 */
+  async appendSelectionMode(): Promise<void> {
+    if (this.fail) throw new Error('session event append failed (injected)');
+  }
+
   /** 无事件存在。 */
   async hasDecision(): Promise<boolean> {
     return false;

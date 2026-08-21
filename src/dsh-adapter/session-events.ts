@@ -62,6 +62,8 @@ export interface GovernorRoutingDecisionEventData {
   excluded?: ReadonlyArray<{ routeId: string; reason: string }>;
   /** 路由计算结果；selected 不代表 Provider 已调用。 */
   outcome: 'selected' | 'rejected';
+  /** 所选路由（`provider:model`；outcome=selected 时存在，Trajectory 卡片显示）。 */
+  selectedRoute?: string;
   /** 决策使用的配置 revision。 */
   configRevision: number;
   /** 拒绝时的稳定错误码。 */

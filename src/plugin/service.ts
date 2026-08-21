@@ -24,7 +24,10 @@ import { sealDecision, uuidv7 } from '../routing/decision.js';
 import type { DecisionCause } from '../routing/decision.js';
 import { AuditPipeline, NullSessionEventSink } from './audit-pipeline.js';
 import type { SessionEventSink, ReconcileResult } from './audit-pipeline.js';
-import { restoreGovernorSelection } from '../dsh-adapter/session-events.js';
+import {
+  restoreGovernorSelection,
+  GOVERNOR_SESSION_EVENT_SCHEMA_VERSION,
+} from '../dsh-adapter/session-events.js';
 import { createClassifier } from '../classifier/index.js';
 import type {
   Classifier,
@@ -1107,7 +1110,7 @@ export class GovernorService extends Service {
       );
     }
 
-    // 获取或创建配置项
+    // 获取或创建配置项（只计算新值，不先改内存：持久化失败时内存与 SQLite 同为旧值）
     const cfg =
       this._models.get(routeId) ??
       ({
@@ -1116,50 +1119,56 @@ export class GovernorService extends Service {
         capabilities: [...existingSnap.capabilities],
         quality: { ...existingSnap.quality } as Record<string, number>,
       } satisfies ModelConfig);
-    this._models.set(routeId, cfg);
 
-    // 应用补丁
+    // 计算补丁结果（changedFields 与旧值比较）
     const changedFields: string[] = [];
     if (patch.enabled !== undefined && patch.enabled !== cfg.enabled) changedFields.push('enabled');
-    if (patch.enabled !== undefined) cfg.enabled = patch.enabled;
     if (patch.multiplier !== undefined && patch.multiplier !== cfg.multiplier)
       changedFields.push('multiplier');
-    if (patch.multiplier !== undefined) cfg.multiplier = patch.multiplier;
+    const newEnabled = patch.enabled !== undefined ? patch.enabled : (cfg.enabled ?? true);
+    const newMultiplier =
+      patch.multiplier !== undefined ? patch.multiplier : (cfg.multiplier ?? 1);
+    const newMultiplierPpm = Math.round(newMultiplier * 1_000_000);
 
-    // 更新模型目录中对应快照
-    const newEnabled = cfg.enabled ?? true;
-    const newMultiplierPpm = Math.round((cfg.multiplier ?? 1) * 1_000_000);
+    // 管理写入持久化：数据与新 revision、审计条目在同一 SQLite 事务提交
+    // （GOV-CONFIG-001：任一写入失败整体回滚，revision 不递增，内存不提交）。
+    let newRevision = currentRevision;
+    const repository = this._repository;
+    if (repository !== undefined) {
+      newRevision = repository.transaction(() => {
+        repository.upsertModelPolicy({
+          routeId,
+          provider: existingSnap.provider,
+          model: existingSnap.model,
+          enabled: newEnabled,
+          multiplierPpm: newMultiplierPpm,
+          capabilities: [...existingSnap.capabilities],
+          quality: { ...existingSnap.quality },
+        });
+        if (changedFields.length > 0) {
+          const next = currentRevision + 1;
+          repository.setConfigRevision(next);
+          repository.insertAuditEntry({
+            actor: options?.actor ?? 'local',
+            action: 'updateModel',
+            target: routeId,
+            changedFields,
+            oldRevision: currentRevision,
+            newRevision: next,
+            result: 'success',
+            createdAt: new Date().toISOString(),
+          });
+          return next;
+        }
+        return currentRevision;
+      });
+    }
+
+    // 持久化成功后才提交内存状态（模型配置与目录快照）
+    this._models.set(routeId, { ...cfg, enabled: newEnabled, multiplier: newMultiplier });
     this._modelDirectory = this._modelDirectory.map((s) =>
       s.routeId === routeId ? { ...s, enabled: newEnabled, multiplierPpm: newMultiplierPpm } : s,
     );
-
-    // 管理写入持久化：数据与新 revision、审计条目在同一 SQLite 事务提交
-    let newRevision = currentRevision;
-    if (this._repository !== undefined) {
-      this._repository.upsertModelPolicy({
-        routeId,
-        provider: existingSnap.provider,
-        model: existingSnap.model,
-        enabled: newEnabled,
-        multiplierPpm: newMultiplierPpm,
-        capabilities: [...existingSnap.capabilities],
-        quality: { ...existingSnap.quality },
-      });
-      if (changedFields.length > 0) {
-        newRevision = currentRevision + 1;
-        this._repository.setConfigRevision(newRevision);
-        this._repository.insertAuditEntry({
-          actor: options?.actor ?? 'local',
-          action: 'updateModel',
-          target: routeId,
-          changedFields,
-          oldRevision: currentRevision,
-          newRevision,
-          result: 'success',
-          createdAt: new Date().toISOString(),
-        });
-      }
-    }
 
     // 返回更新后的模型视图
     const updated = this._modelDirectory.find((s) => s.routeId === routeId);
@@ -1208,26 +1217,33 @@ export class GovernorService extends Service {
     }
     let newRevision = currentRevision;
     if (patch.monthlyCredits !== undefined && patch.monthlyCredits !== user.monthlyCredits) {
-      user.monthlyCredits = patch.monthlyCredits;
+      const newCredits = patch.monthlyCredits;
       // 管理写入持久化：数据与新 revision、审计条目在同一 SQLite 事务提交
+      // （GOV-CONFIG-001：任一写入失败整体回滚，revision 不递增，内存不提交）。
       if (this._repository !== undefined) {
-        this._repository.upsertUserPolicy(
-          userId,
-          BigInt(Math.max(0, Math.floor(user.monthlyCredits))) * 1_000_000_000n,
-        );
-        newRevision = currentRevision + 1;
-        this._repository.setConfigRevision(newRevision);
-        this._repository.insertAuditEntry({
-          actor: options?.actor ?? 'local',
-          action: 'updateUser',
-          target: userId,
-          changedFields: ['monthlyCredits'],
-          oldRevision: currentRevision,
-          newRevision,
-          result: 'success',
-          createdAt: new Date().toISOString(),
+        const repository = this._repository;
+        newRevision = repository.transaction(() => {
+          repository.upsertUserPolicy(
+            userId,
+            BigInt(Math.max(0, Math.floor(newCredits))) * 1_000_000_000n,
+          );
+          const next = currentRevision + 1;
+          repository.setConfigRevision(next);
+          repository.insertAuditEntry({
+            actor: options?.actor ?? 'local',
+            action: 'updateUser',
+            target: userId,
+            changedFields: ['monthlyCredits'],
+            oldRevision: currentRevision,
+            newRevision: next,
+            result: 'success',
+            createdAt: new Date().toISOString(),
+          });
+          return next;
         });
       }
+      // 持久化成功后才提交内存状态（失败路径内存与 SQLite 同为旧值）。
+      user.monthlyCredits = newCredits;
     }
     return {
       userId,
@@ -1448,6 +1464,22 @@ export class GovernorService extends Service {
     }
     const existing = this._selectionStates.get(sessionId);
     const nextRevision = current.selectionRevision + 1;
+    // 先追加持久 selection-mode 事件（durable ack 后才更新内存状态与 UI 确认）。
+    // 无 repository 时 audit 跳过（内存模式，不需要持久事件）。
+    await this._audit.commitSelectionMode(sessionId, {
+      schemaVersion: GOVERNOR_SESSION_EVENT_SCHEMA_VERSION,
+      selectionRevision: nextRevision,
+      mode,
+      ...(mode === 'manual' && options?.lastManualRoute !== undefined
+        ? { lastManualRoute: options.lastManualRoute }
+        : existing?.lastManualRoute !== undefined
+          ? { lastManualRoute: existing.lastManualRoute }
+          : {}),
+      ...(existing?.lastDecisionConfigRevision !== undefined
+        ? { lastDecisionConfigRevision: existing.lastDecisionConfigRevision }
+        : {}),
+      changedAt: Date.now(),
+    });
     this._selectionStates.set(sessionId, {
       mode,
       selectionRevision: nextRevision,

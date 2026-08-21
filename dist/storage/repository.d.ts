@@ -102,6 +102,13 @@ export type AttemptState = 'not_dispatched' | 'dispatch_started' | 'completed' |
 export declare class GovernorRepository {
     private readonly _db;
     constructor(db: GovernorDatabase);
+    /**
+     * 在单个 SQLite 事务中执行写入（GOV-CONFIG-001 AC 1/AC 7：数据、
+     * 新 revision 与审计条目必须同事务提交或同时回滚）。
+     * @param fn - 事务体（失败自动 ROLLBACK 并向上抛出）。
+     * @returns fn 的返回值。
+     */
+    transaction<T>(fn: () => T): T;
     /** 插入或更新模型策略。 */
     upsertModelPolicy(row: ModelPolicyRow): void;
     /** 获取全部模型策略。 */

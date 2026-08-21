@@ -10,9 +10,11 @@
 >   反向验证红→绿）、状态压测（`state-lifecycle.test.ts`，10k 请求/并发 100）、
 >   会话选择模式（`selection-mode.test.ts`）、compatApi（`compat-api.test.ts`
 >   + `plugin-apply.test.ts`）、P1/P2 运营（`ops-p1p2.test.ts`，全部含 GOV ID）。
-> - 全量 40 files / 717 tests 全过、skipped 0；coverage
->   stmts 95.89% / branches 87.84% / funcs 96.67% / lines 96.85%
->   （四项均高于优化前基线）。
+> - 全量 41 files / 750 tests 全过、skipped 0；coverage
+>   stmts 96.00% / branches 88.59% / funcs 97.15% / lines 97.02%
+>   （四项均高于优化前基线 94.75/87.63/96.01/95.66；含复审判定整改——
+>   Trajectory 渲染实现、Auto selector 注册接线、配置写入单事务与
+>   超时/.gitignore 违规撤销，见 PROGRESS.md「复审判定整改」）。
 
 ## 1. 交付策略
 

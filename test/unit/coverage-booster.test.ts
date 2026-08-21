@@ -12,7 +12,9 @@ import {
   SessionStoreSink,
   NullSessionEventSink,
   AuditPipeline,
+  selectionFromSession,
 } from '../../src/plugin/audit-pipeline.js';
+import { appendGovernorSelectionMode } from '../../src/dsh-adapter/session-events.js';
 import { sealDecision } from '../../src/routing/decision.js';
 import { GovernorDatabase } from '../../src/storage/database.js';
 import { GovernorRepository } from '../../src/storage/repository.js';
@@ -100,11 +102,14 @@ describe('GOV-TRACE-001 SessionStoreSink（内存 Session 的完整双写）', (
     await store.dispose();
   });
 
-  it('NullSessionEventSink：append 直接确认，hasDecision 恒 false', async () => {
+  it('NullSessionEventSink：append 严格 fail-closed 抛 AUDIT_PERSIST_FAILED', async () => {
     const sink = new NullSessionEventSink();
-    await expect(
-      sink.appendDecision(decision('req-n'), { sessionId: 's' }),
-    ).resolves.toBeUndefined();
+    await expect(sink.appendDecision(decision('req-n'), { sessionId: 's' })).rejects.toMatchObject({
+      code: 'AUDIT_PERSIST_FAILED',
+    });
+    await expect(sink.appendSelectionMode('s', {} as never)).rejects.toMatchObject({
+      code: 'AUDIT_PERSIST_FAILED',
+    });
     await expect(sink.hasDecision('req-n:0')).resolves.toBe(false);
   });
 
@@ -149,9 +154,16 @@ describe('GOV-TRACE-001 SessionStoreSink（内存 Session 的完整双写）', (
   });
 });
 
+/** 测试用成功 sink：append 直接确认（测试 SQLite 行为时不关心 Session Event）。 */
+const okSink = {
+  appendDecision: async () => {},
+  appendSelectionMode: async () => {},
+  hasDecision: async () => false,
+};
+
 describe('GOV-TRACE-001 AuditPipeline 对账分支', () => {
   it('无 repository 时 reconcile 空结果；sink 不可写时 pending 保留', async () => {
-    // 无 repository：空结果
+    // 无 repository：空结果（commitDecision 跳过，不触发 sink）
     const noRepo = new AuditPipeline(undefined, new NullSessionEventSink());
     expect(await noRepo.reconcile()).toEqual({ committed: 0, pending: 0, conflicts: [] });
     await expect(noRepo.commitDecision(decision('r'), { sessionId: 's' })).resolves.toBeUndefined();
@@ -162,6 +174,9 @@ describe('GOV-TRACE-001 AuditPipeline 对账分支', () => {
     const repo = new GovernorRepository(db);
     const failingSink = {
       appendDecision: async () => {
+        throw new Error('session not writable');
+      },
+      appendSelectionMode: async () => {
         throw new Error('session not writable');
       },
       hasDecision: async () => false,
@@ -184,6 +199,9 @@ describe('GOV-TRACE-001 AuditPipeline 对账分支', () => {
       appendDecision: async () => {
         throw new Error('append failed');
       },
+      appendSelectionMode: async () => {
+        throw new Error('append failed');
+      },
       hasDecision: async () => false,
     };
     const pipeline = new AuditPipeline(repo, failingSink);
@@ -195,7 +213,7 @@ describe('GOV-TRACE-001 AuditPipeline 对账分支', () => {
       code: 'AUDIT_PERSIST_FAILED',
     });
     // 幂等重入：已 committed 的决策再次 commit 成功（已 committed 分支）
-    const okPipeline = new AuditPipeline(repo, new NullSessionEventSink());
+    const okPipeline = new AuditPipeline(repo, okSink);
     await okPipeline.commitDecision(decision('br-3'), { sessionId: 's' });
     await okPipeline.commitDecision(decision('br-3'), { sessionId: 's' });
     db.close();
@@ -214,12 +232,134 @@ describe('GOV-TRACE-001 AuditPipeline 对账分支', () => {
        causes_json = NULL, changed_fields_json = NULL, selection_mode = NULL,
        effective_strategy = NULL WHERE decision_id = 'br-4:0'`,
     );
-    const pipeline = new AuditPipeline(repo, new NullSessionEventSink());
+    const pipeline = new AuditPipeline(repo, okSink);
     const result = await pipeline.reconcile();
     expect(result.committed).toBe(1);
     expect(result.pending).toBe(0);
     // 已补齐 committed
     expect(repo.getDecisions('br-4')[0]!.auditState).toBe('committed');
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('reconcile：Session Event 已存在时跳过 append 直接补 commit', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'gov-audit-br5-'));
+    const db = new GovernorDatabase(join(dir, 'a.db'));
+    const repo = new GovernorRepository(db);
+    repo.insertSealedDecision(decision('br-5'), { sessionId: 's' });
+    // 已存在（幂等 append 已写过）：append 不应被再次调用
+    const existsSink = {
+      appendDecision: async () => {
+        throw new Error('should not append when event exists');
+      },
+      appendSelectionMode: async () => {},
+      hasDecision: async () => true,
+    };
+    const pipeline = new AuditPipeline(repo, existsSink);
+    const result = await pipeline.reconcile();
+    expect(result.committed).toBe(1);
+    expect(result.pending).toBe(0);
+    expect(repo.getDecisions('br-5')[0]!.auditState).toBe('committed');
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('reconcile：CAS 标记失败时保留 pending（并发写入竞争）', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'gov-audit-br6-'));
+    const db = new GovernorDatabase(join(dir, 'a.db'));
+    const repo = new GovernorRepository(db);
+    repo.insertSealedDecision(decision('br-6'), { sessionId: 's' });
+    const pipeline = new AuditPipeline(repo, okSink);
+    // 注入 CAS 失败：另一进程已并发标记（changes = 0）
+    const original = repo.markDecisionCommitted.bind(repo);
+    repo.markDecisionCommitted = () => false;
+    const result = await pipeline.reconcile();
+    expect(result.pending).toBe(1);
+    expect(result.committed).toBe(0);
+    repo.markDecisionCommitted = original;
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('commitDecision：CAS 失败且行未 committed 时抛 AUDIT_PERSIST_FAILED', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'gov-audit-br7-'));
+    const db = new GovernorDatabase(join(dir, 'a.db'));
+    const repo = new GovernorRepository(db);
+    const pipeline = new AuditPipeline(repo, okSink);
+    repo.markDecisionCommitted = () => false;
+    await expect(
+      pipeline.commitDecision(decision('br-7'), { sessionId: 's' }),
+    ).rejects.toMatchObject({
+      code: 'AUDIT_PERSIST_FAILED',
+    });
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('selectionFromSession：从 Session log 重建会话选择状态（restore 接线面）', async () => {
+    const ctx = new Context();
+    const store = ctx.plugin(SessionStore);
+    await store;
+    const session = ctx.sessions.create('sel-1', { meta: { cwd: process.cwd() } });
+    // 无事件时返回 undefined（调用方按全局默认初始化）
+    expect(selectionFromSession(session)).toBeUndefined();
+    appendGovernorSelectionMode(session, {
+      schemaVersion: 1,
+      selectionRevision: 1,
+      mode: 'auto',
+      changedAt: Date.now(),
+    });
+    appendGovernorSelectionMode(session, {
+      schemaVersion: 1,
+      selectionRevision: 2,
+      mode: 'manual',
+      lastManualRoute: 'p:m',
+      changedAt: Date.now(),
+    });
+    // 最新事件胜出（revision 2 的 manual + lastManualRoute）
+    expect(selectionFromSession(session)).toEqual({
+      mode: 'manual',
+      selectionRevision: 2,
+      lastManualRoute: 'p:m',
+    });
+    await store.dispose();
+  });
+
+  it('commitSelectionMode：sink 抛普通错误时包装为 AUDIT_PERSIST_FAILED', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'gov-audit-br8-'));
+    const db = new GovernorDatabase(join(dir, 'a.db'));
+    const repo = new GovernorRepository(db);
+    const plainErrorSink = {
+      appendDecision: async () => {},
+      appendSelectionMode: async () => {
+        throw new Error('plain failure');
+      },
+      hasDecision: async () => false,
+    };
+    const pipeline = new AuditPipeline(repo, plainErrorSink);
+    await expect(
+      pipeline.commitSelectionMode('s1', {
+        schemaVersion: 1,
+        selectionRevision: 1,
+        mode: 'auto',
+        changedAt: Date.now(),
+      }),
+    ).rejects.toMatchObject({ code: 'AUDIT_PERSIST_FAILED' });
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('reconcile：无 hash 的旧迁移行保留 pending（人工诊断，不自动补齐）', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'gov-audit-br9-'));
+    const db = new GovernorDatabase(join(dir, 'a.db'));
+    const repo = new GovernorRepository(db);
+    repo.insertSealedDecision(decision('br-9'), { sessionId: 's' });
+    // 模拟 v1 旧迁移行：decision_hash 缺失
+    db.exec(`UPDATE routing_decisions SET decision_hash = NULL WHERE decision_id = 'br-9:0'`);
+    const pipeline = new AuditPipeline(repo, okSink);
+    const result = await pipeline.reconcile();
+    expect(result.pending).toBe(1);
+    expect(result.committed).toBe(0);
     db.close();
     rmSync(dir, { recursive: true, force: true });
   });

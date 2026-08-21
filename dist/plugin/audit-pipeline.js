@@ -1,5 +1,5 @@
 import { RoutingError } from '../routing/types.js';
-import { appendGovernorDecision, findGovernorDecision, GOVERNOR_SESSION_EVENT_SCHEMA_VERSION, restoreGovernorSelection, } from '../dsh-adapter/session-events.js';
+import { appendGovernorDecision, appendGovernorSelectionMode, findGovernorDecision, GOVERNOR_SESSION_EVENT_SCHEMA_VERSION, restoreGovernorSelection, } from '../dsh-adapter/session-events.js';
 /**
  * 内存/测试用 Session Event sink：向给定 Session 幂等 append 并 flush。
  *
@@ -34,6 +34,18 @@ export class SessionStoreSink {
         }
         return false;
     }
+    /** 幂等追加 selection-mode 事件并等待 durable ack。 */
+    async appendSelectionMode(sessionId, data) {
+        const session = this._resolve(sessionId);
+        if (session === undefined) {
+            throw new RoutingError('AUDIT_PERSIST_FAILED', `session ${sessionId} not live for selection-mode append`);
+        }
+        appendGovernorSelectionMode(session, data);
+        const participated = await this._flush(session);
+        if (!participated) {
+            throw new RoutingError('AUDIT_PERSIST_FAILED', `no durability listener participated for session ${sessionId}`);
+        }
+    }
     /** 将 SealedDecision 映射为 Session Event 数据。 */
     _toEventData(decision) {
         return {
@@ -49,7 +61,7 @@ export class SessionStoreSink {
             changedFields: [...decision.changedFields],
             selectionMode: decision.selectionMode,
             effectiveStrategy: decision.effectiveStrategy,
-            ...(decision.classifier !== undefined ? { classifier: decision.classifier } : {}),
+            ...(decision.classifier !== undefined ? { classification: decision.classifier } : {}),
             ...(decision.minimumQuality !== undefined ? { minimumQuality: decision.minimumQuality } : {}),
             candidates: decision.candidateTruncation.items.map((c) => ({
                 routeId: c.routeId,
@@ -61,6 +73,7 @@ export class SessionStoreSink {
                 reason: e.reason,
             })),
             outcome: decision.outcome,
+            ...(decision.selectedRoute !== undefined ? { selectedRoute: decision.selectedRoute } : {}),
             configRevision: decision.configRevision,
             ...(decision.errorCode !== undefined ? { errorCode: decision.errorCode } : {}),
             occurredAt: Date.now(),
@@ -68,12 +81,21 @@ export class SessionStoreSink {
     }
 }
 /**
- * 默认 sink：rc.8 SEAM-1/2 阻断下不写 Session Event（fail safe，不破坏
- * DSH Session 持久化恢复），durable ack 直接满足，SQLite 双阶段照常。
+ * 严格 fail-closed sink：不写 Session Event 时直接抛 AUDIT_PERSIST_FAILED。
+ *
+ * 生产环境必须通过 mod.ts 注入 SessionStoreSink 以接通真实 DSH Session；
+ * 此 sink 仅用于无 repository（audit 跳过）或显式故障注入场景。
+ * 不再静默确认——不写轨迹就不能标 committed（GOV-TRACE-001 fail-closed）。
  */
 export class NullSessionEventSink {
-    /** 直接确认（无 Session Event 写入；见 BLOCKED.md B-1）。 */
-    async appendDecision() { }
+    /** 无 Session 写入：严格 fail-closed，抛错而非静默确认。 */
+    async appendDecision() {
+        throw new RoutingError('AUDIT_PERSIST_FAILED', 'NullSessionEventSink cannot provide durable ack — no Session Event written');
+    }
+    /** selection-mode 同样 fail-closed。 */
+    async appendSelectionMode() {
+        throw new RoutingError('AUDIT_PERSIST_FAILED', 'NullSessionEventSink cannot provide durable ack — no selection-mode event written');
+    }
     /** 无事件写入，永远返回 false（对账走 SQLite 自身状态）。 */
     async hasDecision() {
         return false;
@@ -118,6 +140,30 @@ export class AuditPipeline {
             if (row?.auditState !== 'committed') {
                 throw new RoutingError('AUDIT_PERSIST_FAILED', `decision ${decision.decisionId} compare-and-set to committed failed`);
             }
+        }
+    }
+    /**
+     * 追加 selection-mode 事件到 Session（durable ack 后生效）。
+     *
+     * selection-mode 事件是会话控制状态投影（governor.session.v1），不需要 SQLite
+     * 审计行——它由 Session Event log 自身持久化。无 repository（内存模式）时跳过
+     * （与 commitDecision 一致）；有 repository 时 sink 不可写 fail-closed
+     * （抛 AUDIT_PERSIST_FAILED），调用方不得确认 UI 状态。
+     *
+     * @param sessionId - 会话 ID。
+     * @param data - selection-mode 事件数据。
+     * @throws sink 不可写时抛 AUDIT_PERSIST_FAILED。
+     */
+    async commitSelectionMode(sessionId, data) {
+        if (this._repository === undefined)
+            return;
+        try {
+            await this._sink.appendSelectionMode(sessionId, data);
+        }
+        catch (err) {
+            if (err instanceof RoutingError && err.code === 'AUDIT_PERSIST_FAILED')
+                throw err;
+            throw new RoutingError('AUDIT_PERSIST_FAILED', `selection-mode event append failed for session ${sessionId}: ${String(err)}`);
         }
     }
     /**

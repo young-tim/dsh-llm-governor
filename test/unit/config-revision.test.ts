@@ -119,4 +119,68 @@ describe('GOV-CONFIG-001 配置权威与 Revision', () => {
       h.dispose();
     }
   });
+
+  it('单事务：updateModel 审计写失败时数据与 revision 整体回滚，内存不提交', async () => {
+    const h = await bootService(baseConfig());
+    try {
+      await h.service.refreshModelDirectory(
+        () => [{ id: 'p' }],
+        () => [
+          { provider: 'p', id: 'a' },
+          { provider: 'p', id: 'b' },
+        ],
+      );
+      const before = h.service.configRevision;
+      // 注入审计写失败：事务内第三个写入抛错
+      const original = h.repo.insertAuditEntry.bind(h.repo);
+      h.repo.insertAuditEntry = () => {
+        throw new Error('audit write failed');
+      };
+      await expect(h.service.updateModel('p:a', { multiplier: 2 })).rejects.toThrow(
+        'audit write failed',
+      );
+      h.repo.insertAuditEntry = original;
+      // SQLite：revision 未递增；模型策略行保持旧值（upsert 与 setConfigRevision 一并回滚）
+      expect(h.repo.getConfigRevision()).toBe(before);
+      const row = h.repo.listModelPolicies().find((r) => r.routeId === 'p:a');
+      expect(row!.multiplierPpm).toBe(1_000_000);
+      // 内存：目录快照未被提交（multiplierPpm 仍为初始 1_000_000）
+      const snapshot = (await h.service.listModels()).find((m) => m.routeId === 'p:a');
+      expect(snapshot!.multiplierPpm).toBe(1_000_000);
+      // 恢复后重试同一写入：changedFields 仍包含 multiplier（内存未抢跑），revision 正常递增
+      const retried = await h.service.updateModel('p:a', { multiplier: 2 });
+      expect(retried.configRevision).toBe(before + 1);
+      expect(retried.multiplierPpm).toBe(2_000_000);
+      const audit = await h.service.listAuditEntries(10);
+      expect(audit).toHaveLength(1);
+      expect(audit[0]!.changedFields).toEqual(['multiplier']);
+    } finally {
+      h.dispose();
+    }
+  });
+
+  it('单事务：updateUser 审计写失败时额度与 revision 整体回滚，内存不提交', async () => {
+    const h = await bootService({ ...baseConfig(), users: { u1: { monthly_credits: 10 } } });
+    try {
+      const before = h.service.configRevision;
+      const original = h.repo.insertAuditEntry.bind(h.repo);
+      h.repo.insertAuditEntry = () => {
+        throw new Error('audit write failed');
+      };
+      await expect(h.service.updateUser('u1', { monthlyCredits: 99 })).rejects.toThrow(
+        'audit write failed',
+      );
+      h.repo.insertAuditEntry = original;
+      // SQLite：revision 未递增；内存：monthlyCredits 未提交（仍为 10 → 视图保持旧值）
+      expect(h.repo.getConfigRevision()).toBe(before);
+      const users = await h.service.listUsers();
+      expect(users.find((u) => u.userId === 'u1')!.monthlyCredits).toBe(10);
+      // 恢复后重试成功
+      await h.service.updateUser('u1', { monthlyCredits: 99 });
+      expect(h.service.configRevision).toBe(before + 1);
+      expect((await h.service.listUsers()).find((u) => u.userId === 'u1')!.monthlyCredits).toBe(99);
+    } finally {
+      h.dispose();
+    }
+  });
 });

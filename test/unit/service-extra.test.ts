@@ -210,6 +210,26 @@ describe('GovernorService/updateUser', () => {
     }
   });
 
+  it('expectedRevision 不匹配抛 REVISION_CONFLICT，匹配时成功', async () => {
+    const h = await bootFake(
+      providers,
+      models,
+      successScript('hi', { inputTokens: 1, outputTokens: 1 }),
+      defaultConfig(),
+    );
+    try {
+      const current = h.governor!.configRevision;
+      await expect(
+        h.governor!.updateUser('local', { monthlyCredits: 5 }, { expectedRevision: current + 9 }),
+      ).rejects.toMatchObject({ code: 'REVISION_CONFLICT' });
+      await expect(
+        h.governor!.updateUser('local', { monthlyCredits: 5 }, { expectedRevision: current }),
+      ).resolves.toMatchObject({ monthlyCredits: 5 });
+    } finally {
+      await h.dispose();
+    }
+  });
+
   it('更新后 listUsers 反映新额度', async () => {
     const h = await bootFake(
       providers,

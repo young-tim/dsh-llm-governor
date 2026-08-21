@@ -23,6 +23,7 @@ import {
   GOVERNOR_SESSION_EVENT_SCHEMA_VERSION,
 } from '../../src/dsh-adapter/session-events.js';
 import SessionStore from '@deepseek-ai/dsh-session';
+import type { SessionEventSink } from '../../src/plugin/audit-pipeline.js';
 
 const providers = ['fake-provider'];
 const models: LlmModelInfo[] = [
@@ -43,6 +44,13 @@ function config(): GovernorPluginConfig {
   } as GovernorPluginConfig;
 }
 
+/** 测试用成功 sink：append 全部 no-op，使审计双写协议在测试中闭环（不触碰真实 Session）。 */
+const okSink: SessionEventSink = {
+  appendDecision: async () => {},
+  appendSelectionMode: async () => {},
+  hasDecision: async () => false,
+};
+
 /** 启动带 SQLite 的 service。 */
 async function boot(): Promise<{ service: GovernorService; dispose: () => void }> {
   const ctx = new Context();
@@ -57,7 +65,7 @@ async function boot(): Promise<{ service: GovernorService; dispose: () => void }
   const dbDir = mkdtempSync(join(tmpdir(), 'dsh-gov-select-'));
   const db = new GovernorDatabase(join(dbDir, 'governor.db'));
   const repo = new GovernorRepository(db);
-  const service = new GovernorService(ctx, config(), repo, {});
+  const service = new GovernorService(ctx, config(), repo, { sessionEventSink: okSink });
   await service.refreshModelDirectory(
     () => ctx.llm.listProviders(),
     (p) => ctx.llm.listModels(p),

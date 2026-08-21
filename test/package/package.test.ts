@@ -39,6 +39,8 @@ function listFilesRecursive(root: string, base = ''): string[] {
   return out;
 }
 
+// beforeAll 执行 tsc 编译 + pnpm pack + tar 解压（实测合计约 3 秒），
+// 默认 hook 超时即可覆盖，不得放宽超时规避门禁失败。
 beforeAll(() => {
   // 1. 先运行 tsc 确保 dist/ 存在（绕过 pnpm deps status check）
   execSync('npx tsc -p tsconfig.json', { cwd: projectRoot, stdio: 'inherit' });

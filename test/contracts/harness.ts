@@ -1,5 +1,7 @@
 /**
  * 合同测试 harness：启动真实 Cordis Context + LlmRuntime + FakeLlmAdapter。
+ * 加载 JsonlPersistence + SessionStore 以提供真实 Session Event 双写环境
+ * （flush 返回 true = durable ack），使审计管线在测试中完整闭环。
  * 只使用临时上下文，不触碰真实 DSH_HOME/Profile/Provider。
  */
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -11,8 +13,10 @@ import type { LlmModelInfo } from '../../src/dsh-adapter/mod.js';
 import { FakeLlmAdapter } from '../../src/dsh-adapter/fake-adapter.js';
 import type { FakeStreamScript } from '../../src/dsh-adapter/fake-adapter.js';
 import { GovernorPlugin } from '../../src/plugin/mod.js';
-import type { GovernorPluginConfig } from '../../src/plugin/mod.js';
+import type { GovernorPluginConfig } from '../../src/plugin/service.js';
 import { GovernorService } from '../../src/plugin/service.js';
+import SessionStore from '@deepseek-ai/dsh-session';
+import JsonlPersistence from '@deepseek-ai/dsh-session-persistence-jsonl';
 
 /** 测试 harness 的句柄。 */
 export interface FakeHarness {
@@ -56,12 +60,39 @@ export async function bootFake(
   let govFiber: { dispose: () => Promise<void> } | undefined;
   let governor: GovernorService | undefined;
   let dbDir: string | undefined;
+  let storeFiber: { dispose: () => Promise<void> } | undefined;
+  let jsonlFiber: { dispose: () => Promise<void> } | undefined;
   if (governorConfig) {
     // 默认使用临时 SQLite 文件，证明运行时持久化接线且不触碰真实 DSH_HOME。
     // schema_version 由 harness 统一补齐（严格 Schema 校验在插件入口执行）。
-    const dbPath =
-      opts?.dbPath ??
-      join((dbDir = mkdtempSync(join(tmpdir(), 'dsh-gov-harness-'))), 'governor.db');
+    dbDir = mkdtempSync(join(tmpdir(), 'dsh-gov-harness-'));
+    const dbPath = opts?.dbPath ?? join(dbDir, 'governor.db');
+
+    // 加载 JsonlPersistence + SessionStore（在 Governor 之前），使 ctx.sessions 可用
+    // 且 flush 返回 true（durable ack），审计双写协议在测试中完整闭环。
+    jsonlFiber = ctx.plugin(JsonlPersistence, {
+      root: join(dbDir, 'sessions'),
+      compression: 'none',
+    }) as unknown as { dispose: () => Promise<void> };
+    await jsonlFiber;
+    storeFiber = ctx.plugin(SessionStore) as unknown as { dispose: () => Promise<void> };
+    await storeFiber;
+
+    // 测试便利：patch ctx.sessions.get 使其在 session 不存在时自动创建。
+    // 真实 DSH 环境中 session 由 host 在 agent 事件前创建；测试直接调用
+    // selectModel 时 session 可能尚未创建，auto-create 简化测试编写。
+    const sessions = (
+      ctx as unknown as {
+        sessions: { get(id: string): unknown; create(id: string, opts?: unknown): unknown };
+      }
+    ).sessions;
+    const originalGet = sessions.get.bind(sessions);
+    sessions.get = (id: string) => {
+      const existing = originalGet(id);
+      if (existing !== undefined) return existing;
+      return sessions.create(id, { meta: { cwd: dbDir } });
+    };
+
     govFiber = ctx.plugin(
       GovernorPlugin as never,
       {
@@ -82,6 +113,8 @@ export async function bootFake(
     dispose: async () => {
       disposeAdapter();
       if (govFiber) await govFiber.dispose();
+      if (storeFiber) await storeFiber.dispose();
+      if (jsonlFiber) await jsonlFiber.dispose();
       await llmFiber.dispose();
       if (dbDir !== undefined) rmSync(dbDir, { recursive: true, force: true });
     },

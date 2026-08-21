@@ -136,17 +136,47 @@
       lines 96.85%（四项均高于基线 94.75/87.63/96.01/95.66）
   - 判卷文件零改动：OPTIMIZATION_REQUIREMENTS.md / REQUIREMENTS_BASELINE.md /
     AGENTS.md 未动（git status 仅预期新增/修改文件）。
+- [x] 复审判定整改（2026-08-21，复验不通过项修复）：
+  - 判定：717/717、0 skipped 通过，但覆盖率 94.72/87.06/95.82 低于目标；
+    Trajectory 无渲染实现、Auto selector 未注册；三处硬性违规
+    （package 测试超时放宽 120s、.gitignore 忽略 dist/**、配置写入非单事务）。
+  - 修复 1（硬性违规）：撤销 vitest.config.ts 的 hookTimeout 120000 与
+    package.test.ts 的 beforeAll 120_000（实测 tsc 1.3s + pack 1.7s，默认
+    超时足够）；移除 .gitignore 的 dist/（dist 为提交产物，忽略会绕过
+    dist 白名单——client-registration.js 曾因此不可见）。
+  - 修复 2（单事务）：repository 新增 transaction() 透传，
+    updateModel/updateUser 的数据 + revision + 审计条目在同一 SQLite
+    事务提交，内存状态改为事务成功后提交（失败整体回滚、revision
+    不递增）；config-revision.test.ts 新增 2 例回滚红证。
+  - 修复 3（Trajectory 渲染 + Auto selector 注册）：
+    src/plugin/client-registration.ts 重写为契约完整实现——类型取自
+    @deepseek-ai/dsh-client-runtime/client（tsc 编译期校验）：
+    ConversationNodeDefinition 含 buildViewNode 渲染实现（GOV-TRACE-002
+    摘要 + 抽屉视图模型、旧 schema 降级「未知」、中英文标签资源）；
+    ConversationViewDefinition 增量构建器；governorModelSeatSpec/Inject
+    经 slots 注册面接线（选择 Auto 调用与 /model auto 同一 Host 方法）；
+    registerClientSurface 经 ctx.get() 可选服务面读取（Cordis Proxy
+    直接读属性会抛错，实测修复）；事件数据补 selectedRoute、修正
+    classification 字段名。
+  - 修复 4（覆盖率）：新增 test/unit/client-registration.test.ts（22）、
+    coverage-booster/service-extra/state-lifecycle/ops-p1p2 补 reconcile/
+    CAS/清理/分类器样本分支。
+  - 整改后完整明卷：typecheck/lint/format:check/build 全过；
+    pnpm test 41 files / 750 tests 全过 skipped 0；coverage
+    stmts 96.00% / branches 88.59% / funcs 97.15% / lines 97.02%
+    （四项均高于基线 94.75/87.63/96.01/95.66 与前次明卷 95.89/87.84/
+    96.67/96.85）。
 
 ## AC 勾验索引（测试文件定位）
 
 | GOV ID | 关键 AC 证据 |
 | --- | --- |
 | GOV-TRACE-001 | test/integration/audit-pipeline.test.ts（双写/反向验证/对账）；test/unit/decision.test.ts（截断/trigger/JCS hash）；test/unit/coverage-booster.test.ts（SessionStoreSink/NullSink/reconcile 分支）；test/contracts/session-event-seams.test.ts（幂等 append/DECISION_CONFLICT）。阻断项：AC 6/9/10 持久化往返见 B-1 |
-| GOV-TRACE-002 | 事件数据层完整（session-events.ts 类型 + Decision 含候选/排除/分类/revision）；浏览器卡片注册受 B-3 阻断 |
+| GOV-TRACE-002 | test/unit/client-registration.test.ts（22：卡片状态/视图模型/buildViewNode/视图构建器/标签资源/旧 schema 降级）；事件数据层完整（session-events.ts 类型含 selectedRoute）；浏览器组件挂载受 B-3 阻断 |
 | GOV-DECISION-001 | test/unit/storage.test.ts（统一视图/DECISION_CONFLICT/CAS/分页/migration unknown）；test/integration/fallback.test.ts（requestId attempt 集合/fallbackIndex 连续）；test/integration/audit-pipeline.test.ts（重启对账） |
-| GOV-SELECT-001 | test/integration/selection-mode.test.ts（8：默认/切换/冲突/cause/restore/fork/lastManualRoute/每 step 重决策）；test/contracts/request-scoped-route.test.ts（request-scoped 不改持久模型） |
+| GOV-SELECT-001 | test/integration/selection-mode.test.ts（8：默认/切换/冲突/cause/restore/fork/lastManualRoute/每 step 重决策）；test/contracts/request-scoped-route.test.ts（request-scoped 不改持久模型）；test/unit/client-registration.test.ts（selector spec/注入面/selectAuto 同一 Host 方法/接线） |
 | GOV-UI-001 | test/integration/compat-api.test.ts（默认零监听/loopback/token）；test/integration/plugin-apply.test.ts（compatApi 完整路径/[::1]/token 落盘）；test/package/install.test.ts（webServer 前缀） |
-| GOV-CONFIG-001 | test/unit/config-revision.test.ts（bootstrap/递增/no-op/冲突/审计） |
+| GOV-CONFIG-001 | test/unit/config-revision.test.ts（bootstrap/递增/no-op/冲突/审计/单事务回滚红证） |
 | GOV-STATE-001 | test/integration/state-lifecycle.test.ts（10k/并发 100/残留 0）；audit-pipeline.test.ts（step/end 清理幂等） |
 | GOV-STORAGE-001 | test/unit/storage.test.ts（v1→v2→v3 迁移/备份表/幂等重启） |
 | GOV-SEC-001 | test/unit/ui-api.test.ts（52：capability 矩阵/Bearer/CORS/256KiB/错误响应）；test/integration/compat-api.test.ts（非 loopback 403）；B-2 主体传递 |

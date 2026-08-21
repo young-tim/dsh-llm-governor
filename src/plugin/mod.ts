@@ -11,6 +11,7 @@ import type {
   StreamChunk,
   GenerateOptions,
   LlmFailure,
+  Session,
 } from '../dsh-adapter/mod.js';
 import { GovernorService } from './service.js';
 import { uuidv7 } from '../routing/decision.js';
@@ -27,6 +28,8 @@ import { HeaderIdentityProvider, JwtIdentityProvider } from '../identity/provide
 import type { IdentityProvider } from '../identity/types.js';
 import type { LlmClassifierBackend } from '../classifier/index.js';
 import type { ClassifyInput, Classification } from '../classifier/index.js';
+import { SessionStoreSink, NullSessionEventSink } from './audit-pipeline.js';
+import { registerClientSurface } from './client-registration.js';
 
 export type {
   TaskClassifier,
@@ -644,6 +647,34 @@ export const GovernorPlugin = {
         resolved.auto.llmClassifier.timeoutMs,
       );
     }
+
+    // 2.1 真实 DSH Session 接线：SessionStore 由 DSH host 在 Governor 之前加载，
+    //      ctx.sessions 提供 get(sessionId) 与 flush(session)。
+    //      注入 SessionStoreSink 以实现审计双写协议的 Session Event 侧（durable ack）；
+    //      若 SessionStore 不可用（如独立测试），回退到 NullSessionEventSink（严格
+    //      fail-closed：不写轨迹就不标 committed）。
+    //      通过 ctx.get?.('sessions') 访问（与 webServer 同一模式），避免 Cordis
+    //      inject 声明约束：未加载 SessionStore 时安全返回 undefined。
+    const sessionsApi = (
+      ctx as unknown as {
+        get?: (name: string) => unknown;
+      }
+    ).get?.('sessions') as
+      | {
+          get(id: string): unknown;
+          flush(session: unknown): Promise<boolean>;
+        }
+      | undefined;
+    if (sessionsApi !== undefined && repository !== undefined) {
+      serviceOptions.sessionEventSink = new SessionStoreSink(
+        (id: string) => sessionsApi.get(id) as Session | undefined,
+        (session: Session) => sessionsApi.flush(session),
+      );
+    } else {
+      // 无 SessionStore 或无 repository：fail-closed（NullSessionEventSink 抛错）
+      serviceOptions.sessionEventSink = new NullSessionEventSink();
+    }
+
     const service = new GovernorService(ctx, runtimeConfig, repository, serviceOptions);
 
     // 3. 从 DSH advisory 合并模型目录（初始目录从配置构建，在构造函数中完成）
@@ -658,6 +689,17 @@ export const GovernorPlugin = {
 
     // 4-8.6 事件接线与启动对账（提取为可复用函数，测试可自组环境注入故障）
     await wireGovernorEvents(ctx, service);
+
+    // 8.7 Client 侧原生注册：Trajectory 卡片 / Composer selector / Settings 分区。
+    //     SEAM-5：浏览器 bundle 不可用时安全跳过（合同测试以发布物取证）。
+    //     注册的 disposer 通过 ctx.effect 注册，确保 HMR/卸载时清理。
+    //     service 传递给 Auto selector 注入面（浏览器组件随 B-3 E2E 交付）。
+    const clientDisposers = registerClientSurface(ctx, { service });
+    if (clientDisposers.length > 0) {
+      ctx.effect(() => () => {
+        for (const dispose of clientDisposers) dispose();
+      });
+    }
 
     // 9. UI 与入站绑定挂载（GOV-UI-001）：
     //    - 默认只注册到 DSH webServer 的 /governor 前缀（受信 Host 通道），

@@ -8,21 +8,23 @@
  * 4. 只有 committed 才允许 Provider 分发；任一步失败或超时 fail closed
  *    （AUDIT_PERSIST_FAILED），fake Provider 调用数为 0。
  *
- * rc.8 seam 阻断（docs/UPSTREAM_SEAMS.md SEAM-1/2，BLOCKED.md B-1）：持久化
- * Session 无法安全接收插件事件，因此默认使用 NullSessionEventSink（跳过
- * Session Event 写入，SQLite 审计仍为双阶段）；内存 Session 场景（测试）
- * 使用 SessionStoreSink 验证完整协议行为。
+ * 严格 fail-closed：NullSessionEventSink 在 appendDecision/appendSelectionMode 时
+ * 抛 AUDIT_PERSIST_FAILED——不写轨迹就不能标 committed。生产接线（mod.ts apply）
+ * 注入 SessionStoreSink 以接通真实 DSH Session；SEAM-1/2 阻断仅影响持久化冷读回
+ * （docs/UPSTREAM_SEAMS.md），不影响内存 Session 的实时双写。
  */
 import type { GovernorRepository } from '../storage/repository.js';
 import type { SealedDecision } from '../routing/decision.js';
 import type { Session } from '../dsh-adapter/mod.js';
-import { type GovernorSessionSelectionState } from '../dsh-adapter/session-events.js';
+import { type GovernorSessionSelectionState, type GovernorSelectionModeEventData } from '../dsh-adapter/session-events.js';
 /** Session Event 写入端抽象（双写协议的 Session 侧）。 */
 export interface SessionEventSink {
     /** 幂等追加一条决策事件并返回 durable acknowledgement；失败抛错。 */
     appendDecision(decision: SealedDecision, context: {
         sessionId: string;
     }): Promise<void>;
+    /** 幂等追加一条 selection-mode 事件并返回 durable acknowledgement；失败抛错。 */
+    appendSelectionMode(sessionId: string, data: GovernorSelectionModeEventData): Promise<void>;
     /** 查询指定 decisionId 的 Session Event 是否已存在（对账用）。 */
     hasDecision(decisionId: string): Promise<boolean>;
 }
@@ -44,16 +46,23 @@ export declare class SessionStoreSink implements SessionEventSink {
     }): Promise<void>;
     /** 查询 Session log 中是否已存在该决策事件。 */
     hasDecision(decisionId: string): Promise<boolean>;
+    /** 幂等追加 selection-mode 事件并等待 durable ack。 */
+    appendSelectionMode(sessionId: string, data: GovernorSelectionModeEventData): Promise<void>;
     /** 将 SealedDecision 映射为 Session Event 数据。 */
     private _toEventData;
 }
 /**
- * 默认 sink：rc.8 SEAM-1/2 阻断下不写 Session Event（fail safe，不破坏
- * DSH Session 持久化恢复），durable ack 直接满足，SQLite 双阶段照常。
+ * 严格 fail-closed sink：不写 Session Event 时直接抛 AUDIT_PERSIST_FAILED。
+ *
+ * 生产环境必须通过 mod.ts 注入 SessionStoreSink 以接通真实 DSH Session；
+ * 此 sink 仅用于无 repository（audit 跳过）或显式故障注入场景。
+ * 不再静默确认——不写轨迹就不能标 committed（GOV-TRACE-001 fail-closed）。
  */
 export declare class NullSessionEventSink implements SessionEventSink {
-    /** 直接确认（无 Session Event 写入；见 BLOCKED.md B-1）。 */
+    /** 无 Session 写入：严格 fail-closed，抛错而非静默确认。 */
     appendDecision(): Promise<void>;
+    /** selection-mode 同样 fail-closed。 */
+    appendSelectionMode(): Promise<void>;
     /** 无事件写入，永远返回 false（对账走 SQLite 自身状态）。 */
     hasDecision(): Promise<boolean>;
 }
@@ -83,6 +92,19 @@ export declare class AuditPipeline {
     commitDecision(decision: SealedDecision, context: {
         sessionId: string;
     }): Promise<void>;
+    /**
+     * 追加 selection-mode 事件到 Session（durable ack 后生效）。
+     *
+     * selection-mode 事件是会话控制状态投影（governor.session.v1），不需要 SQLite
+     * 审计行——它由 Session Event log 自身持久化。无 repository（内存模式）时跳过
+     * （与 commitDecision 一致）；有 repository 时 sink 不可写 fail-closed
+     * （抛 AUDIT_PERSIST_FAILED），调用方不得确认 UI 状态。
+     *
+     * @param sessionId - 会话 ID。
+     * @param data - selection-mode 事件数据。
+     * @throws sink 不可写时抛 AUDIT_PERSIST_FAILED。
+     */
+    commitSelectionMode(sessionId: string, data: GovernorSelectionModeEventData): Promise<void>;
     /**
      * 启动对账：扫描 pending 决策。
      * - Session Event 已存在且 hash 一致 → 补 commit。
