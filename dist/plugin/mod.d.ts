@@ -1,9 +1,29 @@
 import type { Context } from '../dsh-adapter/mod.js';
+import type { LlmCallConfig } from '../dsh-adapter/mod.js';
 import { GovernorService } from './service.js';
-import type { GovernorPluginConfig } from './service.js';
+import type { GovernorPluginConfig, GovernorProviderAvailability } from './service.js';
 export type { TaskClassifier, RoutingStrategy, RoutingContext, ModelQualityProvider, } from '../extensions/registry.js';
 export { GovernorExtensionRegistry } from '../extensions/registry.js';
 export type { IdentityProvider } from '../identity/types.js';
+/**
+ * 复用 Host Models 页的 providerUsable 事实源：
+ * active adapter + resolved profile + credential describe(configured)。
+ *
+ * 没有 configurable settings 地址、或 profile 未命名 `apiKeyEnv` 的活动 provider
+ * 可以使用 provider 自身的身份链；显式命名 credential ref 时则必须由
+ * Host credentials seam 确认已配置。整个判定不接触 secret value。
+ */
+export declare function resolveGovernorProviderAvailability(ctx: Context, provider: string): Promise<GovernorProviderAvailability>;
+/**
+ * Keep adapter-owned reasoning effort scoped to the exact route that exposed it.
+ *
+ * Composer selection contributes an effort for its concrete provider/model. When
+ * Governor replaces that route (Auto or fallback), carrying the opaque effort id
+ * into another adapter can make an otherwise valid request emit an unsupported
+ * provider parameter. Omitting it lets DSH resolve the selected route's own
+ * advertised default, when that route actually supports reasoning controls.
+ */
+export declare function isolateRouteOwnedReasoningEffort(proposed: LlmCallConfig, selected: LlmCallConfig): LlmCallConfig;
 /**
  * Governor Cordis 插件入口。
  *

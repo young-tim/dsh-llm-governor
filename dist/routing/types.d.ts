@@ -5,7 +5,7 @@ import type { TaskType, Complexity, RoutingMode } from '../index.js';
 import type { ModelSnapshot, CanonicalRoute } from '../model/canonical.js';
 import type { UserAccessPolicy } from '../access/evaluator.js';
 /** 稳定错误码（Routing + Audit/State + Revision/Auth + Recovery，见优化文档 7.2）。 */
-export type RoutingErrorCode = 'MODEL_NOT_FOUND' | 'AMBIGUOUS_MODEL_ROUTE' | 'MODEL_DISABLED' | 'MODEL_ACCESS_DENIED' | 'CAPABILITY_NOT_SUPPORTED' | 'QUOTA_EXCEEDED' | 'NO_MODEL_MATCHED' | 'FALLBACK_EXHAUSTED' | 'PARTIAL_OUTPUT_NOT_RETRYABLE' | 'IDENTITY_REQUIRED' | 'AUDIT_PERSIST_FAILED' | 'DECISION_CONFLICT' | 'STORAGE_UNAVAILABLE' | 'PLUGIN_RELOADING' | 'RECOVERY_OWNER_CONFLICT' | 'REVISION_CONFLICT' | 'SELECTION_REVISION_CONFLICT' | 'UNAUTHORIZED' | 'FORBIDDEN';
+export type RoutingErrorCode = 'MODEL_NOT_FOUND' | 'AMBIGUOUS_MODEL_ROUTE' | 'MODEL_DISABLED' | 'PROVIDER_UNAVAILABLE' | 'MODEL_ACCESS_DENIED' | 'CAPABILITY_NOT_SUPPORTED' | 'QUOTA_EXCEEDED' | 'NO_MODEL_MATCHED' | 'FALLBACK_EXHAUSTED' | 'PARTIAL_OUTPUT_NOT_RETRYABLE' | 'IDENTITY_REQUIRED' | 'AUDIT_PERSIST_FAILED' | 'DECISION_CONFLICT' | 'STORAGE_UNAVAILABLE' | 'PLUGIN_RELOADING' | 'RECOVERY_OWNER_CONFLICT' | 'REVISION_CONFLICT' | 'SELECTION_REVISION_CONFLICT' | 'UNAUTHORIZED' | 'FORBIDDEN';
 /** Routing 错误。 */
 export declare class RoutingError extends Error {
     readonly code: RoutingErrorCode;
@@ -15,7 +15,7 @@ export declare class RoutingError extends Error {
     constructor(code: RoutingErrorCode, message: string, routeId?: string, evidence?: RoutingRejectionEvidence);
 }
 /** 排除原因码。 */
-export type ExclusionReason = 'disabled' | 'not_active_provider' | 'access_denied' | 'capability_not_supported' | 'excluded_in_request' | 'quality_missing' | 'quota_exceeded';
+export type ExclusionReason = 'disabled' | 'not_active_provider' | 'provider_unavailable' | 'access_denied' | 'capability_not_supported' | 'excluded_in_request' | 'quality_missing' | 'quota_exceeded';
 /** 候选项过滤后的结果。 */
 export interface FilterResult {
     /** 通过过滤的候选。 */
@@ -32,6 +32,8 @@ export interface FilterInput {
     readonly snapshots: readonly ModelSnapshot[];
     /** 活动 provider 集合。 */
     readonly activeProviders: ReadonlySet<string>;
+    /** 已注册但当前不可调用的 provider（例如显式凭证引用未配置）。 */
+    readonly unavailableProviders: ReadonlySet<string>;
     /** 全局默认可用 route 集合。 */
     readonly globalDefault: ReadonlySet<CanonicalRoute>;
     /** 用户策略（undefined=无用户策略）。 */

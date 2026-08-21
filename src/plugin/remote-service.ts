@@ -101,7 +101,7 @@ export interface GovernorRemoteUsage {
 function assertRemotePayloadSize(value: unknown): void {
   const bytes = Buffer.byteLength(JSON.stringify(value), 'utf8');
   if (bytes > GOVERNOR_REMOTE_MAX_BYTES) {
-    throw new TypertLookupFailure({
+    throw remoteFailure({
       code: 'PAYLOAD_TOO_LARGE',
       message: 'Governor Remote payload exceeds 256 KiB',
       details: { limit: GOVERNOR_REMOTE_MAX_BYTES },
@@ -109,9 +109,30 @@ function assertRemotePayloadSize(value: unknown): void {
   }
 }
 
+interface GovernorRemoteFailure {
+  readonly code: string;
+  readonly message: string;
+  readonly details: object;
+}
+
+/**
+ * 构造 Gateway 可保留的 Typert failure，同时使其 Error 外层也只携带稳定业务码。
+ *
+ * 正常的 Gateway 会通过 `instanceof TypertLookupFailure` 取出 `failure`；但当 Host
+ * 与插件被不同 loader/realm 加载时，该识别可能失败，Gateway 会退化为读取
+ * `Error.message`。不覆盖时会泄露 Typert 的内部固定文案，并丢失可展示的
+ * Governor 错误。
+ */
+function remoteFailure(failure: GovernorRemoteFailure): TypertLookupFailure {
+  const error = new TypertLookupFailure(failure);
+  error.name = 'Error';
+  error.message = failure.code;
+  return error;
+}
+
 /** 将权限拒绝映射为 Connection 可保留的稳定 RPC failure。 */
 function remoteAuthorizationFailure(error: GovernorAuthorizationError): TypertLookupFailure {
-  return new TypertLookupFailure({
+  return remoteFailure({
     code: error.code,
     message: error.message,
     details: {},
@@ -138,12 +159,12 @@ const SAFE_GOVERNOR_ERROR_CODES = new Set([
 function remoteBusinessFailure(error: unknown): TypertLookupFailure {
   if (error instanceof TypertLookupFailure) return error;
   if (error instanceof RoutingError) {
-    return new TypertLookupFailure({ code: error.code, message: error.code, details: {} });
+    return remoteFailure({ code: error.code, message: error.code, details: {} });
   }
   if (error instanceof Error && SAFE_GOVERNOR_ERROR_CODES.has(error.message)) {
-    return new TypertLookupFailure({ code: error.message, message: error.message, details: {} });
+    return remoteFailure({ code: error.message, message: error.message, details: {} });
   }
-  return new TypertLookupFailure({
+  return remoteFailure({
     code: 'INTERNAL_ERROR',
     message: 'Governor operation failed',
     details: {},

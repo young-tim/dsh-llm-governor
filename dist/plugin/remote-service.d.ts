@@ -64,14 +64,16 @@ export declare class GovernorRemoteService extends TypertRemoteService {
         capabilities: GovernorCapability[];
     }>;
     listModels(): Promise<{
-        routeId: string;
-        provider: string;
-        model: string;
-        enabled: boolean;
         multiplierPpm: number;
         capabilities: string[];
         quality: Readonly<Partial<Record<"general" | "coding" | "reasoning" | "writing" | "data_analysis" | "vision" | "tool_use", number>>>;
         configRevision: number;
+        unavailableReason?: NonNullable<"credential_missing" | "availability_check_failed" | undefined>;
+        routeId: string;
+        provider: string;
+        model: string;
+        enabled: boolean;
+        available: boolean;
     }[]>;
     updateModel(routeId: string, patch: ModelPolicyPatch, options?: {
         expectedRevision?: number;
@@ -80,6 +82,8 @@ export declare class GovernorRemoteService extends TypertRemoteService {
         provider: string;
         model: string;
         enabled: boolean;
+        available: boolean;
+        unavailableReason?: "credential_missing" | "availability_check_failed";
         multiplierPpm: number;
         capabilities: string[];
         quality: Partial<Record<import("../index.js").TaskType, number>>;

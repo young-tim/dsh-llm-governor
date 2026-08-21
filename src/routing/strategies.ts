@@ -81,20 +81,24 @@ export function routeManual(
 
   // 执行公共过滤（只检查这一个候选）
   const singleInput: FilterInput = { ...input, snapshots: [snap] };
-  const filterResult = filterCandidates(singleInput);
+  // DSH catalog 是自动候选资格源，不是 Provider 请求白名单：显式 Manual
+  // 继续允许治理 policy 中保留、但当前 listModels 未列出的 route 直通。
+  const filterResult = filterCandidates(singleInput, { allowUnlistedModels: true });
 
   if (filterResult.candidates.length === 0) {
     const reason = filterResult.excluded[0]?.reason ?? 'disabled';
     const code =
       reason === 'disabled'
         ? 'MODEL_DISABLED'
-        : reason === 'access_denied'
-          ? 'MODEL_ACCESS_DENIED'
-          : reason === 'capability_not_supported'
-            ? 'CAPABILITY_NOT_SUPPORTED'
-            : reason === 'quota_exceeded'
-              ? 'QUOTA_EXCEEDED'
-              : 'MODEL_NOT_FOUND';
+        : reason === 'provider_unavailable'
+          ? 'PROVIDER_UNAVAILABLE'
+          : reason === 'access_denied'
+            ? 'MODEL_ACCESS_DENIED'
+            : reason === 'capability_not_supported'
+              ? 'CAPABILITY_NOT_SUPPORTED'
+              : reason === 'quota_exceeded'
+                ? 'QUOTA_EXCEEDED'
+                : 'MODEL_NOT_FOUND';
     throw new RoutingError(code as _RE['code'], `model ${routeId} excluded: ${reason}`, routeId, {
       candidates: [],
       excluded: filterResult.excluded,

@@ -32,7 +32,7 @@ export declare const QUALITY_PRESETS: readonly [{
 type QualityPresetScore = (typeof QUALITY_PRESETS)[number]['score'];
 /** Suggest a visible, user-confirmed starting tier from conventional model names. */
 export declare function suggestedQualityPreset(model: string): QualityPresetScore;
-/** Composer guard for the completely uninitialised state seen after first install. */
+/** Composer guard for Auto profiles that cannot cover every supported task yet. */
 export declare function autoSetupIssue(rows: readonly GovernorModelView[]): string | null;
 export interface SelectionModeView {
     readonly mode: 'auto' | 'manual';
@@ -45,6 +45,8 @@ export interface GovernorModelView {
     readonly provider: string;
     readonly model: string;
     readonly enabled: boolean;
+    readonly available: boolean;
+    readonly unavailableReason?: 'credential_missing' | 'availability_check_failed';
     readonly multiplierPpm: number;
     readonly capabilities: readonly string[];
     readonly quality: Readonly<Record<string, number>>;

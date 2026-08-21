@@ -10,7 +10,7 @@ import type { Context } from '@deepseek-ai/cordis';
 import type { ClientContext, SnapshotStore } from '@deepseek-ai/dsh-client-runtime/client';
 import type { SessionId } from '@deepseek-ai/dsh-api-remotes/client';
 import type { TypertClientRemote } from '@deepseek-ai/dsh-typert-protocol';
-import { createElement, useEffect, useMemo, useState, useSyncExternalStore } from 'react';
+import { createElement, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import {
   GOVERNOR_REMOTE_CONTRIBUTION,
   type GovernorRemoteApi,
@@ -23,6 +23,13 @@ import { governorTrajectoryDefinition } from '../plugin/client-registration.js';
 
 const CLIENT_ID = 'dsh-llm-governor';
 const AUTO_VALUE = '__governor_auto__';
+const AUTO_EFFORT_VALUE = '__governor_auto_effort__';
+const AUTO_SETUP_HINT =
+  'Auto 未就绪：请先在 Settings → Governor → 模型中选择一个 Quality 快速档位。';
+
+function isAutoQualityIssue(issue: string): boolean {
+  return issue.startsWith('Auto 尚未');
+}
 
 /**
  * Explicit onboarding presets. They align with Auto's default low / medium /
@@ -54,19 +61,26 @@ function qualityPresetPatch(score: QualityPresetScore): ModelPolicyPatch {
 }
 
 function configuredQualityTasks(rows: readonly GovernorModelView[]): readonly TaskType[] {
-  const enabled = rows.filter((row) => row.enabled);
+  const enabled = rows.filter((row) => row.enabled && row.available);
   return TASK_TYPES.filter((taskType) =>
     enabled.some((row) => Number.isFinite(row.quality[taskType])),
   );
 }
 
-/** Composer guard for the completely uninitialised state seen after first install. */
+/** Composer guard for Auto profiles that cannot cover every supported task yet. */
 export function autoSetupIssue(rows: readonly GovernorModelView[]): string | null {
   if (!rows.some((row) => row.enabled)) {
     return 'Auto 尚未就绪：没有已启用模型。请打开 Settings → Governor → 模型。';
   }
-  if (configuredQualityTasks(rows).length === 0) {
-    return 'Auto 尚未初始化：请打开 Settings → Governor → 模型，为模型选择 Lite 75、均衡 85 或 Pro 95 快速档位。';
+  if (!rows.some((row) => row.enabled && row.available)) {
+    return 'Auto 尚未就绪：没有可用的已启用模型。请打开 Settings → Governor → 模型。';
+  }
+  const coveredTasks = configuredQualityTasks(rows);
+  if (coveredTasks.length < TASK_TYPES.length) {
+    const missingTasks = TASK_TYPES.filter((taskType) => !coveredTasks.includes(taskType));
+    return coveredTasks.length === 0
+      ? 'Auto 尚未初始化：请打开 Settings → Governor → 模型，为可用的已启用模型选择快速档位。'
+      : `Auto 尚未就绪：可用模型仅覆盖 ${String(coveredTasks.length)}/${String(TASK_TYPES.length)} 类 Quality（缺少：${missingTasks.join('、')}）。请打开 Settings → Governor → 模型补全覆盖。`;
   }
   return null;
 }
@@ -81,6 +95,19 @@ function qualitySummary(row: GovernorModelView): string {
     return `全部任务 ${String(scores[0])}`;
   }
   return `${String(scores.length)}/${String(TASK_TYPES.length)} 项已配置`;
+}
+
+function modelAvailabilityMessage(row: GovernorModelView): string | null {
+  if (row.available) return null;
+  switch (row.unavailableReason) {
+    case 'credential_missing':
+      return 'Provider 凭证未配置，不参与自动路由';
+    case 'model_not_listed':
+      return '当前模型目录未提供，不参与自动路由';
+    case 'availability_check_failed':
+    default:
+      return 'Provider 可用性未知，不参与自动路由';
+  }
 }
 
 type RemoteResult<T> =
@@ -99,6 +126,9 @@ export interface GovernorModelView {
   readonly provider: string;
   readonly model: string;
   readonly enabled: boolean;
+  readonly available: boolean;
+  readonly unavailableReason?:
+    'credential_missing' | 'availability_check_failed' | 'model_not_listed';
   readonly multiplierPpm: number;
   readonly capabilities: readonly string[];
   readonly quality: Readonly<Record<string, number>>;
@@ -290,11 +320,17 @@ export function GovernorModelSelect({
   const [selection, setSelection] = useState<SelectionModeView | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [autoIssue, setAutoIssue] = useState<string | null | undefined>(undefined);
   const [query, setQuery] = useState('');
+  const autoFallbackAttempt = useRef<string | null>(null);
 
   useEffect(() => {
     if (!available) return;
     let live = true;
+    setSelection(null);
+    setAutoIssue(undefined);
+    setError(null);
+    autoFallbackAttempt.current = null;
     load();
     void api.selection(sessionId).then(
       (next) => {
@@ -302,6 +338,14 @@ export function GovernorModelSelect({
       },
       (cause: unknown) => {
         if (live) setError(String(cause));
+      },
+    );
+    void api.models().then(
+      (rows) => {
+        if (live) setAutoIssue(autoSetupIssue(rows));
+      },
+      (cause: unknown) => {
+        if (live) setAutoIssue(`Auto 就绪状态检查失败：${String(cause)}`);
       },
     );
     return () => {
@@ -330,17 +374,37 @@ export function GovernorModelSelect({
   );
   const manualValue =
     catalog.current === null ? '' : `${catalog.current.provider}\u0000${catalog.current.model}`;
+  const currentProvider = catalog.current?.provider;
+  const currentModel = catalog.current?.model;
   const value = selection?.mode === 'auto' ? AUTO_VALUE : manualValue;
   const selectedChoice = choices.find((choice) => choice.value === manualValue);
   const reasoning = selectedChoice?.model.reasoning;
   const effectiveEffort = catalog.current?.reasoningEffort ?? reasoning?.defaultEffort ?? '';
   const normalizedQuery = query.trim().toLocaleLowerCase();
-  const visibleChoices =
+  const matchingChoices =
     normalizedQuery === ''
       ? choices
       : choices.filter((choice) =>
           `${choice.label} ${choice.model.id}`.toLocaleLowerCase().includes(normalizedQuery),
         );
+  const visibleChoices =
+    selectedChoice === undefined || matchingChoices.some((choice) => choice.value === manualValue)
+      ? matchingChoices
+      : [selectedChoice, ...matchingChoices];
+  const showFilter = choices.length > 8;
+
+  const refreshAutoIssue = async (): Promise<string | null> => {
+    setAutoIssue(undefined);
+    try {
+      const nextIssue = autoSetupIssue(await api.models());
+      setAutoIssue(nextIssue);
+      return nextIssue;
+    } catch (cause) {
+      const nextIssue = `Auto 就绪状态检查失败：${String(cause)}`;
+      setAutoIssue(nextIssue);
+      return nextIssue;
+    }
+  };
 
   const onChange = async (next: string) => {
     if (selection === null || saving) return;
@@ -348,8 +412,10 @@ export function GovernorModelSelect({
     setError(null);
     try {
       if (next === AUTO_VALUE) {
-        const setupIssue = autoSetupIssue(await api.models());
-        if (setupIssue !== null) throw new Error(setupIssue);
+        const setupIssue = await refreshAutoIssue();
+        if (setupIssue !== null) {
+          throw new Error(isAutoQualityIssue(setupIssue) ? AUTO_SETUP_HINT : setupIssue);
+        }
         const currentRoute =
           catalog.current === null
             ? undefined
@@ -404,62 +470,166 @@ export function GovernorModelSelect({
     }
   };
 
+  useEffect(() => {
+    if (
+      !available ||
+      locked ||
+      saving ||
+      selection?.mode !== 'auto' ||
+      autoIssue === undefined ||
+      autoIssue === null ||
+      !isAutoQualityIssue(autoIssue) ||
+      currentProvider === undefined ||
+      currentModel === undefined
+    ) {
+      return;
+    }
+    const route = `${currentProvider}:${currentModel}`;
+    const attempt = `${sessionId}:${String(selection.selectionRevision)}:${route}`;
+    if (autoFallbackAttempt.current === attempt) return;
+    autoFallbackAttempt.current = attempt;
+    let live = true;
+    setSaving(true);
+    setError(null);
+    void api
+      .selectMode(sessionId, 'manual', {
+        expectedRevision: selection.selectionRevision,
+        lastManualRoute: route,
+      })
+      .then(
+        (next) => {
+          if (!live) return;
+          setSelection(next);
+          setError(
+            `Auto 未就绪，已切换到 ${currentModel}。请在 Governor → 模型中选择 Quality 档位。`,
+          );
+        },
+        (cause: unknown) => {
+          if (live) setError(`Auto 未就绪且无法切换到当前模型：${String(cause)}`);
+        },
+      )
+      .finally(() => {
+        if (live) setSaving(false);
+      });
+    return () => {
+      live = false;
+    };
+  }, [api, autoIssue, available, currentModel, currentProvider, locked, selection, sessionId]);
+
   if (!available) return null;
+
+  const autoActive = selection?.mode === 'auto';
+  const activeAutoIssue =
+    autoActive && autoIssue !== undefined && autoIssue !== null
+      ? isAutoQualityIssue(autoIssue)
+        ? AUTO_SETUP_HINT
+        : autoIssue
+      : null;
+  const autoLabel = autoActive
+    ? autoIssue === undefined
+      ? 'Auto（Governor，检查中）'
+      : autoIssue === null
+        ? 'Auto（Governor）'
+        : 'Auto（Governor，未就绪）'
+    : 'Auto（Governor）';
+  const displayedError = error ?? activeAutoIssue;
+  const fallbackNotice = error?.startsWith('Auto 未就绪，已切换到 ') === true;
 
   return createElement(
     'span',
     { className: 'dsh-governor-model-select' },
-    createElement('input', {
-      type: 'search',
-      value: query,
-      placeholder: '搜索模型',
-      'aria-label': '搜索模型 / Search models',
-      disabled: locked || saving,
-      onChange: (event: { currentTarget: { value: string } }) =>
-        setQuery(event.currentTarget.value),
-    }),
     createElement(
-      'select',
-      {
-        'aria-label': '模型选择 / Model selection',
-        disabled: locked || saving || selection === null,
-        value,
-        onFocus: load,
-        onChange: (event: { currentTarget: { value: string } }) => {
-          void onChange(event.currentTarget.value);
-        },
-      },
-      createElement('option', { value: AUTO_VALUE }, '自动（Governor） · Auto'),
-      visibleChoices.map((choice) =>
-        createElement('option', { key: choice.value, value: choice.value }, choice.label),
-      ),
-    ),
-    reasoning === undefined
-      ? null
-      : createElement(
-          'select',
-          {
-            'aria-label': '推理强度 / Reasoning effort',
-            disabled: locked || saving || selection?.mode === 'auto',
-            value: effectiveEffort,
-            onChange: (event: { currentTarget: { value: string } }) => {
-              void onEffortChange(event.currentTarget.value);
-            },
+      'span',
+      { className: 'dsh-governor-model-controls' },
+      showFilter
+        ? createElement('input', {
+            type: 'search',
+            value: query,
+            placeholder: '筛选模型',
+            'aria-label': '筛选模型 / Filter models',
+            disabled: locked || saving,
+            onChange: (event: { currentTarget: { value: string } }) =>
+              setQuery(event.currentTarget.value),
+          })
+        : null,
+      createElement(
+        'select',
+        {
+          'aria-label': '模型选择 / Model selection',
+          'aria-invalid': activeAutoIssue === null ? undefined : activeAutoIssue !== undefined,
+          disabled: locked || saving || selection === null,
+          value,
+          onFocus: () => {
+            load();
+            if (autoActive) void refreshAutoIssue();
           },
-          reasoning.defaultEffort === undefined
-            ? createElement('option', { value: '' }, '提供方默认')
-            : null,
-          reasoning.efforts.map((effort) =>
-            createElement('option', { key: effort.id, value: effort.id }, effort.name),
-          ),
+          onChange: (event: { currentTarget: { value: string } }) => {
+            void onChange(event.currentTarget.value);
+          },
+        },
+        createElement('option', { value: AUTO_VALUE }, autoLabel),
+        selectedChoice === undefined && manualValue !== ''
+          ? createElement(
+              'option',
+              { value: manualValue },
+              `${catalog.current?.model ?? ''} · ${catalog.current?.provider ?? ''}`,
+            )
+          : null,
+        visibleChoices.map((choice) =>
+          createElement('option', { key: choice.value, value: choice.value }, choice.label),
         ),
-    saving ? createElement('span', { role: 'status' }, '保存中…') : null,
-    error === null
+      ),
+      autoActive
+        ? createElement(
+            'label',
+            { className: 'dsh-governor-effort' },
+            createElement('span', null, '推理'),
+            createElement(
+              'select',
+              {
+                'aria-label': '推理强度 / Reasoning effort',
+                disabled: true,
+                value: AUTO_EFFORT_VALUE,
+              },
+              createElement('option', { value: AUTO_EFFORT_VALUE }, 'Auto 决定'),
+            ),
+          )
+        : reasoning === undefined
+          ? null
+          : createElement(
+              'label',
+              { className: 'dsh-governor-effort' },
+              createElement('span', null, '推理'),
+              createElement(
+                'select',
+                {
+                  'aria-label': '推理强度 / Reasoning effort',
+                  disabled: locked || saving,
+                  value: effectiveEffort,
+                  onChange: (event: { currentTarget: { value: string } }) => {
+                    void onEffortChange(event.currentTarget.value);
+                  },
+                },
+                reasoning.defaultEffort === undefined
+                  ? createElement('option', { value: '' }, '提供方默认')
+                  : null,
+                reasoning.efforts.map((effort) =>
+                  createElement('option', { key: effort.id, value: effort.id }, effort.name),
+                ),
+              ),
+            ),
+      saving ? createElement('span', { role: 'status' }, '保存中…') : null,
+    ),
+    displayedError === null || displayedError === undefined
       ? null
       : createElement(
           'span',
-          { className: 'dsh-governor-model-error', role: 'alert', title: error },
-          error,
+          {
+            className: `dsh-governor-model-error${fallbackNotice ? ' notice' : ''}`,
+            role: 'alert',
+            title: displayedError,
+          },
+          displayedError,
         ),
   );
 }
@@ -483,12 +653,20 @@ function ErrorNotice({ error }: { readonly error: string | null }) {
 function RoutingSettings({ api, canManage }: GovernorManagedSettingsProps) {
   const [value, setValue] = useState<GovernorRoutingView | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'saved'>('idle');
   useEffect(() => {
     void api.routing().then(setValue, (cause: unknown) => setError(String(cause)));
   }, [api]);
   if (value === null) return createElement(ErrorNotice, { error: error ?? '正在加载路由策略…' });
   const save = async () => {
     setError(null);
+    const minimumQuality = value.creditFirst.minimumQuality;
+    if (!Number.isFinite(minimumQuality) || minimumQuality < 0 || minimumQuality > 100) {
+      setSaveStatus('idle');
+      setError('最低质量必须是 0–100 之间的数字。');
+      return;
+    }
+    setSaveStatus('saving');
     try {
       setValue(
         await api.saveRouting(
@@ -501,7 +679,9 @@ function RoutingSettings({ api, canManage }: GovernorManagedSettingsProps) {
           value.configRevision,
         ),
       );
+      setSaveStatus('saved');
     } catch (cause) {
+      setSaveStatus('idle');
       setError(String(cause));
     }
   };
@@ -517,11 +697,13 @@ function RoutingSettings({ api, canManage }: GovernorManagedSettingsProps) {
         {
           value: value.default,
           disabled: !canManage,
-          onChange: (event: { currentTarget: { value: string } }) =>
+          onChange: (event: { currentTarget: { value: string } }) => {
+            setSaveStatus('idle');
             setValue({
               ...value,
               default: event.currentTarget.value as GovernorRoutingView['default'],
-            }),
+            });
+          },
         },
         createElement('option', { value: 'manual' }, '手动'),
         createElement('option', { value: 'auto' }, '自动'),
@@ -539,20 +721,41 @@ function RoutingSettings({ api, canManage }: GovernorManagedSettingsProps) {
         max: 100,
         value: value.creditFirst.minimumQuality,
         disabled: !canManage,
-        onChange: (event: { currentTarget: { valueAsNumber: number } }) =>
+        'aria-describedby': 'dsh-governor-minimum-quality-help',
+        onChange: (event: { currentTarget: { valueAsNumber: number } }) => {
+          setSaveStatus('idle');
           setValue({
             ...value,
             creditFirst: {
               ...value.creditFirst,
               minimumQuality: event.currentTarget.valueAsNumber,
             },
-          }),
+          });
+        },
       }),
+      createElement(
+        'small',
+        { id: 'dsh-governor-minimum-quality-help' },
+        '可填 0–100，用于额度优先模式的最低 Quality 门槛。',
+      ),
     ),
     createElement(
-      'button',
-      { type: 'button', disabled: !canManage, onClick: () => void save() },
-      '保存路由设置',
+      'div',
+      { className: 'dsh-governor-form-actions' },
+      createElement(
+        'button',
+        {
+          type: 'button',
+          disabled: !canManage || saveStatus === 'saving',
+          onClick: () => void save(),
+        },
+        saveStatus === 'saving' ? '保存中…' : '保存路由设置',
+      ),
+      saveStatus === 'saved'
+        ? createElement('span', { role: 'status', 'aria-live': 'polite' }, '已保存')
+        : saveStatus === 'saving'
+          ? createElement('span', { role: 'status', 'aria-live': 'polite' }, '正在保存…')
+          : null,
     ),
     createElement(ErrorNotice, { error }),
   );
@@ -561,10 +764,29 @@ function RoutingSettings({ api, canManage }: GovernorManagedSettingsProps) {
 function ModelsSettings({ api, canManage }: GovernorManagedSettingsProps) {
   const [rows, setRows] = useState<readonly GovernorModelView[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
   useEffect(() => {
-    void api.models().then(setRows, (cause: unknown) => setError(String(cause)));
+    let live = true;
+    void api.models().then(
+      (value) => {
+        if (live) {
+          setRows(value);
+          setLoading(false);
+        }
+      },
+      (cause: unknown) => {
+        if (live) {
+          setError(String(cause));
+          setLoading(false);
+        }
+      },
+    );
+    return () => {
+      live = false;
+    };
   }, [api]);
   const save = async (row: GovernorModelView, patch: ModelPolicyPatch) => {
+    setError(null);
     try {
       await api.saveModel(row.routeId, patch, row.configRevision);
       // configRevision is global; refresh every row after one write so a
@@ -576,6 +798,8 @@ function ModelsSettings({ api, canManage }: GovernorManagedSettingsProps) {
   };
   const coveredTasks = configuredQualityTasks(rows);
   const missingTasks = TASK_TYPES.filter((taskType) => !coveredTasks.includes(taskType));
+  const hasEnabledModel = rows.some((row) => row.enabled);
+  const hasAvailableEnabledModel = rows.some((row) => row.enabled && row.available);
   return createElement(
     'div',
     null,
@@ -591,169 +815,197 @@ function ModelsSettings({ api, canManage }: GovernorManagedSettingsProps) {
         null,
         missingTasks.length === 0
           ? 'Auto 已就绪 · 7/7 类任务有可用 Quality'
-          : coveredTasks.length === 0
-            ? '先初始化 Quality，再使用 Auto'
-            : `Auto 部分就绪 · ${String(coveredTasks.length)}/7 类任务已覆盖`,
+          : !hasEnabledModel
+            ? '先启用一个可用模型，再使用 Auto'
+            : !hasAvailableEnabledModel
+              ? '没有可用的已启用模型，Auto 不可用'
+              : coveredTasks.length === 0
+                ? '先初始化 Quality，再使用 Auto'
+                : `Auto 部分就绪 · ${String(coveredTasks.length)}/7 类任务已覆盖`,
       ),
       createElement(
         'p',
         null,
-        'Quality 是模型间的相对档位，不要求先做精确测评。每个模型先选一次 Lite 75、均衡 85 或 Pro 95，即可填满全部任务；之后只在“高级微调”里调整有证据的差异。',
+        'Quality 是模型间的相对档位，不要求先做精确测评。至少为一个可用的已启用模型选择 Lite 75、均衡 85 或 Pro 95，即可覆盖全部任务；未评分或 Provider 不可用的模型不会参与相应任务路由。',
       ),
       missingTasks.length === 0
         ? null
         : createElement('small', null, `尚未覆盖：${missingTasks.join('、')}`),
     ),
-    createElement(
-      'div',
-      { className: 'dsh-governor-table-wrap' },
-      createElement(
-        'table',
-        null,
-        createElement(
-          'thead',
-          null,
-          createElement(
-            'tr',
-            null,
-            ['模型', '启用', '倍率', '能力', '质量'].map((label) =>
-              createElement('th', { key: label }, label),
-            ),
-          ),
-        ),
-        createElement(
-          'tbody',
-          null,
-          rows.map((row) =>
+    loading
+      ? createElement('p', { className: 'dsh-governor-empty', role: 'status' }, '正在加载模型…')
+      : rows.length === 0 && error === null
+        ? createElement(
+            'section',
+            { className: 'dsh-governor-empty', 'aria-label': '模型空状态' },
+            createElement('strong', null, '暂无可配置模型'),
+            createElement('p', null, '先在 DSH 中配置并启用模型，然后在这里设置 Governor 策略。'),
+          )
+        : createElement(
+            'div',
+            { className: 'dsh-governor-table-wrap dsh-governor-model-list' },
             createElement(
-              'tr',
-              { key: row.routeId },
+              'table',
+              { className: 'dsh-governor-model-table' },
               createElement(
-                'td',
-                null,
-                createElement('strong', null, row.model),
-                createElement('small', null, row.provider),
-              ),
-              createElement(
-                'td',
-                null,
-                createElement('input', {
-                  type: 'checkbox',
-                  checked: row.enabled,
-                  disabled: !canManage,
-                  'aria-label': `${row.routeId} 启用`,
-                  onChange: (event: { currentTarget: { checked: boolean } }) =>
-                    void save(row, { enabled: event.currentTarget.checked }),
-                }),
-              ),
-              createElement(
-                'td',
-                null,
-                createElement('input', {
-                  type: 'number',
-                  min: 0,
-                  step: 0.01,
-                  defaultValue: row.multiplierPpm / 1_000_000,
-                  disabled: !canManage,
-                  'aria-label': `${row.routeId} 倍率`,
-                  onBlur: (event: { currentTarget: { valueAsNumber: number } }) =>
-                    void save(row, { multiplier: event.currentTarget.valueAsNumber }),
-                }),
-              ),
-              createElement(
-                'td',
-                null,
-                createElement('input', {
-                  type: 'text',
-                  defaultValue: row.capabilities.join(', '),
-                  placeholder: 'vision, tool_use',
-                  disabled: !canManage,
-                  'aria-label': `${row.routeId} 能力`,
-                  onBlur: (event: { currentTarget: { value: string } }) =>
-                    void save(row, {
-                      capabilities: [
-                        ...new Set(
-                          event.currentTarget.value
-                            .split(',')
-                            .map((value) => value.trim())
-                            .filter(Boolean),
-                        ),
-                      ],
-                    }),
-                }),
-              ),
-              createElement(
-                'td',
+                'thead',
                 null,
                 createElement(
-                  'div',
-                  { className: 'dsh-governor-quality-presets' },
-                  createElement(
-                    'span',
-                    null,
-                    `快速初始化 · 按名称建议 ${String(suggestedQualityPreset(row.model))}`,
+                  'tr',
+                  null,
+                  ['模型', '启用', '倍率', '能力', '质量'].map((label) =>
+                    createElement('th', { key: label }, label),
                   ),
-                  createElement(
-                    'div',
-                    null,
-                    QUALITY_PRESETS.map((preset) =>
-                      createElement(
-                        'button',
-                        {
-                          key: preset.score,
-                          type: 'button',
-                          disabled: !canManage,
-                          className:
-                            suggestedQualityPreset(row.model) === preset.score
-                              ? 'suggested'
-                              : undefined,
-                          title: `${preset.description}：把全部 7 类任务的初始 Quality 设为 ${String(preset.score)}`,
-                          'aria-label': `${row.routeId} 全部任务 Quality ${String(preset.score)}`,
-                          onClick: () => void save(row, qualityPresetPatch(preset.score)),
-                        },
-                        `${preset.label} ${String(preset.score)}`,
-                      ),
-                    ),
-                  ),
-                  createElement('small', null, '初始估计，可随时覆盖；不会自动后台改分'),
                 ),
-                createElement(
-                  'details',
-                  { className: 'dsh-governor-quality' },
-                  createElement('summary', null, `高级微调 · ${qualitySummary(row)}`),
-                  TASK_TYPES.map((taskType: TaskType) =>
+              ),
+              createElement(
+                'tbody',
+                null,
+                rows.map((row) =>
+                  createElement(
+                    'tr',
+                    {
+                      key: row.routeId,
+                      className: row.available ? undefined : 'unavailable',
+                      'data-reason': row.available ? undefined : row.unavailableReason,
+                    },
                     createElement(
-                      'label',
-                      { key: taskType },
-                      taskType,
+                      'td',
+                      { className: 'dsh-governor-model-identity', title: row.routeId },
+                      createElement('strong', null, row.model),
+                      createElement('small', null, row.provider),
+                      modelAvailabilityMessage(row) === null
+                        ? null
+                        : createElement(
+                            'span',
+                            {
+                              className: 'dsh-governor-model-availability',
+                              'data-reason': row.unavailableReason ?? 'availability_check_failed',
+                            },
+                            modelAvailabilityMessage(row),
+                          ),
+                    ),
+                    createElement(
+                      'td',
+                      { 'data-label': '启用' },
+                      createElement('input', {
+                        type: 'checkbox',
+                        role: 'switch',
+                        checked: row.enabled,
+                        disabled: !canManage,
+                        'aria-label': `${row.routeId} 启用`,
+                        onChange: (event: { currentTarget: { checked: boolean } }) =>
+                          void save(row, { enabled: event.currentTarget.checked }),
+                      }),
+                    ),
+                    createElement(
+                      'td',
+                      { 'data-label': '计费倍率' },
                       createElement('input', {
                         type: 'number',
                         min: 0,
-                        max: 100,
-                        step: 1,
-                        defaultValue: row.quality[taskType] ?? '',
-                        placeholder: '0–100',
+                        step: 0.01,
+                        defaultValue: row.multiplierPpm / 1_000_000,
                         disabled: !canManage,
-                        'aria-label': `${row.routeId} ${taskType} Quality`,
-                        onBlur: (event: {
-                          currentTarget: { value: string; valueAsNumber: number };
-                        }) => {
-                          const score =
-                            event.currentTarget.value.trim() === ''
-                              ? null
-                              : event.currentTarget.valueAsNumber;
-                          void save(row, { quality: { [taskType]: score } });
-                        },
+                        'aria-label': `${row.routeId} 倍率`,
+                        onBlur: (event: { currentTarget: { valueAsNumber: number } }) =>
+                          void save(row, { multiplier: event.currentTarget.valueAsNumber }),
                       }),
+                    ),
+                    createElement(
+                      'td',
+                      { 'data-label': '能力标签' },
+                      createElement('input', {
+                        type: 'text',
+                        defaultValue: row.capabilities.join(', '),
+                        placeholder: 'vision, tool_use',
+                        disabled: !canManage,
+                        'aria-label': `${row.routeId} 能力`,
+                        onBlur: (event: { currentTarget: { value: string } }) =>
+                          void save(row, {
+                            capabilities: [
+                              ...new Set(
+                                event.currentTarget.value
+                                  .split(',')
+                                  .map((value) => value.trim())
+                                  .filter(Boolean),
+                              ),
+                            ],
+                          }),
+                      }),
+                    ),
+                    createElement(
+                      'td',
+                      null,
+                      createElement(
+                        'div',
+                        { className: 'dsh-governor-quality-presets' },
+                        createElement(
+                          'span',
+                          null,
+                          `快速档位 · 建议 ${String(suggestedQualityPreset(row.model))}`,
+                        ),
+                        createElement(
+                          'div',
+                          null,
+                          QUALITY_PRESETS.map((preset) =>
+                            createElement(
+                              'button',
+                              {
+                                key: preset.score,
+                                type: 'button',
+                                disabled: !canManage,
+                                className:
+                                  suggestedQualityPreset(row.model) === preset.score
+                                    ? 'suggested'
+                                    : undefined,
+                                title: `${preset.description}：把全部 7 类任务的初始 Quality 设为 ${String(preset.score)}`,
+                                'aria-label': `${row.routeId} 全部任务 Quality ${String(preset.score)}`,
+                                onClick: () => void save(row, qualityPresetPatch(preset.score)),
+                              },
+                              `${preset.label} ${String(preset.score)}`,
+                            ),
+                          ),
+                        ),
+                        createElement('small', null, '初始估计，可随时覆盖；不会自动后台改分'),
+                      ),
+                      createElement(
+                        'details',
+                        { className: 'dsh-governor-quality' },
+                        createElement('summary', null, `高级微调 · ${qualitySummary(row)}`),
+                        TASK_TYPES.map((taskType: TaskType) =>
+                          createElement(
+                            'label',
+                            { key: taskType },
+                            taskType,
+                            createElement('input', {
+                              type: 'number',
+                              min: 0,
+                              max: 100,
+                              step: 1,
+                              defaultValue: row.quality[taskType] ?? '',
+                              placeholder: '0–100',
+                              disabled: !canManage,
+                              'aria-label': `${row.routeId} ${taskType} Quality`,
+                              onBlur: (event: {
+                                currentTarget: { value: string; valueAsNumber: number };
+                              }) => {
+                                const score =
+                                  event.currentTarget.value.trim() === ''
+                                    ? null
+                                    : event.currentTarget.valueAsNumber;
+                                void save(row, { quality: { [taskType]: score } });
+                              },
+                            }),
+                          ),
+                        ),
+                      ),
                     ),
                   ),
                 ),
               ),
             ),
           ),
-        ),
-      ),
-    ),
   );
 }
 
@@ -769,13 +1021,32 @@ function formatCreditNanos(value: string): string {
 function UsersSettings({ api, canManage }: GovernorManagedSettingsProps) {
   const [rows, setRows] = useState<readonly GovernorUserView[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
   useEffect(() => {
-    void api.users().then(setRows, (cause: unknown) => setError(String(cause)));
+    let live = true;
+    void api.users().then(
+      (value) => {
+        if (live) {
+          setRows(value);
+          setLoading(false);
+        }
+      },
+      (cause: unknown) => {
+        if (live) {
+          setError(String(cause));
+          setLoading(false);
+        }
+      },
+    );
+    return () => {
+      live = false;
+    };
   }, [api]);
   const save = async (
     row: GovernorUserView,
     patch: { monthlyCredits?: number; allow?: string[] },
   ) => {
+    setError(null);
     try {
       await api.saveUser(row.userId, patch, row.configRevision);
       setRows(await api.users());
@@ -787,6 +1058,16 @@ function UsersSettings({ api, canManage }: GovernorManagedSettingsProps) {
     'div',
     null,
     createElement(ErrorNotice, { error }),
+    loading
+      ? createElement('p', { className: 'dsh-governor-empty', role: 'status' }, '正在加载用户策略…')
+      : rows.length === 0 && error === null
+        ? createElement(
+            'section',
+            { className: 'dsh-governor-empty', 'aria-label': '用户策略空状态' },
+            createElement('strong', null, '暂无用户策略'),
+            createElement('p', null, '当 Host 配置用户额度或模型允许列表后，用户会显示在这里。'),
+          )
+        : null,
     rows.map((row) =>
       createElement(
         'fieldset',
@@ -839,8 +1120,26 @@ function UsersSettings({ api, canManage }: GovernorManagedSettingsProps) {
 function UsageSettings({ api }: GovernorSettingsProps) {
   const [rows, setRows] = useState<readonly GovernorUsageView[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
   useEffect(() => {
-    void api.usage31Days().then(setRows, (cause: unknown) => setError(String(cause)));
+    let live = true;
+    void api.usage31Days().then(
+      (value) => {
+        if (live) {
+          setRows(value);
+          setLoading(false);
+        }
+      },
+      (cause: unknown) => {
+        if (live) {
+          setError(String(cause));
+          setLoading(false);
+        }
+      },
+    );
+    return () => {
+      live = false;
+    };
   }, [api]);
   const totals = useMemo(() => {
     const requests = new Set(rows.map((row) => row.requestId)).size;
@@ -871,45 +1170,86 @@ function UsageSettings({ api }: GovernorSettingsProps) {
       createElement(
         'div',
         null,
-        createElement('strong', null, formatCreditNanos(totals.creditNanos.toString())),
+        createElement(
+          'strong',
+          { title: formatCreditNanos(totals.creditNanos.toString()) },
+          formatCreditNanos(totals.creditNanos.toString()),
+        ),
         createElement('span', null, 'Credits'),
       ),
     ),
-    createElement(
-      'div',
-      { className: 'dsh-governor-table-wrap' },
-      createElement(
-        'table',
-        null,
-        createElement(
-          'thead',
-          null,
-          createElement(
-            'tr',
-            null,
-            ['请求', '模型', 'Tokens', 'Credits', '时延', '结果'].map((label) =>
-              createElement('th', { key: label }, label),
-            ),
-          ),
-        ),
-        createElement(
-          'tbody',
-          null,
-          rows.map((row) =>
+    loading
+      ? createElement('p', { className: 'dsh-governor-empty', role: 'status' }, '正在加载用量…')
+      : rows.length === 0 && error === null
+        ? createElement(
+            'section',
+            { className: 'dsh-governor-empty', 'aria-label': '用量空状态' },
+            createElement('strong', null, '最近 31 天暂无用量记录'),
+            createElement('p', null, '模型请求完成后，用量和回退记录会显示在这里。'),
+          )
+        : createElement(
+            'div',
+            { className: 'dsh-governor-table-wrap dsh-governor-usage-list' },
             createElement(
-              'tr',
-              { key: `${row.requestId}:${String(row.fallbackIndex)}` },
-              createElement('td', null, `${row.requestId} #${String(row.fallbackIndex)}`),
-              createElement('td', null, `${row.provider}:${row.model}`),
-              createElement('td', null, String(row.inputTokens + row.outputTokens)),
-              createElement('td', null, formatCreditNanos(row.creditNanos)),
-              createElement('td', null, `${row.latencyMs} ms`),
-              createElement('td', null, row.success ? '成功' : '失败'),
+              'table',
+              null,
+              createElement(
+                'thead',
+                null,
+                createElement(
+                  'tr',
+                  null,
+                  ['请求', '模型', 'Tokens', 'Credits', '时延', '结果'].map((label) =>
+                    createElement('th', { key: label }, label),
+                  ),
+                ),
+              ),
+              createElement(
+                'tbody',
+                null,
+                rows.map((row) =>
+                  createElement(
+                    'tr',
+                    { key: `${row.requestId}:${String(row.fallbackIndex)}` },
+                    createElement(
+                      'td',
+                      { 'data-label': '请求' },
+                      createElement('code', { title: row.requestId }, row.requestId),
+                      createElement('small', null, `回退 #${String(row.fallbackIndex)}`),
+                    ),
+                    createElement(
+                      'td',
+                      { 'data-label': '模型', title: `${row.provider}:${row.model}` },
+                      createElement('strong', null, row.model),
+                      createElement('small', null, row.provider),
+                    ),
+                    createElement(
+                      'td',
+                      { 'data-label': 'Tokens' },
+                      String(row.inputTokens + row.outputTokens),
+                    ),
+                    createElement(
+                      'td',
+                      { 'data-label': 'Credits', title: formatCreditNanos(row.creditNanos) },
+                      formatCreditNanos(row.creditNanos),
+                    ),
+                    createElement('td', { 'data-label': '时延' }, `${row.latencyMs} ms`),
+                    createElement(
+                      'td',
+                      { 'data-label': '结果' },
+                      createElement(
+                        'span',
+                        {
+                          className: `dsh-governor-result ${row.success ? 'success' : 'failure'}`,
+                        },
+                        row.success ? '成功' : '失败',
+                      ),
+                    ),
+                  ),
+                ),
+              ),
             ),
           ),
-        ),
-      ),
-    ),
   );
 }
 
@@ -1002,11 +1342,13 @@ export function GovernorSettings({ api }: GovernorSettingsProps) {
 }
 
 const STYLES = `
-.dsh-governor-model-select{display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap}.dsh-governor-model-select select,.dsh-governor-model-select input{max-width:250px;border:0;border-radius:9px;background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary);padding:5px 8px;font:inherit}.dsh-governor-model-select input{width:110px}.dsh-governor-model-select [role=status]{font-size:11px;color:var(--dsw-alias-label-tertiary)}.dsh-governor-model-error{flex-basis:100%;max-width:520px;border-radius:7px;background:var(--dsw-alias-interactive-bg-hover-danger);color:var(--dsw-alias-state-error-primary);padding:6px 8px;font-size:11px;line-height:1.45}
-.dsh-governor-settings{color:var(--dsw-alias-label-primary)}.dsh-governor-settings>header{display:flex;justify-content:space-between;align-items:end;border-bottom:1px solid var(--dsw-alias-border-l2);padding:6px 0 14px}.dsh-governor-settings>header p{margin:0;color:var(--dsw-alias-label-tertiary);font-size:10px;letter-spacing:.14em}.dsh-governor-settings>header h2{margin:2px 0 0;font:600 25px/1.2 Georgia,serif}.dsh-governor-settings>header>span,.dsh-governor-readonly{font-size:12px;color:var(--dsw-alias-label-tertiary)}.dsh-governor-settings nav{display:flex;gap:4px;padding:14px 0}.dsh-governor-settings nav button,.dsh-governor-form button{border:0;border-radius:9px;background:transparent;color:inherit;padding:7px 12px;font:inherit;cursor:pointer}.dsh-governor-settings nav button:hover,.dsh-governor-settings nav button.active{background:var(--dsw-alias-interactive-bg-hover)}.dsh-governor-settings-body{min-height:280px}.dsh-governor-form{display:grid;max-width:420px;gap:14px}.dsh-governor-form label,.dsh-governor-user label{display:grid;gap:6px;font-size:13px}.dsh-governor-form input,.dsh-governor-form select,.dsh-governor-user input,.dsh-governor-table-wrap input{box-sizing:border-box;border:1px solid var(--dsw-alias-border-l2);border-radius:9px;background:var(--dsw-alias-bg-layer-1);color:inherit;padding:8px}.dsh-governor-form button{justify-self:start;background:var(--dsw-alias-label-primary);color:var(--dsw-alias-bg-layer-2)}.dsh-governor-table-wrap{max-width:100%;overflow:auto}.dsh-governor-table-wrap table{width:100%;border-collapse:collapse;font-size:13px}.dsh-governor-table-wrap th,.dsh-governor-table-wrap td{text-align:left;border-bottom:1px solid var(--dsw-alias-border-l2);padding:10px 8px;vertical-align:top}.dsh-governor-table-wrap small{display:block;color:var(--dsw-alias-label-tertiary)}.dsh-governor-user{display:grid;grid-template-columns:1fr 2fr auto;gap:12px;border:1px solid var(--dsw-alias-border-l2);border-radius:12px;margin:0 0 10px;padding:12px}.dsh-governor-user legend{padding:0 5px}.dsh-governor-metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:12px 0}.dsh-governor-metrics>div{border:1px solid var(--dsw-alias-border-l2);border-radius:12px;padding:12px}.dsh-governor-metrics strong,.dsh-governor-metrics span{display:block}.dsh-governor-metrics strong{font-size:22px}.dsh-governor-metrics span{font-size:11px;color:var(--dsw-alias-label-tertiary)}.dsh-governor-error{border-radius:8px;background:var(--dsw-alias-interactive-bg-hover-danger);color:var(--dsw-alias-state-error-primary);padding:8px 10px;font-size:12px}
+.dsh-governor-model-select .dsh-governor-model-controls select,.dsh-governor-model-select .dsh-governor-model-controls input{font-family:inherit}.dsh-governor-model-select .dsh-governor-model-controls>select,.dsh-governor-model-select .dsh-governor-model-controls>input{height:28px;padding:4px 8px;font-size:13px;font-weight:500;line-height:20px}.dsh-governor-model-select .dsh-governor-model-controls>select option{font-size:13px;font-weight:500;line-height:20px}.dsh-governor-model-select .dsh-governor-model-controls>input{width:92px}.dsh-governor-model-select .dsh-governor-effort{font-size:12px;font-weight:400;line-height:18px}.dsh-governor-model-select .dsh-governor-effort select{height:26px;padding:3px 7px;font-size:12px;font-weight:400;line-height:18px}.dsh-governor-model-select .dsh-governor-effort select option{font-size:12px;font-weight:400;line-height:18px}.dsh-governor-model-select .dsh-governor-effort select:disabled{color:var(--dsw-alias-label-secondary);opacity:1;-webkit-text-fill-color:var(--dsw-alias-label-secondary)}
+.dsh-governor-model-select{display:inline-grid;max-width:100%;gap:6px;vertical-align:middle}.dsh-governor-model-controls{display:flex;min-width:0;align-items:center;gap:6px;flex-wrap:wrap}.dsh-governor-model-controls select,.dsh-governor-model-controls input{box-sizing:border-box;max-width:250px;border:0;border-radius:9px;background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary);padding:5px 8px;font:inherit}.dsh-governor-model-controls input{width:92px}.dsh-governor-model-controls [role=status]{font-size:11px;color:var(--dsw-alias-label-tertiary)}.dsh-governor-effort{display:inline-flex;align-items:center;gap:5px;color:var(--dsw-alias-label-secondary);font-size:11px;white-space:nowrap}.dsh-governor-effort select{color:var(--dsw-alias-label-primary);font-size:inherit}.dsh-governor-model-error{position:absolute;left:50%;bottom:calc(100% + 12px);z-index:30;box-sizing:border-box;display:block;width:max-content;max-width:min(520px,calc(100% - 24px));transform:translateX(-50%);border:1px solid var(--dsw-alias-state-error-primary);border-radius:10px;background:var(--dsw-alias-interactive-bg-hover-danger);box-shadow:0 10px 30px rgba(0,0,0,.18);color:var(--dsw-alias-state-error-primary);padding:8px 12px;font-size:12px;line-height:1.45;white-space:normal;overflow-wrap:anywhere;pointer-events:none}.dsh-governor-model-error.notice{border-color:var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-2,var(--dsw-alias-interactive-bg-hover));color:var(--dsw-alias-label-secondary)}
+.dsh-governor-settings{min-width:0;color:var(--dsw-alias-label-primary)}.dsh-governor-settings>header{display:flex;min-width:0;justify-content:space-between;align-items:end;gap:16px;border-bottom:1px solid var(--dsw-alias-border-l2);padding:6px 0 14px}.dsh-governor-settings>header>div{min-width:0}.dsh-governor-settings>header p{margin:0;color:var(--dsw-alias-label-tertiary);font-size:10px;letter-spacing:.14em}.dsh-governor-settings>header h2{margin:2px 0 0;font:600 23px/1.2 inherit}.dsh-governor-settings>header>span,.dsh-governor-readonly{min-width:0;color:var(--dsw-alias-label-tertiary);font-size:12px}.dsh-governor-settings>header>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.dsh-governor-settings nav{display:flex;flex-wrap:wrap;gap:4px;padding:14px 0}.dsh-governor-settings nav button,.dsh-governor-form button{border:0;border-radius:8px;background:transparent;color:inherit;padding:7px 12px;font:inherit;cursor:pointer}.dsh-governor-settings nav button:hover,.dsh-governor-settings nav button.active{background:var(--dsw-alias-interactive-bg-hover)}.dsh-governor-settings button:focus-visible,.dsh-governor-settings input:focus-visible,.dsh-governor-settings select:focus-visible,.dsh-governor-settings summary:focus-visible{outline:2px solid var(--dsw-alias-label-secondary);outline-offset:2px}.dsh-governor-settings button:disabled{cursor:not-allowed;opacity:.55}.dsh-governor-settings-body{min-width:0;min-height:280px}.dsh-governor-form{display:grid;width:min(100%,420px);gap:14px}.dsh-governor-form label,.dsh-governor-user label{display:grid;min-width:0;gap:6px;font-size:13px}.dsh-governor-form label>small{color:var(--dsw-alias-label-tertiary);font-size:11px;line-height:1.45}.dsh-governor-form input,.dsh-governor-form select,.dsh-governor-user input,.dsh-governor-table-wrap input{box-sizing:border-box;min-width:0;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;background:var(--dsw-alias-bg-layer-1);color:inherit;padding:8px}.dsh-governor-form-actions{display:flex;align-items:center;gap:10px;min-height:34px}.dsh-governor-form-actions button{background:var(--dsw-alias-label-primary);color:var(--dsw-alias-bg-layer-2)}.dsh-governor-form-actions span{color:var(--dsw-alias-state-success-primary,var(--dsw-alias-label-secondary));font-size:12px}.dsh-governor-error{max-width:100%;border-radius:8px;background:var(--dsw-alias-interactive-bg-hover-danger);color:var(--dsw-alias-state-error-primary);padding:8px 10px;font-size:12px;line-height:1.45;overflow-wrap:anywhere}.dsh-governor-empty{box-sizing:border-box;margin:10px 0;border:1px dashed var(--dsw-alias-border-l2);border-radius:10px;background:var(--dsw-alias-bg-layer-1);padding:18px;color:var(--dsw-alias-label-secondary);font-size:12px;text-align:center}.dsh-governor-empty strong{display:block;color:var(--dsw-alias-label-primary);font-size:13px}.dsh-governor-empty p{margin:5px auto 0;max-width:520px;line-height:1.5}
 .dsh-governor-onboarding{margin:0 0 12px;border:1px solid var(--dsw-alias-border-l2);border-left:3px solid var(--dsw-alias-state-warning-primary,var(--dsw-alias-label-secondary));border-radius:10px;background:var(--dsw-alias-bg-layer-1);padding:11px 13px}.dsh-governor-onboarding.ready{border-left-color:var(--dsw-alias-state-success-primary,var(--dsw-alias-label-secondary))}.dsh-governor-onboarding strong,.dsh-governor-onboarding p,.dsh-governor-onboarding small{display:block}.dsh-governor-onboarding p{max-width:780px;margin:5px 0;color:var(--dsw-alias-label-secondary);font-size:12px;line-height:1.55}.dsh-governor-onboarding small{color:var(--dsw-alias-label-tertiary)}
-.dsh-governor-quality-presets{min-width:260px;margin-bottom:9px}.dsh-governor-quality-presets>span{display:block;margin-bottom:5px;font-size:11px;color:var(--dsw-alias-label-secondary)}.dsh-governor-quality-presets>div{display:flex;gap:5px}.dsh-governor-quality-presets button{border:1px solid var(--dsw-alias-border-l2);border-radius:7px;background:var(--dsw-alias-bg-layer-1);color:inherit;padding:5px 7px;font:inherit;font-size:11px;cursor:pointer}.dsh-governor-quality-presets button:hover,.dsh-governor-quality-presets button.suggested{border-color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-interactive-bg-hover)}.dsh-governor-quality-presets button:disabled{cursor:not-allowed;opacity:.5}.dsh-governor-quality-presets small{margin-top:5px;font-size:10px}.dsh-governor-quality{min-width:210px}.dsh-governor-quality summary{cursor:pointer;color:var(--dsw-alias-label-secondary);font-size:11px}.dsh-governor-quality label{display:grid;grid-template-columns:1fr 78px;align-items:center;gap:8px;margin-top:7px;font-size:11px}.dsh-governor-quality input{width:78px}
-@media(max-width:600px){.dsh-governor-user{grid-template-columns:1fr}.dsh-governor-metrics{grid-template-columns:1fr}.dsh-governor-settings nav{overflow-x:auto}}
+.dsh-governor-table-wrap{width:100%;min-width:0;max-width:100%;overflow:visible}.dsh-governor-table-wrap table{width:100%;font-size:13px}.dsh-governor-table-wrap small{display:block;color:var(--dsw-alias-label-tertiary)}.dsh-governor-model-table,.dsh-governor-model-table tbody{display:block;border:0;border-collapse:separate}.dsh-governor-model-table thead,.dsh-governor-usage-list thead{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0}.dsh-governor-model-table tbody{display:grid;gap:10px}.dsh-governor-model-table tr{display:grid;grid-template-columns:minmax(140px,180px) minmax(180px,1fr) auto;gap:10px 12px;align-items:end;border:1px solid var(--dsw-alias-border-l2);border-radius:11px;background:var(--dsw-alias-bg-layer-1);padding:12px}.dsh-governor-model-table tr.unavailable{border-left:3px solid var(--dsw-alias-label-tertiary);padding-left:10px}.dsh-governor-model-table tr.unavailable[data-reason=credential_missing],.dsh-governor-model-table tr.unavailable[data-reason=availability_check_failed]{border-left-color:var(--dsw-alias-state-warning-primary,var(--dsw-alias-label-tertiary))}.dsh-governor-model-table td{min-width:0;border:0;padding:0;vertical-align:top}.dsh-governor-model-table td:first-child{grid-column:1/3;align-self:center}.dsh-governor-model-table td:nth-child(2){grid-column:3;grid-row:1;align-self:center}.dsh-governor-model-table td:nth-child(3){grid-column:1}.dsh-governor-model-table td:nth-child(4){grid-column:2/4}.dsh-governor-model-table td:nth-child(5){grid-column:1/-1;border-top:1px solid var(--dsw-alias-border-l2);padding-top:11px}.dsh-governor-model-table td[data-label]::before,.dsh-governor-usage-list td::before{display:block;margin-bottom:5px;color:var(--dsw-alias-label-tertiary);content:attr(data-label);font-size:10px;line-height:1.2}.dsh-governor-model-table td:nth-child(2)::before{display:inline;margin:0 7px 0 0}.dsh-governor-model-table td:nth-child(2) input{vertical-align:middle}.dsh-governor-model-table td:nth-child(3) input,.dsh-governor-model-table td:nth-child(4) input{width:100%}.dsh-governor-model-identity strong,.dsh-governor-model-identity small{display:block;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.dsh-governor-model-identity strong{font-size:14px}.dsh-governor-model-identity small{margin-top:2px}.dsh-governor-model-availability{display:block;width:fit-content;max-width:100%;margin-top:7px;border-radius:6px;background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-secondary);padding:4px 7px;font-size:11px;line-height:1.35;white-space:normal}.dsh-governor-model-availability[data-reason=credential_missing]{background:var(--dsw-alias-state-warning-secondary,var(--dsw-alias-interactive-bg-hover));color:var(--dsw-alias-state-warning-primary,var(--dsw-alias-label-secondary))}.dsh-governor-quality-presets{min-width:0;margin-bottom:9px}.dsh-governor-quality-presets>span{display:block;margin-bottom:6px;color:var(--dsw-alias-label-secondary);font-size:11px}.dsh-governor-quality-presets>div{display:flex;flex-wrap:wrap;gap:6px}.dsh-governor-quality-presets button{flex:0 1 auto;border:1px solid var(--dsw-alias-border-l2);border-radius:7px;background:var(--dsw-alias-bg-layer-1);color:inherit;padding:5px 8px;font:inherit;font-size:11px;white-space:nowrap;cursor:pointer}.dsh-governor-quality-presets button:hover,.dsh-governor-quality-presets button.suggested{border-color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-interactive-bg-hover)}.dsh-governor-quality-presets button:disabled{cursor:not-allowed;opacity:.5}.dsh-governor-quality-presets small{margin-top:5px;font-size:10px}.dsh-governor-quality{min-width:0}.dsh-governor-quality summary{cursor:pointer;color:var(--dsw-alias-label-secondary);font-size:11px}.dsh-governor-quality[open]{display:grid;grid-template-columns:repeat(auto-fit,minmax(135px,1fr));gap:0 12px}.dsh-governor-quality[open] summary{grid-column:1/-1}.dsh-governor-quality label{display:grid;min-width:0;grid-template-columns:minmax(0,1fr) 68px;align-items:center;gap:7px;margin-top:8px;font-size:11px}.dsh-governor-quality input{width:68px}
+.dsh-governor-user{display:grid;grid-template-columns:minmax(110px,.7fr) minmax(170px,1.5fr) auto;gap:12px;align-items:end;border:1px solid var(--dsw-alias-border-l2);border-radius:11px;margin:0 0 10px;padding:12px}.dsh-governor-user legend{max-width:100%;padding:0 5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.dsh-governor-user output{padding:8px 0;color:var(--dsw-alias-label-secondary);font-size:12px;white-space:nowrap}.dsh-governor-metrics{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin:12px 0}.dsh-governor-metrics>div{min-width:0;border:1px solid var(--dsw-alias-border-l2);border-radius:10px;padding:12px}.dsh-governor-metrics strong,.dsh-governor-metrics span{display:block}.dsh-governor-metrics strong{max-width:100%;overflow:hidden;text-overflow:ellipsis;font-size:clamp(16px,3vw,22px);font-variant-numeric:tabular-nums;white-space:nowrap}.dsh-governor-metrics span{color:var(--dsw-alias-label-tertiary);font-size:11px}.dsh-governor-usage-list table,.dsh-governor-usage-list tbody{display:block;border:0;border-collapse:separate}.dsh-governor-usage-list tbody{display:grid;gap:8px}.dsh-governor-usage-list tr{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;border:1px solid var(--dsw-alias-border-l2);border-radius:10px;background:var(--dsw-alias-bg-layer-1);padding:11px}.dsh-governor-usage-list td{min-width:0;border:0;padding:0;font-variant-numeric:tabular-nums}.dsh-governor-usage-list td>code,.dsh-governor-usage-list td>strong{display:block;max-width:100%;overflow:hidden;text-overflow:ellipsis;color:inherit;font:inherit;font-weight:600;white-space:nowrap}.dsh-governor-usage-list td:nth-child(4){max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.dsh-governor-usage-list td:nth-child(5){white-space:nowrap}.dsh-governor-result{display:inline-block;border-radius:999px;background:var(--dsw-alias-interactive-bg-hover);padding:3px 7px;font-size:11px;white-space:nowrap}.dsh-governor-result.success{color:var(--dsw-alias-state-success-primary,var(--dsw-alias-label-primary))}.dsh-governor-result.failure{background:var(--dsw-alias-interactive-bg-hover-danger);color:var(--dsw-alias-state-error-primary)}
+@media(max-width:600px){.dsh-governor-settings>header{align-items:start;flex-direction:column;gap:6px}.dsh-governor-settings>header>span{max-width:100%}.dsh-governor-model-table tr{grid-template-columns:minmax(0,1fr) auto}.dsh-governor-model-table td:first-child{grid-column:1}.dsh-governor-model-table td:nth-child(2){grid-column:2}.dsh-governor-model-table td:nth-child(3),.dsh-governor-model-table td:nth-child(4),.dsh-governor-model-table td:nth-child(5){grid-column:1/-1}.dsh-governor-user{grid-template-columns:1fr}.dsh-governor-user output{padding:0}.dsh-governor-usage-list tr{grid-template-columns:repeat(2,minmax(0,1fr))}}
 `;
 
 interface SlotsPort {

@@ -22,6 +22,63 @@ export { GovernorExtensionRegistry } from '../extensions/registry.js';
 const GOVERNOR_WEB_PREFIX = '/governor';
 /** LLM 分类器的 Prompt 版本（与 classifier 缓存键约定一致，变更时 bump）。 */
 const CLASSIFIER_PROMPT_VERSION = 'v1';
+function valueAtPath(root, path) {
+    let value = root;
+    for (const segment of path) {
+        if (typeof value !== 'object' || value === null || Array.isArray(value))
+            return undefined;
+        value = value[segment];
+    }
+    return value;
+}
+/**
+ * 复用 Host Models 页的 providerUsable 事实源：
+ * active adapter + resolved profile + credential describe(configured)。
+ *
+ * 没有 configurable settings 地址、或 profile 未命名 `apiKeyEnv` 的活动 provider
+ * 可以使用 provider 自身的身份链；显式命名 credential ref 时则必须由
+ * Host credentials seam 确认已配置。整个判定不接触 secret value。
+ */
+export async function resolveGovernorProviderAvailability(ctx, provider) {
+    const entry = ctx.llm
+        .listConfigurableProviders()
+        .find((candidate) => candidate.provider === provider);
+    if (entry === undefined || entry.settingsNs.length === 0)
+        return { available: true };
+    // `settings` / `credentials` 是可选 Host service，必须从声明了相应 inject 的
+    // nested context 读取。主 Governor context 只 inject llm；在生产 Cordis 作用域
+    // 中通过 ctx.get() 猜测可选 service 会得到 undefined，进而把全部 provider 误判。
+    const services = ctx;
+    const settings = services.settings;
+    const namespace = settings.get(entry.settingsNs);
+    if (namespace === undefined) {
+        return { available: false, reason: 'availability_check_failed' };
+    }
+    const profile = valueAtPath(namespace, entry.settingsPath);
+    if (typeof profile !== 'object' || profile === null || Array.isArray(profile)) {
+        return { available: false, reason: 'availability_check_failed' };
+    }
+    const ref = profile['apiKeyEnv'];
+    if (ref === undefined)
+        return { available: true };
+    if (typeof ref !== 'string' || ref.length === 0) {
+        return { available: false, reason: 'availability_check_failed' };
+    }
+    try {
+        const status = await services.credentials.describe(ref);
+        return status.configured
+            ? { available: true }
+            : { available: false, reason: 'credential_missing' };
+    }
+    catch {
+        return { available: false, reason: 'availability_check_failed' };
+    }
+}
+async function refreshGovernorModelDirectory(ctx, service, availabilityCtx) {
+    await service.refreshModelDirectory(() => ctx.llm.listProviders(), (provider) => ctx.llm.listModels(provider), ...(availabilityCtx === undefined
+        ? []
+        : [(provider) => resolveGovernorProviderAvailability(availabilityCtx, provider)]));
+}
 /**
  * 解析默认 SQLite 路径：$DSH_HOME/dsh-llm-governor/governor.db。
  * DSH_HOME 未设置时回退到 ~/.dsh（与 dsh-home-paths 的默认一致）。
@@ -53,6 +110,23 @@ function extractClassifyInput(messages) {
         out.push({ type: msg.role ?? 'user', text });
     }
     return { messages: out, hasImage, hasToolContext };
+}
+/**
+ * Keep adapter-owned reasoning effort scoped to the exact route that exposed it.
+ *
+ * Composer selection contributes an effort for its concrete provider/model. When
+ * Governor replaces that route (Auto or fallback), carrying the opaque effort id
+ * into another adapter can make an otherwise valid request emit an unsupported
+ * provider parameter. Omitting it lets DSH resolve the selected route's own
+ * advertised default, when that route actually supports reasoning controls.
+ */
+export function isolateRouteOwnedReasoningEffort(proposed, selected) {
+    const routeChanged = proposed.provider !== selected.provider || proposed.model !== selected.model;
+    if (!routeChanged || selected.reasoningEffort === undefined)
+        return selected;
+    const isolated = { ...selected };
+    delete isolated.reasoningEffort;
+    return isolated;
 }
 /**
  * 从已验证的 IdentityConfig 构建身份提供者实例（header/jwt 模式）。
@@ -308,12 +382,40 @@ function toRuntimeConfig(resolved) {
  * @param service - 已构造的 Governor 服务实例。
  */
 export async function wireGovernorEvents(ctx, service) {
-    // 4. llm/adapters-updated：刷新模型目录
-    ctx.on('llm/adapters-updated', (() => {
-        void service
-            .refreshModelDirectory(() => ctx.llm.listProviders(), (p) => ctx.llm.listModels(p))
-            .catch(() => { });
-    }), { global: true });
+    let availabilityCtx;
+    let directoryRefreshActive = true;
+    const refreshDirectory = () => {
+        if (!directoryRefreshActive)
+            return;
+        // Capture one scope per refresh. GovernorService 的 generation guard 保证 scope
+        // 切换或事件重叠时 latest-wins，旧 credential 结果不能覆盖新状态。
+        const scopedSnapshot = availabilityCtx;
+        void refreshGovernorModelDirectory(ctx, service, scopedSnapshot).catch(() => { });
+    };
+    // 4. adapter/settings/credential 任一事实源变更都重新执行当前可用性 join。
+    //    监听器本身不访问可选 service；当 nested inject 活动时，它捕获的
+    //    scoped context 才能合法读取 settings / credentials。
+    ctx.on('llm/adapters-updated', refreshDirectory, { global: true });
+    ctx.on('credentials/updated', refreshDirectory, { global: true });
+    ctx.on('settings/updated', refreshDirectory, { global: true });
+    ctx.inject(['settings', 'credentials'], (scopedCtx) => {
+        availabilityCtx = scopedCtx;
+        // 初次获得可选 service 时立即把启动阶段的 adapter-only 快照升级成 Host join。
+        refreshDirectory();
+        return () => {
+            if (availabilityCtx !== scopedCtx)
+                return;
+            availabilityCtx = undefined;
+            // 可选 service 卸载时不能永久保留 stale unavailable。回退到活动 adapter
+            // 事实；这也保留未安装 Settings 的独立部署和 provider-owned auth chain。
+            refreshDirectory();
+        };
+    });
+    // Governor 本身卸载时，阻止 nested scope 的清理回调启动新的目录刷新。
+    ctx.effect(() => () => {
+        directoryRefreshActive = false;
+        availabilityCtx = undefined;
+    });
     // 5. agent/pre-step：读取本步新消息，执行 Hint/Rule/LLM 自动分类，
     //    并提取能力/模态要求（图片输入 → vision 能力 + image 模态）
     ctx.on('agent/pre-step', (async (payload, next) => {
@@ -329,7 +431,7 @@ export async function wireGovernorEvents(ctx, service) {
         const sessionId = payload.agent.id;
         const defaultConfig = await next();
         const { config } = await service.selectModel(sessionId, payload.turn, payload.step, defaultConfig);
-        return config;
+        return isolateRouteOwnedReasoningEffort(defaultConfig, config);
     }), { global: true });
     // 7. llm/stream：观察真实 attempt、Token、finish、时延，不消费流。
     //    首个语义 chunk 交付时标记部分输出保护（此后不再透明切换模型）。
@@ -508,7 +610,7 @@ export const GovernorPlugin = {
         });
         // 3. 从 DSH advisory 合并模型目录（初始目录从配置构建，在构造函数中完成）
         try {
-            await service.refreshModelDirectory(() => ctx.llm.listProviders(), (p) => ctx.llm.listModels(p));
+            await refreshGovernorModelDirectory(ctx, service);
         }
         catch {
             // DSH 未就绪时保留配置构建的初始目录

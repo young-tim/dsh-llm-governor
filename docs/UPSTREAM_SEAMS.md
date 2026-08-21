@@ -7,13 +7,14 @@
 按任务书约定：seam 缺失时只提交可复现证据并继续不受影响的部分，不做
 node_modules 补丁、虚拟模型、UI overlay 或 DSH 私有 fork。
 
-## SEAM-1 Session Event 的 `ignorable` 写入 API 缺失（P0 阻断项）
+## SEAM-1 Session Event 的 `ignorable` 写入 API 缺失（已绕开，非当前阻断）
 
 **需求**：GOV-TRACE-001 要求插件写入自有非 surface Session Event
 （`governor/routing-decision`、`governor/selection-mode`），且旧读取器/插件卸载后
 不破坏 Session 恢复（AC 6），同一 decisionId 幂等（AC 10）。
 
 **现状**：
+
 - `SessionEvent` envelope 定义了 `ignorable?: true` 字段
   （`dsh-session/lib/types/types.d.ts` L443）：未知类型事件必须带该标记，
   读取器才能安全跳过。
@@ -27,6 +28,7 @@ node_modules 补丁、虚拟模型、UI overlay 或 DSH 私有 fork。
   `SessionFormatUnsupportedError`，拒绝解释整个 log。
 
 **可复现证据**（`test/contracts/session-event-seams.test.ts`）：
+
 1. `未标 ignorable 的 governor 事件持久化后冷读回被拒绝`：
    双 Context（模拟进程重启）+ JSONL 持久化往返，`load()` 拒绝并报
    "unknown to this harness and not marked ignorable"。
@@ -40,12 +42,14 @@ node_modules 补丁、虚拟模型、UI overlay 或 DSH 私有 fork。
 `append(type, data, { ignorable: true })`），或提供等价的插件事件
 envelope 扩展通道。
 
-**影响与缓解**：seam 补齐前，Governor 不向可持久化会话写入 governor 事件
-（否则破坏 DSH Session 恢复，违反"DSH 合同兼容"优先级）。双写协议中
-Session Event 侧在测试环境以内存 Session 验证行为（append/幂等/ack/durable
-语义均可用），持久化往返被阻断的部分记入 BLOCKED.md。
+**最终实现**：Governor 不再新写未知的 `governor/*` envelope，而是在 rc.8
+已知、非 surface 的 `request/context` 数据内写
+`governorDecision` / `governorSelection` 命名投影。该载体不参与 Prompt 重建，
+旧 reader 可以冷读且卸载插件后仍安全；真实 JSONL 持久化、关闭、重启与恢复
+测试已通过。`governor/*` 只用于读取开发期旧数据。因此上游 API 缺口仍可记录，
+但不再阻断 Governor。
 
-## SEAM-2 插件事件类型注册面缺失（P0 阻断项，与 SEAM-1 同源）
+## SEAM-2 插件事件类型注册面缺失（已绕开，非当前阻断）
 
 **需求**：同 SEAM-1；插件事件类型应可被 persistence 读取路径识别。
 
@@ -60,12 +64,16 @@ Session Event 侧在测试环境以内存 Session 验证行为（append/幂等/a
 `registerKnownSessionEventType('governor/routing-decision')`），或将
 `ignorable` 判定作为插件事件的默认策略。
 
-## SEAM-3 方法级 Remote capability 声明缺失（P0 阻断项）
+**最终实现**：与 SEAM-1 相同，新写入使用 rc.8 已知的 `request/context`
+carrier，不需要注册新的 envelope type。
+
+## SEAM-3 方法级 Remote capability 声明缺失（Governor 已 Host 内闭环）
 
 **需求**：GOV-SEC-001 要求每个 Remote 方法显式声明 `governor.read|manage|audit`
 capability，且 Remote 使用 Host 解析的登录主体。
 
 **现状**：
+
 - `RemoteMethodMarker`（`dsh-typert-protocol/lib/types/index.d.ts` L47-53）
   只有 `method/exportName/invocation` 三个字段，`invocation` 仅声明调用模式
   （`direct` / `context` scoped），**没有 permission/capability 字段**。
@@ -74,8 +82,9 @@ capability，且 Remote 使用 Host 解析的登录主体。
   `InvocationDescriptor` 不携带调用主体。
 
 **可复现证据**（`test/contracts/client-surface-seams.test.ts`）：
+
 1. `RemoteMethodMarker 契约只有 method/exportName/invocation，无
-   capability/permission 字段`（发布物取证）。
+capability/permission 字段`（发布物取证）。
 2. `bindTypertRemote 返回的 binding 只有 service/serviceKey/namespace，且被冻结`
    （运行时复现）。
 3. `typert-protocol 的导出面没有 capability 声明/校验 API`（运行时复现）。
@@ -84,10 +93,11 @@ capability，且 Remote 使用 Host 解析的登录主体。
 主体传递（例如 `@Remote({ capability: 'governor.manage' })` 与
 `InvocationDescriptor.principal`）。
 
-**影响与缓解**：Governor 在 Host 端实现自身的 capability 复核矩阵
-（GOV-SEC-001 的"Host 端复核"部分）与兼容 API 的 Bearer token 鉴权；
-但"DSH Remote 使用 Host 解析的登录主体、不接受浏览器自报"在 rc.8 上无法
-完整实现，相关 AC 记入 BLOCKED.md。
+**最终实现**：Governor Remote 方法完全不接收 actor/user/role；Host resolver
+在 local profile 绑定进程 owner，在其他 identity provider 下只接受可信的 Host
+principal provider，缺失时 fail-closed。每次调用仍在 Governor Host service 内
+执行 capability 复核。真实 Typert Registry + Gateway 测试证明浏览器不能自报
+主体，因而该协议能力虽仍值得上游增强，但不再阻断 Governor 的安全合同。
 
 ## SEAM-4 TC39 装饰器在部分构建/测试管道不可用（环境限制，非上游缺失）
 
@@ -106,29 +116,49 @@ TC39 装饰器语义（`context.addInitializer`）。tsc（本项目 build）可
 `@Remote()` 装饰器，须确保只在 tsc 构建路径加载，或等待 vitest/oxc 支持。
 Governor 的 capability 复核不依赖装饰器（方法内检查）。
 
-## SEAM-5 client 侧注册表为浏览器 bundle，Node 合同测试无法实例化（环境限制）
+## SEAM-5 已确认可用：第三方 client bundle 的公开发现与分发通道
 
-**现状**：Trajectory definition（`ctx.conversationEvents` /
-`ctx.conversationViews`）与单占位 selector（`ctx.slots`，SlotMap
-`conversation.input.model` `kind:'single'`）的运行时实现位于
-`dsh-client-runtime/lib/client.js`，文件首行为
-`window.__ModuleLoader__.load({...})`——浏览器专用模块格式，Node 无法加载。
+早期复审只检查了 `@deepseek-ai/dsh-web-app` 的静态依赖，因而误判
+`exports["./client"]` 不会被发现。复查 rc.8 的真实 Host 发布物后，该结论已撤回。
 
-**可复现证据**（`test/contracts/client-surface-seams.test.ts`）：
-`client 入口是浏览器 bundle：window.__ModuleLoader__ 阻止 Node 实例化`。
+**真实链路**：`@deepseek-ai/dsh-client-modules` 的 `ClientModuleRegistry` 会遍历
+Loader 中已安装的插件包，读取 `package.json#dsh.client`，解析
+`exports["./client"]`，构建带 inject/external 的 client module graph，并把
+`window.__ModuleLoader__.load(...)` bundle 提供给 web-app。它不是需审批的
+`dsh-cordis-client-runner` 动态模型包通道，也不需要独立 Web 服务。
 
-**影响与缓解**：合同测试以发布物取证（d.ts 契约 + 注册 API 签名 + 槽位
-`kind:'single'` 声明 + 官方 occupant 包）证明接缝存在；真实注册行为
-（Trajectory 卡片挂载、selector 占用）需要浏览器 E2E（DSH web Profile +
-Playwright）验证，超出本次 Node 合同测试范围，随 GOV-UI-002/GOV-SELECT-001
-的浏览器侧交付补齐（依赖完整 DSH web-app 测试 harness，记入 BLOCKED.md）。
+Governor 的接线如下：
+
+1. `package.json` 声明 `dsh.client` 和 `./client` export；
+2. `scripts/build-client.mjs` 生成 rc.8 ModuleLoader 格式 bundle；
+3. `src/client/browser.ts` 挂载正式 Typert Remote，并注册
+   `conversation.input.model`、`conversation.view`、`settings.section`；
+4. disposer 反向卸载所有 definition、slot、样式和 Remote contribution，支持 HMR；
+5. Composer Auto 通过 Host `setSessionSelectionMode`，Settings 通过 typed Remote
+   读写，Trajectory 同时读取 `request/context.governorDecision` 与旧事件。
+
+**可复现证据**（`test/contracts/client-surface-seams.test.ts`、
+`test/ui/browser-client.test.ts`）：
+
+- 真实 `ClientModuleRegistry` 从临时安装副本扫描 Governor 和三个官方 client，
+  物化 Governor ModuleLoader factory；测试不修改仓库 `dist/**`；
+- 真实 rc.8 `SlotCore` 验证两种加载顺序下 Governor 都是 single model seat 的实际
+  occupant，卸载后官方 selector 恢复，10 次 HMR 无重复；
+- 真实 `ConversationNodeAssembler` flush 新 `request/context` carrier、rejected
+  决策与缺失 decisionId 的旧 schema，验证 conversation context key；
+- 设置页权限降级、revision refetch、Users allow、31 天 Usage 精度和错误路径有
+  React 交互测试。
+
+**实现边界**：rc.8 不提供把第三方任意 target 嵌入官方 chat request node 的稳定
+扩展点，因此 Governor 使用原生 `conversation.view` 独立页签，并按 Turn/Step 分组
+显示；这仍是同一 Session 的原生可追溯视图。
 
 ## 已确认可用、无需上游变更的接缝
 
-| 接缝 | 证据 |
-| --- | --- |
+| 接缝                                                                                                     | 证据                                          |
+| -------------------------------------------------------------------------------------------------------- | --------------------------------------------- |
 | `agent/request` waterfall 的 request-scoped route override（替换返回值即 dispatch config，不改持久模型） | `test/contracts/request-scoped-route.test.ts` |
-| `Session.append` 对 declaration-merged 插件事件的运行时接受（内存/fork/seed 路径） | `test/contracts/session-event-seams.test.ts` |
-| `session/flush` durable acknowledgement（`SessionStore.flush` 返回 participation） | 同上 |
-| Governor 持久层幂等 append（扫描 log + append + DECISION_CONFLICT 冲突拒绝） | 同上 |
-| 会话控制状态以事件持久化、fork/seed 恢复后重建（`governor.session.v1` 语义） | 同上 |
+| `Session.append` 对 declaration-merged 插件事件的运行时接受（内存/fork/seed 路径）                       | `test/contracts/session-event-seams.test.ts`  |
+| `session/flush` durable acknowledgement（`SessionStore.flush` 返回 participation）                       | 同上                                          |
+| Governor 持久层幂等 append（扫描 log + append + DECISION_CONFLICT 冲突拒绝）                             | 同上                                          |
+| 会话控制状态以事件持久化、fork/seed 恢复后重建（`governor.session.v1` 语义）                             | 同上                                          |

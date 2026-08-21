@@ -10,6 +10,7 @@ export type RoutingErrorCode =
   | 'MODEL_NOT_FOUND'
   | 'AMBIGUOUS_MODEL_ROUTE'
   | 'MODEL_DISABLED'
+  | 'PROVIDER_UNAVAILABLE'
   | 'MODEL_ACCESS_DENIED'
   | 'CAPABILITY_NOT_SUPPORTED'
   | 'QUOTA_EXCEEDED'
@@ -51,6 +52,8 @@ export class RoutingError extends Error {
 export type ExclusionReason =
   | 'disabled'
   | 'not_active_provider'
+  | 'model_not_listed'
+  | 'provider_unavailable'
   | 'access_denied'
   | 'capability_not_supported'
   | 'excluded_in_request'
@@ -71,6 +74,8 @@ export interface FilterInput {
   readonly snapshots: readonly ModelSnapshot[];
   /** 活动 provider 集合。 */
   readonly activeProviders: ReadonlySet<string>;
+  /** 已注册但当前不可调用的 provider（例如显式凭证引用未配置）。 */
+  readonly unavailableProviders: ReadonlySet<string>;
   /** 全局默认可用 route 集合。 */
   readonly globalDefault: ReadonlySet<CanonicalRoute>;
   /** 用户策略（undefined=无用户策略）。 */

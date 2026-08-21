@@ -55,6 +55,7 @@ function makeSnapshot(routeId: string, opts: SnapshotOpts = {}): ModelSnapshot {
 /** 构造 FilterInput 的可选项。 */
 interface FilterInputOpts {
   activeProviders?: ReadonlySet<string>;
+  unavailableProviders?: ReadonlySet<string>;
   globalDefault?: ReadonlySet<string>;
   userPolicy?: UserAccessPolicy;
   excludedRoutes?: ReadonlySet<string>;
@@ -77,6 +78,7 @@ function makeFilterInput(
   return {
     snapshots,
     activeProviders: opts.activeProviders ?? new Set(snapshots.map((s) => s.provider)),
+    unavailableProviders: opts.unavailableProviders ?? new Set(),
     globalDefault: opts.globalDefault ?? new Set(snapshots.map((s) => s.routeId)),
     userPolicy: opts.userPolicy,
     excludedRoutes: opts.excludedRoutes ?? new Set(),
@@ -123,6 +125,22 @@ describe('filterCandidates 公共过滤', () => {
     );
     expect(result.candidates).toHaveLength(0);
     expect(exclusionReason(result.excluded, 'p-inactive:m1')).toBe('not_active_provider');
+  });
+
+  it('当前 listModels 未列出的 policy 被排除为 model_not_listed', () => {
+    const snap = makeSnapshot('p1:stale-policy', { inAdvisory: false });
+    const result = filterCandidates(makeFilterInput([snap]));
+    expect(result.candidates).toHaveLength(0);
+    expect(exclusionReason(result.excluded, snap.routeId)).toBe('model_not_listed');
+  });
+
+  it('已注册但当前不可调用的 provider 被排除', () => {
+    const snap = makeSnapshot('p-unavailable:m1');
+    const result = filterCandidates(
+      makeFilterInput([snap], { unavailableProviders: new Set(['p-unavailable']) }),
+    );
+    expect(result.candidates).toHaveLength(0);
+    expect(exclusionReason(result.excluded, 'p-unavailable:m1')).toBe('provider_unavailable');
   });
 
   it('access denied（不在全局默认）被排除', () => {
@@ -214,6 +232,13 @@ describe('routeManual', () => {
       () => routeManual(makeFilterInput([sDisabled, sOk]), 'p1', 'm1'),
       'MODEL_DISABLED',
     );
+  });
+
+  it('显式 Manual 保留未列入 catalog 的 Provider pass-through', () => {
+    const unlisted = makeSnapshot('p1:provider-owned-model', { inAdvisory: false });
+    const result = routeManual(makeFilterInput([unlisted]), 'p1', 'provider-owned-model');
+    expect(result.selected.routeId).toBe(unlisted.routeId);
+    expect(result.decision.excluded).toEqual([]);
   });
 
   it('请求 access denied 模型 → 抛 MODEL_ACCESS_DENIED', () => {

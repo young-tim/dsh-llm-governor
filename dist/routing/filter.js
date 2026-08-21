@@ -1,7 +1,7 @@
 import { evaluateAccess } from '../access/evaluator.js';
 /**
  * 执行公共候选过滤。
- * 过滤顺序：active provider → enabled → access → capabilities → excluded → quota。
+ * 过滤顺序：active provider → enabled → provider available → access → capabilities → excluded → quota。
  * 每个排除项写稳定 reason code。
  */
 export function filterCandidates(input) {
@@ -14,18 +14,23 @@ export function filterCandidates(input) {
             excluded.push({ routeId, reason: 'not_active_provider' });
             continue;
         }
-        // 2. enabled
+        // 2. enabled（治理开关与 provider 运行可用性保持独立语义）
         if (!snap.enabled) {
             excluded.push({ routeId, reason: 'disabled' });
             continue;
         }
-        // 3. access allowed
+        // 3. Provider 已注册但当前不可调用（例如显式 credential ref 未配置）
+        if (input.unavailableProviders.has(snap.provider)) {
+            excluded.push({ routeId, reason: 'provider_unavailable' });
+            continue;
+        }
+        // 4. access allowed
         const accessResult = evaluateAccess(routeId, input.userPolicy, input.globalDefault);
         if (!accessResult.allowed) {
             excluded.push({ routeId, reason: 'access_denied' });
             continue;
         }
-        // 4. required capabilities
+        // 5. required capabilities
         if (input.requiredCapabilities.length > 0) {
             const hasAll = input.requiredCapabilities.every((cap) => snap.capabilities.includes(cap));
             if (!hasAll) {
@@ -33,7 +38,7 @@ export function filterCandidates(input) {
                 continue;
             }
         }
-        // 4b. required modalities（advisory 声明不支持时排除）
+        // 5b. required modalities（advisory 声明不支持时排除）
         if (input.requiredModalities.length > 0 && snap.inputModalities) {
             const hasAll = input.requiredModalities.every((mod) => snap.inputModalities.includes(mod));
             if (!hasAll) {
@@ -41,12 +46,12 @@ export function filterCandidates(input) {
                 continue;
             }
         }
-        // 5. not excluded in this request
+        // 6. not excluded in this request
         if (input.excludedRoutes.has(routeId)) {
             excluded.push({ routeId, reason: 'excluded_in_request' });
             continue;
         }
-        // 6. quota admits
+        // 7. quota admits
         if (!input.quotaCheck(routeId)) {
             excluded.push({ routeId, reason: 'quota_exceeded' });
             continue;

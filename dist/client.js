@@ -14619,6 +14619,8 @@ window.__ModuleLoader__.load({
       provider: external_exports.string(),
       model: external_exports.string(),
       enabled: external_exports.boolean(),
+      available: external_exports.boolean(),
+      unavailableReason: external_exports.enum(["credential_missing", "availability_check_failed"]).optional(),
       multiplierPpm: external_exports.number().int().nonnegative(),
       capabilities: external_exports.array(external_exports.string()),
       quality: external_exports.record(external_exports.string(), external_exports.number()),
@@ -14945,6 +14947,7 @@ window.__ModuleLoader__.load({
       NO_MODEL_MATCHED: "\u6CA1\u6709\u5339\u914D\u6A21\u578B",
       quality_missing: "\u7F3A\u5C11\u4EFB\u52A1 Quality",
       disabled: "\u6A21\u578B\u5DF2\u7981\u7528",
+      provider_unavailable: "Provider \u5F53\u524D\u4E0D\u53EF\u7528",
       access_denied: "\u65E0\u8BBF\u95EE\u6743\u9650",
       capability_not_supported: "\u80FD\u529B\u4E0D\u5339\u914D",
       quota_exceeded: "\u989D\u5EA6\u5DF2\u8017\u5C3D",
@@ -15069,6 +15072,11 @@ window.__ModuleLoader__.load({
     // src/client/browser.ts
     var CLIENT_ID = "dsh-llm-governor";
     var AUTO_VALUE = "__governor_auto__";
+    var AUTO_EFFORT_VALUE = "__governor_auto_effort__";
+    var AUTO_SETUP_HINT = "Auto \u672A\u5C31\u7EEA\uFF1A\u8BF7\u5148\u5728 Settings \u2192 Governor \u2192 \u6A21\u578B\u4E2D\u9009\u62E9\u4E00\u4E2A Quality \u5FEB\u901F\u6863\u4F4D\u3002";
+    function isAutoQualityIssue(issue2) {
+      return issue2.startsWith("Auto \u5C1A\u672A");
+    }
     var QUALITY_PRESETS = [
       { score: 75, label: "Lite", description: "\u7701\u6210\u672C\u6863" },
       { score: 85, label: "\u5747\u8861", description: "Flash / \u6807\u51C6\u6863" },
@@ -15086,7 +15094,7 @@ window.__ModuleLoader__.load({
       };
     }
     function configuredQualityTasks(rows) {
-      const enabled = rows.filter((row) => row.enabled);
+      const enabled = rows.filter((row) => row.enabled && row.available);
       return TASK_TYPES.filter(
         (taskType) => enabled.some((row) => Number.isFinite(row.quality[taskType]))
       );
@@ -15095,8 +15103,13 @@ window.__ModuleLoader__.load({
       if (!rows.some((row) => row.enabled)) {
         return "Auto \u5C1A\u672A\u5C31\u7EEA\uFF1A\u6CA1\u6709\u5DF2\u542F\u7528\u6A21\u578B\u3002\u8BF7\u6253\u5F00 Settings \u2192 Governor \u2192 \u6A21\u578B\u3002";
       }
-      if (configuredQualityTasks(rows).length === 0) {
-        return "Auto \u5C1A\u672A\u521D\u59CB\u5316\uFF1A\u8BF7\u6253\u5F00 Settings \u2192 Governor \u2192 \u6A21\u578B\uFF0C\u4E3A\u6A21\u578B\u9009\u62E9 Lite 75\u3001\u5747\u8861 85 \u6216 Pro 95 \u5FEB\u901F\u6863\u4F4D\u3002";
+      if (!rows.some((row) => row.enabled && row.available)) {
+        return "Auto \u5C1A\u672A\u5C31\u7EEA\uFF1A\u6CA1\u6709\u53EF\u7528\u7684\u5DF2\u542F\u7528\u6A21\u578B\u3002\u8BF7\u6253\u5F00 Settings \u2192 Governor \u2192 \u6A21\u578B\u3002";
+      }
+      const coveredTasks = configuredQualityTasks(rows);
+      if (coveredTasks.length < TASK_TYPES.length) {
+        const missingTasks = TASK_TYPES.filter((taskType) => !coveredTasks.includes(taskType));
+        return coveredTasks.length === 0 ? "Auto \u5C1A\u672A\u521D\u59CB\u5316\uFF1A\u8BF7\u6253\u5F00 Settings \u2192 Governor \u2192 \u6A21\u578B\uFF0C\u4E3A\u53EF\u7528\u7684\u5DF2\u542F\u7528\u6A21\u578B\u9009\u62E9\u5FEB\u901F\u6863\u4F4D\u3002" : `Auto \u5C1A\u672A\u5C31\u7EEA\uFF1A\u53EF\u7528\u6A21\u578B\u4EC5\u8986\u76D6 ${String(coveredTasks.length)}/${String(TASK_TYPES.length)} \u7C7B Quality\uFF08\u7F3A\u5C11\uFF1A${missingTasks.join("\u3001")}\uFF09\u3002\u8BF7\u6253\u5F00 Settings \u2192 Governor \u2192 \u6A21\u578B\u8865\u5168\u8986\u76D6\u3002`;
       }
       return null;
     }
@@ -15110,6 +15123,10 @@ window.__ModuleLoader__.load({
         return `\u5168\u90E8\u4EFB\u52A1 ${String(scores[0])}`;
       }
       return `${String(scores.length)}/${String(TASK_TYPES.length)} \u9879\u5DF2\u914D\u7F6E`;
+    }
+    function modelAvailabilityMessage(row) {
+      if (row.available) return null;
+      return row.unavailableReason === "credential_missing" ? "Provider \u51ED\u8BC1\u672A\u914D\u7F6E\uFF0C\u4E0D\u53C2\u4E0E\u81EA\u52A8\u8DEF\u7531" : "Provider \u53EF\u7528\u6027\u672A\u77E5\uFF0C\u4E0D\u53C2\u4E0E\u81EA\u52A8\u8DEF\u7531";
     }
     function unwrap(result, operation) {
       if (result.ok) return result.value;
@@ -15183,10 +15200,16 @@ window.__ModuleLoader__.load({
       const [selection, setSelection] = (0, import_react.useState)(null);
       const [saving, setSaving] = (0, import_react.useState)(false);
       const [error51, setError] = (0, import_react.useState)(null);
+      const [autoIssue, setAutoIssue] = (0, import_react.useState)(void 0);
       const [query, setQuery] = (0, import_react.useState)("");
+      const autoFallbackAttempt = (0, import_react.useRef)(null);
       (0, import_react.useEffect)(() => {
         if (!available) return;
         let live = true;
+        setSelection(null);
+        setAutoIssue(void 0);
+        setError(null);
+        autoFallbackAttempt.current = null;
         load();
         void api.selection(sessionId).then(
           (next) => {
@@ -15194,6 +15217,14 @@ window.__ModuleLoader__.load({
           },
           (cause) => {
             if (live) setError(String(cause));
+          }
+        );
+        void api.models().then(
+          (rows) => {
+            if (live) setAutoIssue(autoSetupIssue(rows));
+          },
+          (cause) => {
+            if (live) setAutoIssue(`Auto \u5C31\u7EEA\u72B6\u6001\u68C0\u67E5\u5931\u8D25\uFF1A${String(cause)}`);
           }
         );
         return () => {
@@ -15217,22 +15248,40 @@ window.__ModuleLoader__.load({
         [catalog.groups]
       );
       const manualValue = catalog.current === null ? "" : `${catalog.current.provider}\0${catalog.current.model}`;
+      const currentProvider = catalog.current?.provider;
+      const currentModel = catalog.current?.model;
       const value = selection?.mode === "auto" ? AUTO_VALUE : manualValue;
       const selectedChoice = choices.find((choice) => choice.value === manualValue);
       const reasoning = selectedChoice?.model.reasoning;
       const effectiveEffort = catalog.current?.reasoningEffort ?? reasoning?.defaultEffort ?? "";
       const normalizedQuery = query.trim().toLocaleLowerCase();
-      const visibleChoices = normalizedQuery === "" ? choices : choices.filter(
+      const matchingChoices = normalizedQuery === "" ? choices : choices.filter(
         (choice) => `${choice.label} ${choice.model.id}`.toLocaleLowerCase().includes(normalizedQuery)
       );
+      const visibleChoices = selectedChoice === void 0 || matchingChoices.some((choice) => choice.value === manualValue) ? matchingChoices : [selectedChoice, ...matchingChoices];
+      const showFilter = choices.length > 8;
+      const refreshAutoIssue = async () => {
+        setAutoIssue(void 0);
+        try {
+          const nextIssue = autoSetupIssue(await api.models());
+          setAutoIssue(nextIssue);
+          return nextIssue;
+        } catch (cause) {
+          const nextIssue = `Auto \u5C31\u7EEA\u72B6\u6001\u68C0\u67E5\u5931\u8D25\uFF1A${String(cause)}`;
+          setAutoIssue(nextIssue);
+          return nextIssue;
+        }
+      };
       const onChange = async (next) => {
         if (selection === null || saving) return;
         setSaving(true);
         setError(null);
         try {
           if (next === AUTO_VALUE) {
-            const setupIssue = autoSetupIssue(await api.models());
-            if (setupIssue !== null) throw new Error(setupIssue);
+            const setupIssue = await refreshAutoIssue();
+            if (setupIssue !== null) {
+              throw new Error(isAutoQualityIssue(setupIssue) ? AUTO_SETUP_HINT : setupIssue);
+            }
             const currentRoute = catalog.current === null ? void 0 : `${catalog.current.provider}:${catalog.current.model}`;
             setSelection(
               await api.selectMode(sessionId, "auto", {
@@ -15282,54 +15331,126 @@ window.__ModuleLoader__.load({
           setSaving(false);
         }
       };
+      (0, import_react.useEffect)(() => {
+        if (!available || locked || saving || selection?.mode !== "auto" || autoIssue === void 0 || autoIssue === null || !isAutoQualityIssue(autoIssue) || currentProvider === void 0 || currentModel === void 0) {
+          return;
+        }
+        const route = `${currentProvider}:${currentModel}`;
+        const attempt = `${sessionId}:${String(selection.selectionRevision)}:${route}`;
+        if (autoFallbackAttempt.current === attempt) return;
+        autoFallbackAttempt.current = attempt;
+        let live = true;
+        setSaving(true);
+        setError(null);
+        void api.selectMode(sessionId, "manual", {
+          expectedRevision: selection.selectionRevision,
+          lastManualRoute: route
+        }).then(
+          (next) => {
+            if (!live) return;
+            setSelection(next);
+            setError(
+              `Auto \u672A\u5C31\u7EEA\uFF0C\u5DF2\u5207\u6362\u5230 ${currentModel}\u3002\u8BF7\u5728 Governor \u2192 \u6A21\u578B\u4E2D\u9009\u62E9 Quality \u6863\u4F4D\u3002`
+            );
+          },
+          (cause) => {
+            if (live) setError(`Auto \u672A\u5C31\u7EEA\u4E14\u65E0\u6CD5\u5207\u6362\u5230\u5F53\u524D\u6A21\u578B\uFF1A${String(cause)}`);
+          }
+        ).finally(() => {
+          if (live) setSaving(false);
+        });
+        return () => {
+          live = false;
+        };
+      }, [api, autoIssue, available, currentModel, currentProvider, locked, selection, sessionId]);
       if (!available) return null;
+      const autoActive = selection?.mode === "auto";
+      const activeAutoIssue = autoActive && autoIssue !== void 0 && autoIssue !== null ? isAutoQualityIssue(autoIssue) ? AUTO_SETUP_HINT : autoIssue : null;
+      const autoLabel = autoActive ? autoIssue === void 0 ? "Auto\uFF08Governor\uFF0C\u68C0\u67E5\u4E2D\uFF09" : autoIssue === null ? "Auto\uFF08Governor\uFF09" : "Auto\uFF08Governor\uFF0C\u672A\u5C31\u7EEA\uFF09" : "Auto\uFF08Governor\uFF09";
+      const displayedError = error51 ?? activeAutoIssue;
+      const fallbackNotice = error51?.startsWith("Auto \u672A\u5C31\u7EEA\uFF0C\u5DF2\u5207\u6362\u5230 ") === true;
       return (0, import_react.createElement)(
         "span",
         { className: "dsh-governor-model-select" },
-        (0, import_react.createElement)("input", {
-          type: "search",
-          value: query,
-          placeholder: "\u641C\u7D22\u6A21\u578B",
-          "aria-label": "\u641C\u7D22\u6A21\u578B / Search models",
-          disabled: locked || saving,
-          onChange: (event) => setQuery(event.currentTarget.value)
-        }),
         (0, import_react.createElement)(
-          "select",
-          {
-            "aria-label": "\u6A21\u578B\u9009\u62E9 / Model selection",
-            disabled: locked || saving || selection === null,
-            value,
-            onFocus: load,
-            onChange: (event) => {
-              void onChange(event.currentTarget.value);
-            }
-          },
-          (0, import_react.createElement)("option", { value: AUTO_VALUE }, "\u81EA\u52A8\uFF08Governor\uFF09 \xB7 Auto"),
-          visibleChoices.map(
-            (choice) => (0, import_react.createElement)("option", { key: choice.value, value: choice.value }, choice.label)
-          )
-        ),
-        reasoning === void 0 ? null : (0, import_react.createElement)(
-          "select",
-          {
-            "aria-label": "\u63A8\u7406\u5F3A\u5EA6 / Reasoning effort",
-            disabled: locked || saving || selection?.mode === "auto",
-            value: effectiveEffort,
-            onChange: (event) => {
-              void onEffortChange(event.currentTarget.value);
-            }
-          },
-          reasoning.defaultEffort === void 0 ? (0, import_react.createElement)("option", { value: "" }, "\u63D0\u4F9B\u65B9\u9ED8\u8BA4") : null,
-          reasoning.efforts.map(
-            (effort) => (0, import_react.createElement)("option", { key: effort.id, value: effort.id }, effort.name)
-          )
-        ),
-        saving ? (0, import_react.createElement)("span", { role: "status" }, "\u4FDD\u5B58\u4E2D\u2026") : null,
-        error51 === null ? null : (0, import_react.createElement)(
           "span",
-          { className: "dsh-governor-model-error", role: "alert", title: error51 },
-          error51
+          { className: "dsh-governor-model-controls" },
+          showFilter ? (0, import_react.createElement)("input", {
+            type: "search",
+            value: query,
+            placeholder: "\u7B5B\u9009\u6A21\u578B",
+            "aria-label": "\u7B5B\u9009\u6A21\u578B / Filter models",
+            disabled: locked || saving,
+            onChange: (event) => setQuery(event.currentTarget.value)
+          }) : null,
+          (0, import_react.createElement)(
+            "select",
+            {
+              "aria-label": "\u6A21\u578B\u9009\u62E9 / Model selection",
+              "aria-invalid": activeAutoIssue === null ? void 0 : activeAutoIssue !== void 0,
+              disabled: locked || saving || selection === null,
+              value,
+              onFocus: () => {
+                load();
+                if (autoActive) void refreshAutoIssue();
+              },
+              onChange: (event) => {
+                void onChange(event.currentTarget.value);
+              }
+            },
+            (0, import_react.createElement)("option", { value: AUTO_VALUE }, autoLabel),
+            selectedChoice === void 0 && manualValue !== "" ? (0, import_react.createElement)(
+              "option",
+              { value: manualValue },
+              `${catalog.current?.model ?? ""} \xB7 ${catalog.current?.provider ?? ""}`
+            ) : null,
+            visibleChoices.map(
+              (choice) => (0, import_react.createElement)("option", { key: choice.value, value: choice.value }, choice.label)
+            )
+          ),
+          autoActive ? (0, import_react.createElement)(
+            "label",
+            { className: "dsh-governor-effort" },
+            (0, import_react.createElement)("span", null, "\u63A8\u7406"),
+            (0, import_react.createElement)(
+              "select",
+              {
+                "aria-label": "\u63A8\u7406\u5F3A\u5EA6 / Reasoning effort",
+                disabled: true,
+                value: AUTO_EFFORT_VALUE
+              },
+              (0, import_react.createElement)("option", { value: AUTO_EFFORT_VALUE }, "Auto \u51B3\u5B9A")
+            )
+          ) : reasoning === void 0 ? null : (0, import_react.createElement)(
+            "label",
+            { className: "dsh-governor-effort" },
+            (0, import_react.createElement)("span", null, "\u63A8\u7406"),
+            (0, import_react.createElement)(
+              "select",
+              {
+                "aria-label": "\u63A8\u7406\u5F3A\u5EA6 / Reasoning effort",
+                disabled: locked || saving,
+                value: effectiveEffort,
+                onChange: (event) => {
+                  void onEffortChange(event.currentTarget.value);
+                }
+              },
+              reasoning.defaultEffort === void 0 ? (0, import_react.createElement)("option", { value: "" }, "\u63D0\u4F9B\u65B9\u9ED8\u8BA4") : null,
+              reasoning.efforts.map(
+                (effort) => (0, import_react.createElement)("option", { key: effort.id, value: effort.id }, effort.name)
+              )
+            )
+          ),
+          saving ? (0, import_react.createElement)("span", { role: "status" }, "\u4FDD\u5B58\u4E2D\u2026") : null
+        ),
+        displayedError === null || displayedError === void 0 ? null : (0, import_react.createElement)(
+          "span",
+          {
+            className: `dsh-governor-model-error${fallbackNotice ? " notice" : ""}`,
+            role: "alert",
+            title: displayedError
+          },
+          displayedError
         )
       );
     }
@@ -15339,12 +15460,20 @@ window.__ModuleLoader__.load({
     function RoutingSettings({ api, canManage }) {
       const [value, setValue] = (0, import_react.useState)(null);
       const [error51, setError] = (0, import_react.useState)(null);
+      const [saveStatus, setSaveStatus] = (0, import_react.useState)("idle");
       (0, import_react.useEffect)(() => {
         void api.routing().then(setValue, (cause) => setError(String(cause)));
       }, [api]);
       if (value === null) return (0, import_react.createElement)(ErrorNotice, { error: error51 ?? "\u6B63\u5728\u52A0\u8F7D\u8DEF\u7531\u7B56\u7565\u2026" });
       const save = async () => {
         setError(null);
+        const minimumQuality = value.creditFirst.minimumQuality;
+        if (!Number.isFinite(minimumQuality) || minimumQuality < 0 || minimumQuality > 100) {
+          setSaveStatus("idle");
+          setError("\u6700\u4F4E\u8D28\u91CF\u5FC5\u987B\u662F 0\u2013100 \u4E4B\u95F4\u7684\u6570\u5B57\u3002");
+          return;
+        }
+        setSaveStatus("saving");
         try {
           setValue(
             await api.saveRouting(
@@ -15357,7 +15486,9 @@ window.__ModuleLoader__.load({
               value.configRevision
             )
           );
+          setSaveStatus("saved");
         } catch (cause) {
+          setSaveStatus("idle");
           setError(String(cause));
         }
       };
@@ -15373,10 +15504,13 @@ window.__ModuleLoader__.load({
             {
               value: value.default,
               disabled: !canManage,
-              onChange: (event) => setValue({
-                ...value,
-                default: event.currentTarget.value
-              })
+              onChange: (event) => {
+                setSaveStatus("idle");
+                setValue({
+                  ...value,
+                  default: event.currentTarget.value
+                });
+              }
             },
             (0, import_react.createElement)("option", { value: "manual" }, "\u624B\u52A8"),
             (0, import_react.createElement)("option", { value: "auto" }, "\u81EA\u52A8"),
@@ -15394,19 +15528,37 @@ window.__ModuleLoader__.load({
             max: 100,
             value: value.creditFirst.minimumQuality,
             disabled: !canManage,
-            onChange: (event) => setValue({
-              ...value,
-              creditFirst: {
-                ...value.creditFirst,
-                minimumQuality: event.currentTarget.valueAsNumber
-              }
-            })
-          })
+            "aria-describedby": "dsh-governor-minimum-quality-help",
+            onChange: (event) => {
+              setSaveStatus("idle");
+              setValue({
+                ...value,
+                creditFirst: {
+                  ...value.creditFirst,
+                  minimumQuality: event.currentTarget.valueAsNumber
+                }
+              });
+            }
+          }),
+          (0, import_react.createElement)(
+            "small",
+            { id: "dsh-governor-minimum-quality-help" },
+            "\u53EF\u586B 0\u2013100\uFF0C\u7528\u4E8E\u989D\u5EA6\u4F18\u5148\u6A21\u5F0F\u7684\u6700\u4F4E Quality \u95E8\u69DB\u3002"
+          )
         ),
         (0, import_react.createElement)(
-          "button",
-          { type: "button", disabled: !canManage, onClick: () => void save() },
-          "\u4FDD\u5B58\u8DEF\u7531\u8BBE\u7F6E"
+          "div",
+          { className: "dsh-governor-form-actions" },
+          (0, import_react.createElement)(
+            "button",
+            {
+              type: "button",
+              disabled: !canManage || saveStatus === "saving",
+              onClick: () => void save()
+            },
+            saveStatus === "saving" ? "\u4FDD\u5B58\u4E2D\u2026" : "\u4FDD\u5B58\u8DEF\u7531\u8BBE\u7F6E"
+          ),
+          saveStatus === "saved" ? (0, import_react.createElement)("span", { role: "status", "aria-live": "polite" }, "\u5DF2\u4FDD\u5B58") : saveStatus === "saving" ? (0, import_react.createElement)("span", { role: "status", "aria-live": "polite" }, "\u6B63\u5728\u4FDD\u5B58\u2026") : null
         ),
         (0, import_react.createElement)(ErrorNotice, { error: error51 })
       );
@@ -15414,10 +15566,29 @@ window.__ModuleLoader__.load({
     function ModelsSettings({ api, canManage }) {
       const [rows, setRows] = (0, import_react.useState)([]);
       const [error51, setError] = (0, import_react.useState)(null);
+      const [loading, setLoading] = (0, import_react.useState)(true);
       (0, import_react.useEffect)(() => {
-        void api.models().then(setRows, (cause) => setError(String(cause)));
+        let live = true;
+        void api.models().then(
+          (value) => {
+            if (live) {
+              setRows(value);
+              setLoading(false);
+            }
+          },
+          (cause) => {
+            if (live) {
+              setError(String(cause));
+              setLoading(false);
+            }
+          }
+        );
+        return () => {
+          live = false;
+        };
       }, [api]);
       const save = async (row, patch) => {
+        setError(null);
         try {
           await api.saveModel(row.routeId, patch, row.configRevision);
           setRows(await api.models());
@@ -15427,6 +15598,8 @@ window.__ModuleLoader__.load({
       };
       const coveredTasks = configuredQualityTasks(rows);
       const missingTasks = TASK_TYPES.filter((taskType) => !coveredTasks.includes(taskType));
+      const hasEnabledModel = rows.some((row) => row.enabled);
+      const hasAvailableEnabledModel = rows.some((row) => row.enabled && row.available);
       return (0, import_react.createElement)(
         "div",
         null,
@@ -15440,21 +15613,26 @@ window.__ModuleLoader__.load({
           (0, import_react.createElement)(
             "strong",
             null,
-            missingTasks.length === 0 ? "Auto \u5DF2\u5C31\u7EEA \xB7 7/7 \u7C7B\u4EFB\u52A1\u6709\u53EF\u7528 Quality" : coveredTasks.length === 0 ? "\u5148\u521D\u59CB\u5316 Quality\uFF0C\u518D\u4F7F\u7528 Auto" : `Auto \u90E8\u5206\u5C31\u7EEA \xB7 ${String(coveredTasks.length)}/7 \u7C7B\u4EFB\u52A1\u5DF2\u8986\u76D6`
+            missingTasks.length === 0 ? "Auto \u5DF2\u5C31\u7EEA \xB7 7/7 \u7C7B\u4EFB\u52A1\u6709\u53EF\u7528 Quality" : !hasEnabledModel ? "\u5148\u542F\u7528\u4E00\u4E2A\u53EF\u7528\u6A21\u578B\uFF0C\u518D\u4F7F\u7528 Auto" : !hasAvailableEnabledModel ? "\u6CA1\u6709\u53EF\u7528\u7684\u5DF2\u542F\u7528\u6A21\u578B\uFF0CAuto \u4E0D\u53EF\u7528" : coveredTasks.length === 0 ? "\u5148\u521D\u59CB\u5316 Quality\uFF0C\u518D\u4F7F\u7528 Auto" : `Auto \u90E8\u5206\u5C31\u7EEA \xB7 ${String(coveredTasks.length)}/7 \u7C7B\u4EFB\u52A1\u5DF2\u8986\u76D6`
           ),
           (0, import_react.createElement)(
             "p",
             null,
-            "Quality \u662F\u6A21\u578B\u95F4\u7684\u76F8\u5BF9\u6863\u4F4D\uFF0C\u4E0D\u8981\u6C42\u5148\u505A\u7CBE\u786E\u6D4B\u8BC4\u3002\u6BCF\u4E2A\u6A21\u578B\u5148\u9009\u4E00\u6B21 Lite 75\u3001\u5747\u8861 85 \u6216 Pro 95\uFF0C\u5373\u53EF\u586B\u6EE1\u5168\u90E8\u4EFB\u52A1\uFF1B\u4E4B\u540E\u53EA\u5728\u201C\u9AD8\u7EA7\u5FAE\u8C03\u201D\u91CC\u8C03\u6574\u6709\u8BC1\u636E\u7684\u5DEE\u5F02\u3002"
+            "Quality \u662F\u6A21\u578B\u95F4\u7684\u76F8\u5BF9\u6863\u4F4D\uFF0C\u4E0D\u8981\u6C42\u5148\u505A\u7CBE\u786E\u6D4B\u8BC4\u3002\u81F3\u5C11\u4E3A\u4E00\u4E2A\u53EF\u7528\u7684\u5DF2\u542F\u7528\u6A21\u578B\u9009\u62E9 Lite 75\u3001\u5747\u8861 85 \u6216 Pro 95\uFF0C\u5373\u53EF\u8986\u76D6\u5168\u90E8\u4EFB\u52A1\uFF1B\u672A\u8BC4\u5206\u6216 Provider \u4E0D\u53EF\u7528\u7684\u6A21\u578B\u4E0D\u4F1A\u53C2\u4E0E\u76F8\u5E94\u4EFB\u52A1\u8DEF\u7531\u3002"
           ),
           missingTasks.length === 0 ? null : (0, import_react.createElement)("small", null, `\u5C1A\u672A\u8986\u76D6\uFF1A${missingTasks.join("\u3001")}`)
         ),
-        (0, import_react.createElement)(
+        loading ? (0, import_react.createElement)("p", { className: "dsh-governor-empty", role: "status" }, "\u6B63\u5728\u52A0\u8F7D\u6A21\u578B\u2026") : rows.length === 0 && error51 === null ? (0, import_react.createElement)(
+          "section",
+          { className: "dsh-governor-empty", "aria-label": "\u6A21\u578B\u7A7A\u72B6\u6001" },
+          (0, import_react.createElement)("strong", null, "\u6682\u65E0\u53EF\u914D\u7F6E\u6A21\u578B"),
+          (0, import_react.createElement)("p", null, "\u5148\u5728 DSH \u4E2D\u914D\u7F6E\u5E76\u542F\u7528\u6A21\u578B\uFF0C\u7136\u540E\u5728\u8FD9\u91CC\u8BBE\u7F6E Governor \u7B56\u7565\u3002")
+        ) : (0, import_react.createElement)(
           "div",
-          { className: "dsh-governor-table-wrap" },
+          { className: "dsh-governor-table-wrap dsh-governor-model-list" },
           (0, import_react.createElement)(
             "table",
-            null,
+            { className: "dsh-governor-model-table" },
             (0, import_react.createElement)(
               "thead",
               null,
@@ -15472,18 +15650,30 @@ window.__ModuleLoader__.load({
               rows.map(
                 (row) => (0, import_react.createElement)(
                   "tr",
-                  { key: row.routeId },
+                  {
+                    key: row.routeId,
+                    className: row.available ? void 0 : "unavailable"
+                  },
                   (0, import_react.createElement)(
                     "td",
-                    null,
+                    { className: "dsh-governor-model-identity", title: row.routeId },
                     (0, import_react.createElement)("strong", null, row.model),
-                    (0, import_react.createElement)("small", null, row.provider)
+                    (0, import_react.createElement)("small", null, row.provider),
+                    modelAvailabilityMessage(row) === null ? null : (0, import_react.createElement)(
+                      "span",
+                      {
+                        className: "dsh-governor-model-availability",
+                        "data-reason": row.unavailableReason ?? "availability_check_failed"
+                      },
+                      modelAvailabilityMessage(row)
+                    )
                   ),
                   (0, import_react.createElement)(
                     "td",
-                    null,
+                    { "data-label": "\u542F\u7528" },
                     (0, import_react.createElement)("input", {
                       type: "checkbox",
+                      role: "switch",
                       checked: row.enabled,
                       disabled: !canManage,
                       "aria-label": `${row.routeId} \u542F\u7528`,
@@ -15492,7 +15682,7 @@ window.__ModuleLoader__.load({
                   ),
                   (0, import_react.createElement)(
                     "td",
-                    null,
+                    { "data-label": "\u8BA1\u8D39\u500D\u7387" },
                     (0, import_react.createElement)("input", {
                       type: "number",
                       min: 0,
@@ -15505,7 +15695,7 @@ window.__ModuleLoader__.load({
                   ),
                   (0, import_react.createElement)(
                     "td",
-                    null,
+                    { "data-label": "\u80FD\u529B\u6807\u7B7E" },
                     (0, import_react.createElement)("input", {
                       type: "text",
                       defaultValue: row.capabilities.join(", "),
@@ -15530,7 +15720,7 @@ window.__ModuleLoader__.load({
                       (0, import_react.createElement)(
                         "span",
                         null,
-                        `\u5FEB\u901F\u521D\u59CB\u5316 \xB7 \u6309\u540D\u79F0\u5EFA\u8BAE ${String(suggestedQualityPreset(row.model))}`
+                        `\u5FEB\u901F\u6863\u4F4D \xB7 \u5EFA\u8BAE ${String(suggestedQualityPreset(row.model))}`
                       ),
                       (0, import_react.createElement)(
                         "div",
@@ -15598,10 +15788,29 @@ window.__ModuleLoader__.load({
     function UsersSettings({ api, canManage }) {
       const [rows, setRows] = (0, import_react.useState)([]);
       const [error51, setError] = (0, import_react.useState)(null);
+      const [loading, setLoading] = (0, import_react.useState)(true);
       (0, import_react.useEffect)(() => {
-        void api.users().then(setRows, (cause) => setError(String(cause)));
+        let live = true;
+        void api.users().then(
+          (value) => {
+            if (live) {
+              setRows(value);
+              setLoading(false);
+            }
+          },
+          (cause) => {
+            if (live) {
+              setError(String(cause));
+              setLoading(false);
+            }
+          }
+        );
+        return () => {
+          live = false;
+        };
       }, [api]);
       const save = async (row, patch) => {
+        setError(null);
         try {
           await api.saveUser(row.userId, patch, row.configRevision);
           setRows(await api.users());
@@ -15613,6 +15822,12 @@ window.__ModuleLoader__.load({
         "div",
         null,
         (0, import_react.createElement)(ErrorNotice, { error: error51 }),
+        loading ? (0, import_react.createElement)("p", { className: "dsh-governor-empty", role: "status" }, "\u6B63\u5728\u52A0\u8F7D\u7528\u6237\u7B56\u7565\u2026") : rows.length === 0 && error51 === null ? (0, import_react.createElement)(
+          "section",
+          { className: "dsh-governor-empty", "aria-label": "\u7528\u6237\u7B56\u7565\u7A7A\u72B6\u6001" },
+          (0, import_react.createElement)("strong", null, "\u6682\u65E0\u7528\u6237\u7B56\u7565"),
+          (0, import_react.createElement)("p", null, "\u5F53 Host \u914D\u7F6E\u7528\u6237\u989D\u5EA6\u6216\u6A21\u578B\u5141\u8BB8\u5217\u8868\u540E\uFF0C\u7528\u6237\u4F1A\u663E\u793A\u5728\u8FD9\u91CC\u3002")
+        ) : null,
         rows.map(
           (row) => (0, import_react.createElement)(
             "fieldset",
@@ -15656,8 +15871,26 @@ window.__ModuleLoader__.load({
     function UsageSettings({ api }) {
       const [rows, setRows] = (0, import_react.useState)([]);
       const [error51, setError] = (0, import_react.useState)(null);
+      const [loading, setLoading] = (0, import_react.useState)(true);
       (0, import_react.useEffect)(() => {
-        void api.usage31Days().then(setRows, (cause) => setError(String(cause)));
+        let live = true;
+        void api.usage31Days().then(
+          (value) => {
+            if (live) {
+              setRows(value);
+              setLoading(false);
+            }
+          },
+          (cause) => {
+            if (live) {
+              setError(String(cause));
+              setLoading(false);
+            }
+          }
+        );
+        return () => {
+          live = false;
+        };
       }, [api]);
       const totals = (0, import_react.useMemo)(() => {
         const requests = new Set(rows.map((row) => row.requestId)).size;
@@ -15688,13 +15921,22 @@ window.__ModuleLoader__.load({
           (0, import_react.createElement)(
             "div",
             null,
-            (0, import_react.createElement)("strong", null, formatCreditNanos(totals.creditNanos.toString())),
+            (0, import_react.createElement)(
+              "strong",
+              { title: formatCreditNanos(totals.creditNanos.toString()) },
+              formatCreditNanos(totals.creditNanos.toString())
+            ),
             (0, import_react.createElement)("span", null, "Credits")
           )
         ),
-        (0, import_react.createElement)(
+        loading ? (0, import_react.createElement)("p", { className: "dsh-governor-empty", role: "status" }, "\u6B63\u5728\u52A0\u8F7D\u7528\u91CF\u2026") : rows.length === 0 && error51 === null ? (0, import_react.createElement)(
+          "section",
+          { className: "dsh-governor-empty", "aria-label": "\u7528\u91CF\u7A7A\u72B6\u6001" },
+          (0, import_react.createElement)("strong", null, "\u6700\u8FD1 31 \u5929\u6682\u65E0\u7528\u91CF\u8BB0\u5F55"),
+          (0, import_react.createElement)("p", null, "\u6A21\u578B\u8BF7\u6C42\u5B8C\u6210\u540E\uFF0C\u7528\u91CF\u548C\u56DE\u9000\u8BB0\u5F55\u4F1A\u663E\u793A\u5728\u8FD9\u91CC\u3002")
+        ) : (0, import_react.createElement)(
           "div",
-          { className: "dsh-governor-table-wrap" },
+          { className: "dsh-governor-table-wrap dsh-governor-usage-list" },
           (0, import_react.createElement)(
             "table",
             null,
@@ -15716,12 +15958,40 @@ window.__ModuleLoader__.load({
                 (row) => (0, import_react.createElement)(
                   "tr",
                   { key: `${row.requestId}:${String(row.fallbackIndex)}` },
-                  (0, import_react.createElement)("td", null, `${row.requestId} #${String(row.fallbackIndex)}`),
-                  (0, import_react.createElement)("td", null, `${row.provider}:${row.model}`),
-                  (0, import_react.createElement)("td", null, String(row.inputTokens + row.outputTokens)),
-                  (0, import_react.createElement)("td", null, formatCreditNanos(row.creditNanos)),
-                  (0, import_react.createElement)("td", null, `${row.latencyMs} ms`),
-                  (0, import_react.createElement)("td", null, row.success ? "\u6210\u529F" : "\u5931\u8D25")
+                  (0, import_react.createElement)(
+                    "td",
+                    { "data-label": "\u8BF7\u6C42" },
+                    (0, import_react.createElement)("code", { title: row.requestId }, row.requestId),
+                    (0, import_react.createElement)("small", null, `\u56DE\u9000 #${String(row.fallbackIndex)}`)
+                  ),
+                  (0, import_react.createElement)(
+                    "td",
+                    { "data-label": "\u6A21\u578B", title: `${row.provider}:${row.model}` },
+                    (0, import_react.createElement)("strong", null, row.model),
+                    (0, import_react.createElement)("small", null, row.provider)
+                  ),
+                  (0, import_react.createElement)(
+                    "td",
+                    { "data-label": "Tokens" },
+                    String(row.inputTokens + row.outputTokens)
+                  ),
+                  (0, import_react.createElement)(
+                    "td",
+                    { "data-label": "Credits", title: formatCreditNanos(row.creditNanos) },
+                    formatCreditNanos(row.creditNanos)
+                  ),
+                  (0, import_react.createElement)("td", { "data-label": "\u65F6\u5EF6" }, `${row.latencyMs} ms`),
+                  (0, import_react.createElement)(
+                    "td",
+                    { "data-label": "\u7ED3\u679C" },
+                    (0, import_react.createElement)(
+                      "span",
+                      {
+                        className: `dsh-governor-result ${row.success ? "success" : "failure"}`
+                      },
+                      row.success ? "\u6210\u529F" : "\u5931\u8D25"
+                    )
+                  )
                 )
               )
             )
@@ -15798,11 +16068,13 @@ window.__ModuleLoader__.load({
       );
     }
     var STYLES = `
-    .dsh-governor-model-select{display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap}.dsh-governor-model-select select,.dsh-governor-model-select input{max-width:250px;border:0;border-radius:9px;background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary);padding:5px 8px;font:inherit}.dsh-governor-model-select input{width:110px}.dsh-governor-model-select [role=status]{font-size:11px;color:var(--dsw-alias-label-tertiary)}.dsh-governor-model-error{flex-basis:100%;max-width:520px;border-radius:7px;background:var(--dsw-alias-interactive-bg-hover-danger);color:var(--dsw-alias-state-error-primary);padding:6px 8px;font-size:11px;line-height:1.45}
-    .dsh-governor-settings{color:var(--dsw-alias-label-primary)}.dsh-governor-settings>header{display:flex;justify-content:space-between;align-items:end;border-bottom:1px solid var(--dsw-alias-border-l2);padding:6px 0 14px}.dsh-governor-settings>header p{margin:0;color:var(--dsw-alias-label-tertiary);font-size:10px;letter-spacing:.14em}.dsh-governor-settings>header h2{margin:2px 0 0;font:600 25px/1.2 Georgia,serif}.dsh-governor-settings>header>span,.dsh-governor-readonly{font-size:12px;color:var(--dsw-alias-label-tertiary)}.dsh-governor-settings nav{display:flex;gap:4px;padding:14px 0}.dsh-governor-settings nav button,.dsh-governor-form button{border:0;border-radius:9px;background:transparent;color:inherit;padding:7px 12px;font:inherit;cursor:pointer}.dsh-governor-settings nav button:hover,.dsh-governor-settings nav button.active{background:var(--dsw-alias-interactive-bg-hover)}.dsh-governor-settings-body{min-height:280px}.dsh-governor-form{display:grid;max-width:420px;gap:14px}.dsh-governor-form label,.dsh-governor-user label{display:grid;gap:6px;font-size:13px}.dsh-governor-form input,.dsh-governor-form select,.dsh-governor-user input,.dsh-governor-table-wrap input{box-sizing:border-box;border:1px solid var(--dsw-alias-border-l2);border-radius:9px;background:var(--dsw-alias-bg-layer-1);color:inherit;padding:8px}.dsh-governor-form button{justify-self:start;background:var(--dsw-alias-label-primary);color:var(--dsw-alias-bg-layer-2)}.dsh-governor-table-wrap{max-width:100%;overflow:auto}.dsh-governor-table-wrap table{width:100%;border-collapse:collapse;font-size:13px}.dsh-governor-table-wrap th,.dsh-governor-table-wrap td{text-align:left;border-bottom:1px solid var(--dsw-alias-border-l2);padding:10px 8px;vertical-align:top}.dsh-governor-table-wrap small{display:block;color:var(--dsw-alias-label-tertiary)}.dsh-governor-user{display:grid;grid-template-columns:1fr 2fr auto;gap:12px;border:1px solid var(--dsw-alias-border-l2);border-radius:12px;margin:0 0 10px;padding:12px}.dsh-governor-user legend{padding:0 5px}.dsh-governor-metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:12px 0}.dsh-governor-metrics>div{border:1px solid var(--dsw-alias-border-l2);border-radius:12px;padding:12px}.dsh-governor-metrics strong,.dsh-governor-metrics span{display:block}.dsh-governor-metrics strong{font-size:22px}.dsh-governor-metrics span{font-size:11px;color:var(--dsw-alias-label-tertiary)}.dsh-governor-error{border-radius:8px;background:var(--dsw-alias-interactive-bg-hover-danger);color:var(--dsw-alias-state-error-primary);padding:8px 10px;font-size:12px}
+    .dsh-governor-model-select .dsh-governor-model-controls select,.dsh-governor-model-select .dsh-governor-model-controls input{font-family:inherit}.dsh-governor-model-select .dsh-governor-model-controls>select,.dsh-governor-model-select .dsh-governor-model-controls>input{height:28px;padding:4px 8px;font-size:13px;font-weight:500;line-height:20px}.dsh-governor-model-select .dsh-governor-model-controls>select option{font-size:13px;font-weight:500;line-height:20px}.dsh-governor-model-select .dsh-governor-model-controls>input{width:92px}.dsh-governor-model-select .dsh-governor-effort{font-size:12px;font-weight:400;line-height:18px}.dsh-governor-model-select .dsh-governor-effort select{height:26px;padding:3px 7px;font-size:12px;font-weight:400;line-height:18px}.dsh-governor-model-select .dsh-governor-effort select option{font-size:12px;font-weight:400;line-height:18px}.dsh-governor-model-select .dsh-governor-effort select:disabled{color:var(--dsw-alias-label-secondary);opacity:1;-webkit-text-fill-color:var(--dsw-alias-label-secondary)}
+    .dsh-governor-model-select{display:inline-grid;max-width:100%;gap:6px;vertical-align:middle}.dsh-governor-model-controls{display:flex;min-width:0;align-items:center;gap:6px;flex-wrap:wrap}.dsh-governor-model-controls select,.dsh-governor-model-controls input{box-sizing:border-box;max-width:250px;border:0;border-radius:9px;background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary);padding:5px 8px;font:inherit}.dsh-governor-model-controls input{width:92px}.dsh-governor-model-controls [role=status]{font-size:11px;color:var(--dsw-alias-label-tertiary)}.dsh-governor-effort{display:inline-flex;align-items:center;gap:5px;color:var(--dsw-alias-label-secondary);font-size:11px;white-space:nowrap}.dsh-governor-effort select{color:var(--dsw-alias-label-primary);font-size:inherit}.dsh-governor-model-error{position:absolute;left:50%;bottom:calc(100% + 12px);z-index:30;box-sizing:border-box;display:block;width:max-content;max-width:min(520px,calc(100% - 24px));transform:translateX(-50%);border:1px solid var(--dsw-alias-state-error-primary);border-radius:10px;background:var(--dsw-alias-interactive-bg-hover-danger);box-shadow:0 10px 30px rgba(0,0,0,.18);color:var(--dsw-alias-state-error-primary);padding:8px 12px;font-size:12px;line-height:1.45;white-space:normal;overflow-wrap:anywhere;pointer-events:none}.dsh-governor-model-error.notice{border-color:var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-2,var(--dsw-alias-interactive-bg-hover));color:var(--dsw-alias-label-secondary)}
+    .dsh-governor-settings{min-width:0;color:var(--dsw-alias-label-primary)}.dsh-governor-settings>header{display:flex;min-width:0;justify-content:space-between;align-items:end;gap:16px;border-bottom:1px solid var(--dsw-alias-border-l2);padding:6px 0 14px}.dsh-governor-settings>header>div{min-width:0}.dsh-governor-settings>header p{margin:0;color:var(--dsw-alias-label-tertiary);font-size:10px;letter-spacing:.14em}.dsh-governor-settings>header h2{margin:2px 0 0;font:600 23px/1.2 inherit}.dsh-governor-settings>header>span,.dsh-governor-readonly{min-width:0;color:var(--dsw-alias-label-tertiary);font-size:12px}.dsh-governor-settings>header>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.dsh-governor-settings nav{display:flex;flex-wrap:wrap;gap:4px;padding:14px 0}.dsh-governor-settings nav button,.dsh-governor-form button{border:0;border-radius:8px;background:transparent;color:inherit;padding:7px 12px;font:inherit;cursor:pointer}.dsh-governor-settings nav button:hover,.dsh-governor-settings nav button.active{background:var(--dsw-alias-interactive-bg-hover)}.dsh-governor-settings button:focus-visible,.dsh-governor-settings input:focus-visible,.dsh-governor-settings select:focus-visible,.dsh-governor-settings summary:focus-visible{outline:2px solid var(--dsw-alias-label-secondary);outline-offset:2px}.dsh-governor-settings button:disabled{cursor:not-allowed;opacity:.55}.dsh-governor-settings-body{min-width:0;min-height:280px}.dsh-governor-form{display:grid;width:min(100%,420px);gap:14px}.dsh-governor-form label,.dsh-governor-user label{display:grid;min-width:0;gap:6px;font-size:13px}.dsh-governor-form label>small{color:var(--dsw-alias-label-tertiary);font-size:11px;line-height:1.45}.dsh-governor-form input,.dsh-governor-form select,.dsh-governor-user input,.dsh-governor-table-wrap input{box-sizing:border-box;min-width:0;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;background:var(--dsw-alias-bg-layer-1);color:inherit;padding:8px}.dsh-governor-form-actions{display:flex;align-items:center;gap:10px;min-height:34px}.dsh-governor-form-actions button{background:var(--dsw-alias-label-primary);color:var(--dsw-alias-bg-layer-2)}.dsh-governor-form-actions span{color:var(--dsw-alias-state-success-primary,var(--dsw-alias-label-secondary));font-size:12px}.dsh-governor-error{max-width:100%;border-radius:8px;background:var(--dsw-alias-interactive-bg-hover-danger);color:var(--dsw-alias-state-error-primary);padding:8px 10px;font-size:12px;line-height:1.45;overflow-wrap:anywhere}.dsh-governor-empty{box-sizing:border-box;margin:10px 0;border:1px dashed var(--dsw-alias-border-l2);border-radius:10px;background:var(--dsw-alias-bg-layer-1);padding:18px;color:var(--dsw-alias-label-secondary);font-size:12px;text-align:center}.dsh-governor-empty strong{display:block;color:var(--dsw-alias-label-primary);font-size:13px}.dsh-governor-empty p{margin:5px auto 0;max-width:520px;line-height:1.5}
     .dsh-governor-onboarding{margin:0 0 12px;border:1px solid var(--dsw-alias-border-l2);border-left:3px solid var(--dsw-alias-state-warning-primary,var(--dsw-alias-label-secondary));border-radius:10px;background:var(--dsw-alias-bg-layer-1);padding:11px 13px}.dsh-governor-onboarding.ready{border-left-color:var(--dsw-alias-state-success-primary,var(--dsw-alias-label-secondary))}.dsh-governor-onboarding strong,.dsh-governor-onboarding p,.dsh-governor-onboarding small{display:block}.dsh-governor-onboarding p{max-width:780px;margin:5px 0;color:var(--dsw-alias-label-secondary);font-size:12px;line-height:1.55}.dsh-governor-onboarding small{color:var(--dsw-alias-label-tertiary)}
-    .dsh-governor-quality-presets{min-width:260px;margin-bottom:9px}.dsh-governor-quality-presets>span{display:block;margin-bottom:5px;font-size:11px;color:var(--dsw-alias-label-secondary)}.dsh-governor-quality-presets>div{display:flex;gap:5px}.dsh-governor-quality-presets button{border:1px solid var(--dsw-alias-border-l2);border-radius:7px;background:var(--dsw-alias-bg-layer-1);color:inherit;padding:5px 7px;font:inherit;font-size:11px;cursor:pointer}.dsh-governor-quality-presets button:hover,.dsh-governor-quality-presets button.suggested{border-color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-interactive-bg-hover)}.dsh-governor-quality-presets button:disabled{cursor:not-allowed;opacity:.5}.dsh-governor-quality-presets small{margin-top:5px;font-size:10px}.dsh-governor-quality{min-width:210px}.dsh-governor-quality summary{cursor:pointer;color:var(--dsw-alias-label-secondary);font-size:11px}.dsh-governor-quality label{display:grid;grid-template-columns:1fr 78px;align-items:center;gap:8px;margin-top:7px;font-size:11px}.dsh-governor-quality input{width:78px}
-    @media(max-width:600px){.dsh-governor-user{grid-template-columns:1fr}.dsh-governor-metrics{grid-template-columns:1fr}.dsh-governor-settings nav{overflow-x:auto}}
+    .dsh-governor-table-wrap{width:100%;min-width:0;max-width:100%;overflow:visible}.dsh-governor-table-wrap table{width:100%;font-size:13px}.dsh-governor-table-wrap small{display:block;color:var(--dsw-alias-label-tertiary)}.dsh-governor-model-table,.dsh-governor-model-table tbody{display:block;border:0;border-collapse:separate}.dsh-governor-model-table thead,.dsh-governor-usage-list thead{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0}.dsh-governor-model-table tbody{display:grid;gap:10px}.dsh-governor-model-table tr{display:grid;grid-template-columns:minmax(140px,180px) minmax(180px,1fr) auto;gap:10px 12px;align-items:end;border:1px solid var(--dsw-alias-border-l2);border-radius:11px;background:var(--dsw-alias-bg-layer-1);padding:12px}.dsh-governor-model-table tr.unavailable{border-left:3px solid var(--dsw-alias-state-warning-primary,var(--dsw-alias-label-tertiary));padding-left:10px}.dsh-governor-model-table td{min-width:0;border:0;padding:0;vertical-align:top}.dsh-governor-model-table td:first-child{grid-column:1/3;align-self:center}.dsh-governor-model-table td:nth-child(2){grid-column:3;grid-row:1;align-self:center}.dsh-governor-model-table td:nth-child(3){grid-column:1}.dsh-governor-model-table td:nth-child(4){grid-column:2/4}.dsh-governor-model-table td:nth-child(5){grid-column:1/-1;border-top:1px solid var(--dsw-alias-border-l2);padding-top:11px}.dsh-governor-model-table td[data-label]::before,.dsh-governor-usage-list td::before{display:block;margin-bottom:5px;color:var(--dsw-alias-label-tertiary);content:attr(data-label);font-size:10px;line-height:1.2}.dsh-governor-model-table td:nth-child(2)::before{display:inline;margin:0 7px 0 0}.dsh-governor-model-table td:nth-child(2) input{vertical-align:middle}.dsh-governor-model-table td:nth-child(3) input,.dsh-governor-model-table td:nth-child(4) input{width:100%}.dsh-governor-model-identity strong,.dsh-governor-model-identity small{display:block;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.dsh-governor-model-identity strong{font-size:14px}.dsh-governor-model-identity small{margin-top:2px}.dsh-governor-model-availability{display:block;width:fit-content;max-width:100%;margin-top:7px;border-radius:6px;background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-secondary);padding:4px 7px;font-size:11px;line-height:1.35;white-space:normal}.dsh-governor-model-availability[data-reason=credential_missing]{background:var(--dsw-alias-state-warning-secondary,var(--dsw-alias-interactive-bg-hover));color:var(--dsw-alias-state-warning-primary,var(--dsw-alias-label-secondary))}.dsh-governor-quality-presets{min-width:0;margin-bottom:9px}.dsh-governor-quality-presets>span{display:block;margin-bottom:6px;color:var(--dsw-alias-label-secondary);font-size:11px}.dsh-governor-quality-presets>div{display:flex;flex-wrap:wrap;gap:6px}.dsh-governor-quality-presets button{flex:0 1 auto;border:1px solid var(--dsw-alias-border-l2);border-radius:7px;background:var(--dsw-alias-bg-layer-1);color:inherit;padding:5px 8px;font:inherit;font-size:11px;white-space:nowrap;cursor:pointer}.dsh-governor-quality-presets button:hover,.dsh-governor-quality-presets button.suggested{border-color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-interactive-bg-hover)}.dsh-governor-quality-presets button:disabled{cursor:not-allowed;opacity:.5}.dsh-governor-quality-presets small{margin-top:5px;font-size:10px}.dsh-governor-quality{min-width:0}.dsh-governor-quality summary{cursor:pointer;color:var(--dsw-alias-label-secondary);font-size:11px}.dsh-governor-quality[open]{display:grid;grid-template-columns:repeat(auto-fit,minmax(135px,1fr));gap:0 12px}.dsh-governor-quality[open] summary{grid-column:1/-1}.dsh-governor-quality label{display:grid;min-width:0;grid-template-columns:minmax(0,1fr) 68px;align-items:center;gap:7px;margin-top:8px;font-size:11px}.dsh-governor-quality input{width:68px}
+    .dsh-governor-user{display:grid;grid-template-columns:minmax(110px,.7fr) minmax(170px,1.5fr) auto;gap:12px;align-items:end;border:1px solid var(--dsw-alias-border-l2);border-radius:11px;margin:0 0 10px;padding:12px}.dsh-governor-user legend{max-width:100%;padding:0 5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.dsh-governor-user output{padding:8px 0;color:var(--dsw-alias-label-secondary);font-size:12px;white-space:nowrap}.dsh-governor-metrics{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin:12px 0}.dsh-governor-metrics>div{min-width:0;border:1px solid var(--dsw-alias-border-l2);border-radius:10px;padding:12px}.dsh-governor-metrics strong,.dsh-governor-metrics span{display:block}.dsh-governor-metrics strong{max-width:100%;overflow:hidden;text-overflow:ellipsis;font-size:clamp(16px,3vw,22px);font-variant-numeric:tabular-nums;white-space:nowrap}.dsh-governor-metrics span{color:var(--dsw-alias-label-tertiary);font-size:11px}.dsh-governor-usage-list table,.dsh-governor-usage-list tbody{display:block;border:0;border-collapse:separate}.dsh-governor-usage-list tbody{display:grid;gap:8px}.dsh-governor-usage-list tr{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;border:1px solid var(--dsw-alias-border-l2);border-radius:10px;background:var(--dsw-alias-bg-layer-1);padding:11px}.dsh-governor-usage-list td{min-width:0;border:0;padding:0;font-variant-numeric:tabular-nums}.dsh-governor-usage-list td>code,.dsh-governor-usage-list td>strong{display:block;max-width:100%;overflow:hidden;text-overflow:ellipsis;color:inherit;font:inherit;font-weight:600;white-space:nowrap}.dsh-governor-usage-list td:nth-child(4){max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.dsh-governor-usage-list td:nth-child(5){white-space:nowrap}.dsh-governor-result{display:inline-block;border-radius:999px;background:var(--dsw-alias-interactive-bg-hover);padding:3px 7px;font-size:11px;white-space:nowrap}.dsh-governor-result.success{color:var(--dsw-alias-state-success-primary,var(--dsw-alias-label-primary))}.dsh-governor-result.failure{background:var(--dsw-alias-interactive-bg-hover-danger);color:var(--dsw-alias-state-error-primary)}
+    @media(max-width:600px){.dsh-governor-settings>header{align-items:start;flex-direction:column;gap:6px}.dsh-governor-settings>header>span{max-width:100%}.dsh-governor-model-table tr{grid-template-columns:minmax(0,1fr) auto}.dsh-governor-model-table td:first-child{grid-column:1}.dsh-governor-model-table td:nth-child(2){grid-column:2}.dsh-governor-model-table td:nth-child(3),.dsh-governor-model-table td:nth-child(4),.dsh-governor-model-table td:nth-child(5){grid-column:1/-1}.dsh-governor-user{grid-template-columns:1fr}.dsh-governor-user output{padding:0}.dsh-governor-usage-list tr{grid-template-columns:repeat(2,minmax(0,1fr))}}
     `;
     function installStyles() {
       if (typeof document === "undefined") return () => {

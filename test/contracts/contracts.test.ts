@@ -8,6 +8,7 @@ import { describe, it, expect } from 'vitest';
 import { bootFake, modelInfo } from './harness.js';
 import { successScript } from '../../src/dsh-adapter/fake-adapter.js';
 import type { GovernorIdentity } from '../../src/index.js';
+import { GOVERNOR_REMOTE_DESCRIPTORS } from '../../src/plugin/remote-contract.js';
 
 // ===== 辅助构造 =====
 
@@ -76,6 +77,27 @@ describe('model directory', () => {
       const list = await h.ctx.llm.listModels('fake-provider');
       expect(list).toHaveLength(2);
       expect(list.map((m) => m.id).sort()).toEqual(['model-a', 'model-b']);
+    } finally {
+      await h.dispose();
+    }
+  });
+
+  it('过期 policy 保留在管理合同中，但明确返回 model_not_listed', async () => {
+    const h = await bootFake(
+      providers,
+      [modelInfo('fake-provider', 'model-a', 'Model A')],
+      successScript('hi', { inputTokens: 1, outputTokens: 1 }),
+      defaultGovernorConfig(),
+    );
+    try {
+      const list = await h.governor!.listModels();
+      expect(list.find((row) => row.routeId === 'fake-provider:model-b')).toMatchObject({
+        enabled: true,
+        available: false,
+        unavailableReason: 'model_not_listed',
+      });
+      const descriptor = GOVERNOR_REMOTE_DESCRIPTORS.find((item) => item.method === 'listModels')!;
+      expect(() => descriptor.result.schema.parse(list)).not.toThrow();
     } finally {
       await h.dispose();
     }

@@ -3,18 +3,21 @@
 > **状态更新（2026-08-21）**：Phase 0–5 全部完成（见 §9 基线验收），并完成
 > `docs/OPTIMIZATION_REQUIREMENTS.md` 的 P0/P1/P2 优化实现：
 >
-> - 任务交付与逐项 AC 证据见 `PROGRESS.md`；上游接缝缺口与可复现证据见
->   `docs/UPSTREAM_SEAMS.md`（SEAM-1~5）；受阻断项及缓解见 `BLOCKED.md`。
+> - 任务交付与逐项 AC 证据见 `PROGRESS.md`；上游接缝缺口、绕开方案与可复现
+>   证据见 `docs/UPSTREAM_SEAMS.md`（SEAM-1~5）；最终阻断复核见 `BLOCKED.md`。
 > - 测试矩阵新增：决策核心（`test/unit/decision.test.ts`）、双写审计与
 >   故障注入（`test/integration/audit-pipeline.test.ts`，含 fail-closed
 >   反向验证红→绿）、状态压测（`state-lifecycle.test.ts`，10k 请求/并发 100）、
 >   会话选择模式（`selection-mode.test.ts`）、compatApi（`compat-api.test.ts`
->   + `plugin-apply.test.ts`）、P1/P2 运营（`ops-p1p2.test.ts`，全部含 GOV ID）。
-> - 全量 41 files / 750 tests 全过、skipped 0；coverage
->   stmts 96.00% / branches 88.59% / funcs 97.15% / lines 97.02%
->   （四项均高于优化前基线 94.75/87.63/96.01/95.66；含复审判定整改——
->   Trajectory 渲染实现、Auto selector 注册接线、配置写入单事务与
->   超时/.gitignore 违规撤销，见 PROGRESS.md「复审判定整改」）。
+>   - `plugin-apply.test.ts`）、P1/P2 运营（`ops-p1p2.test.ts`，全部含 GOV ID）。
+> - 最终全量 44 files / 791 tests 全过、skipped 0；coverage
+>   stmts 95.08% / branches 87.67% / funcs 96.43% / lines 96.10%
+>   （四项均高于优化前基线 94.75/87.63/96.01/95.66）。
+> - **阻断复核完成**：B-1 改用已知 `request/context` 命名投影并通过真实
+>   JSONL 冷恢复；B-2 由 Host principal resolver + fail-closed Remote 闭环；
+>   B-3 经 rc.8 `dsh-client-modules` 的 `dsh.client` 公开扫描链路完成真实注册。
+>   Composer Auto、原生 Settings、Trajectory 页签及安装/HMR/卸载恢复均已有
+>   运行时或最接近真实 bundle 的集成证据，旧 SEAM-5 阻断结论已撤回。
 
 ## 1. 交付策略
 

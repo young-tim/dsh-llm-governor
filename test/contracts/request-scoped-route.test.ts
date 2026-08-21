@@ -14,11 +14,11 @@ import { describe, expect, it } from 'vitest';
 import SessionStore from '@deepseek-ai/dsh-session';
 import JsonlPersistence from '@deepseek-ai/dsh-session-persistence-jsonl';
 import { Context } from '../../src/dsh-adapter/mod.js';
-import type { LlmModelInfo } from '../../src/dsh-adapter/mod.js';
+import type { LlmCallConfig, LlmModelInfo } from '../../src/dsh-adapter/mod.js';
 import { FakeLlmAdapter } from '../../src/dsh-adapter/fake-adapter.js';
 import { successScript } from '../../src/dsh-adapter/fake-adapter.js';
 import { LlmRuntime } from '../../src/dsh-adapter/mod.js';
-import { GovernorPlugin } from '../../src/plugin/mod.js';
+import { GovernorPlugin, isolateRouteOwnedReasoningEffort } from '../../src/plugin/mod.js';
 import type { GovernorPluginConfig } from '../../src/plugin/mod.js';
 import { GovernorService } from '../../src/plugin/service.js';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -104,8 +104,8 @@ async function runRequestCycle(
   h: SessionHarness,
   turn: number,
   step: number,
-  fallbackConfig: { provider: string; model: string },
-): Promise<{ provider: string; model: string }> {
+  fallbackConfig: LlmCallConfig,
+): Promise<LlmCallConfig> {
   const events = h.ctx.events as unknown as {
     waterfall: (name: string, ...args: unknown[]) => Promise<unknown>;
   };
@@ -122,13 +122,50 @@ async function runRequestCycle(
   );
   return (await events.waterfall('agent/request', payload, async () => ({
     ...fallbackConfig,
-  }))) as {
-    provider: string;
-    model: string;
-  };
+  }))) as LlmCallConfig;
 }
 
 describe('rc.8 request-scoped route override seam', () => {
+  it('reasoning effort remains owned by the exact route that exposed it', () => {
+    const effort = 'high' as LlmCallConfig['reasoningEffort'];
+    const proposed: LlmCallConfig = {
+      provider: 'deepseek',
+      model: 'DeepSeek-V4-Flash',
+      reasoningEffort: effort,
+    };
+    const sameRoute = { ...proposed, temperature: 0.2 };
+    expect(isolateRouteOwnedReasoningEffort(proposed, sameRoute)).toBe(sameRoute);
+    expect(sameRoute.reasoningEffort).toBe(effort);
+
+    const selected: LlmCallConfig = {
+      ...proposed,
+      provider: 'zs-llm',
+      model: 'volcengine/DeepSeek-V4-Flash',
+    };
+    const isolated = isolateRouteOwnedReasoningEffort(proposed, selected);
+    expect(isolated).not.toHaveProperty('reasoningEffort');
+    expect(isolated).toMatchObject({
+      provider: 'zs-llm',
+      model: 'volcengine/DeepSeek-V4-Flash',
+    });
+    expect(selected.reasoningEffort).toBe(effort);
+  });
+
+  it('Auto route replacement removes the concrete Composer model effort before dispatch', async () => {
+    const h = await bootWithSession();
+    try {
+      const config = await runRequestCycle(h, 1, 1, {
+        provider: 'fake-provider',
+        model: 'model-b',
+        reasoningEffort: 'high' as LlmCallConfig['reasoningEffort'],
+      });
+      expect(config).toMatchObject({ provider: 'fake-provider', model: 'model-a' });
+      expect(config).not.toHaveProperty('reasoningEffort');
+    } finally {
+      await h.dispose();
+    }
+  });
+
   it('Auto 改写只进入返回的 dispatch config，Session log 不出现持久模型选择事件', async () => {
     const h = await bootWithSession();
     try {

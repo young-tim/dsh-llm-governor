@@ -48,13 +48,15 @@ export function routeManual(input, requestedProvider, requestedModel, configRevi
         const reason = filterResult.excluded[0]?.reason ?? 'disabled';
         const code = reason === 'disabled'
             ? 'MODEL_DISABLED'
-            : reason === 'access_denied'
-                ? 'MODEL_ACCESS_DENIED'
-                : reason === 'capability_not_supported'
-                    ? 'CAPABILITY_NOT_SUPPORTED'
-                    : reason === 'quota_exceeded'
-                        ? 'QUOTA_EXCEEDED'
-                        : 'MODEL_NOT_FOUND';
+            : reason === 'provider_unavailable'
+                ? 'PROVIDER_UNAVAILABLE'
+                : reason === 'access_denied'
+                    ? 'MODEL_ACCESS_DENIED'
+                    : reason === 'capability_not_supported'
+                        ? 'CAPABILITY_NOT_SUPPORTED'
+                        : reason === 'quota_exceeded'
+                            ? 'QUOTA_EXCEEDED'
+                            : 'MODEL_NOT_FOUND';
         throw new RoutingError(code, `model ${routeId} excluded: ${reason}`, routeId, {
             candidates: [],
             excluded: filterResult.excluded,

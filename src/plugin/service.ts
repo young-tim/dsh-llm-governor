@@ -229,6 +229,16 @@ export interface GovernorServiceOptions {
   sessionEventSink?: SessionEventSink;
 }
 
+/** Host 对一个已注册 provider 的当前可调用性判定；不包含 credential 值。 */
+export interface GovernorProviderAvailability {
+  readonly available: boolean;
+  readonly reason?: 'credential_missing' | 'availability_check_failed';
+}
+
+/** 管理面模型行的当前不可用原因；模型目录状态独立于 Provider 状态。 */
+export type GovernorModelUnavailableReason =
+  NonNullable<GovernorProviderAvailability['reason']> | 'model_not_listed';
+
 /**
  * Governor 核心服务。集成全部领域模块，提供事件监听器所需的方法和 Client Remote API。
  */
@@ -240,6 +250,15 @@ export class GovernorService extends Service {
   private _usageAggregator = new UsageAggregator();
   private _decisions: DecisionRecordMem[] = [];
   private _modelDirectory: readonly ModelSnapshot[] = [];
+  /** DSH adapter registry 当前活动的 provider；不由 catalog/model 反向推导。 */
+  private _activeProviders = new Set<string>();
+  /** 已活动但当前不可调用的 provider 及安全原因码。 */
+  private _unavailableProviders = new Map<
+    string,
+    NonNullable<GovernorProviderAvailability['reason']>
+  >();
+  /** 并发刷新 latest-wins，避免旧 credential 状态在新事件之后覆盖。 */
+  private _directoryRefreshGeneration = 0;
   private _maxAttempts: number;
   private _afterPartialOutput: boolean;
   private _fallbackEnabled: boolean;
@@ -350,6 +369,9 @@ export class GovernorService extends Service {
     );
     // 从配置构建初始模型目录（DSH advisory 在 refreshModelDirectory 时合并）
     this._modelDirectory = this._buildDirectoryFromConfig();
+    // 独立使用 GovernorService 时保留显式配置路由的原语义；真实插件启动
+    // 会立即以 DSH adapter registry + credential availability 覆盖该初值。
+    this._activeProviders = new Set(this._modelDirectory.map((snapshot) => snapshot.provider));
   }
 
   /** bootstrap configRevision：空库初始化为 1 并记录来源；已有库不覆盖（GOV-CONFIG-001）。 */
@@ -475,7 +497,12 @@ export class GovernorService extends Service {
   async refreshModelDirectory(
     listProviders: () => { id: string }[],
     listModels: (p: string) => Promise<readonly LlmModelInfo[]>,
+    providerAvailability?: (
+      provider: string,
+    ) => GovernorProviderAvailability | Promise<GovernorProviderAvailability>,
   ): Promise<void> {
+    const generation = ++this._directoryRefreshGeneration;
+    const providers = listProviders();
     const advisoryByProvider = new Map<
       string,
       {
@@ -486,7 +513,11 @@ export class GovernorService extends Service {
         inputModalities?: readonly string[];
       }[]
     >();
-    for (const p of listProviders()) {
+    const unavailableProviders = new Map<
+      string,
+      NonNullable<GovernorProviderAvailability['reason']>
+    >();
+    for (const p of providers) {
       const models = await listModels(p.id);
       advisoryByProvider.set(
         p.id,
@@ -498,6 +529,17 @@ export class GovernorService extends Service {
           ...(m.inputModalities ? { inputModalities: m.inputModalities } : {}),
         })),
       );
+      if (providerAvailability !== undefined) {
+        try {
+          const availability = await providerAvailability(p.id);
+          if (!availability.available) {
+            unavailableProviders.set(p.id, availability.reason ?? 'availability_check_failed');
+          }
+        } catch {
+          // 可用性检查本身失败时 fail closed，但保留目录以便管理面修复。
+          unavailableProviders.set(p.id, 'availability_check_failed');
+        }
+      }
     }
     // 从配置构建 ModelPolicyEntry
     const policies = new Map<
@@ -527,11 +569,15 @@ export class GovernorService extends Service {
         quality: (cfg.quality ?? {}) as Readonly<Partial<Record<TaskType, number>>>,
       });
     }
-    this._modelDirectory = buildModelDirectory(advisoryByProvider as never, policies as never);
+    const directory = buildModelDirectory(advisoryByProvider as never, policies as never);
+    if (generation !== this._directoryRefreshGeneration) return;
+    this._modelDirectory = directory;
     // 如果刷新结果为空（DSH advisory 不可用），保留配置构建的初始目录
     if (this._modelDirectory.length === 0) {
       this._modelDirectory = this._buildDirectoryFromConfig();
     }
+    this._activeProviders = new Set(providers.map((provider) => provider.id));
+    this._unavailableProviders = unavailableProviders;
   }
 
   /** 绑定身份到 session（同时持久化到 SQLite）。 */
@@ -635,9 +681,32 @@ export class GovernorService extends Service {
   private get globalDefault(): Set<CanonicalRoute> {
     const result = new Set<CanonicalRoute>();
     for (const snap of this._modelDirectory) {
-      if (snap.enabled) result.add(snap.routeId);
+      if (
+        snap.enabled &&
+        this._activeProviders.has(snap.provider) &&
+        !this._unavailableProviders.has(snap.provider)
+      ) {
+        result.add(snap.routeId);
+      }
     }
     return result;
+  }
+
+  /**
+   * 当前模型是否可进入 Governor 自动候选。
+   *
+   * listModels/catalog 只约束 Governor 的自动选择，不是 Provider 请求白名单；
+   * 因此 globalDefault 仍保留活动且已启用的 policy，显式 Manual 可以直通。
+   */
+  private _modelUnavailableReason(snap: ModelSnapshot): GovernorModelUnavailableReason | undefined {
+    if (!snap.inAdvisory) return 'model_not_listed';
+    return this._unavailableProviders.get(snap.provider);
+  }
+
+  private _modelAvailable(snap: ModelSnapshot): boolean {
+    return (
+      this._activeProviders.has(snap.provider) && this._modelUnavailableReason(snap) === undefined
+    );
   }
 
   /**
@@ -666,7 +735,8 @@ export class GovernorService extends Service {
 
     return {
       snapshots,
-      activeProviders: new Set(snapshots.map((s) => s.provider)),
+      activeProviders: this._activeProviders,
+      unavailableProviders: new Set(this._unavailableProviders.keys()),
       globalDefault: this.globalDefault,
       userPolicy: accessPolicy,
       excludedRoutes: state.fallback.excludedRoutes,
@@ -1410,6 +1480,10 @@ export class GovernorService extends Service {
       provider: s.provider,
       model: s.model,
       enabled: s.enabled,
+      available: this._modelAvailable(s),
+      ...(this._modelUnavailableReason(s) !== undefined
+        ? { unavailableReason: this._modelUnavailableReason(s)! }
+        : {}),
       multiplierPpm: s.multiplierPpm,
       capabilities: [...s.capabilities],
       quality: s.quality,
@@ -1435,6 +1509,8 @@ export class GovernorService extends Service {
     provider: string;
     model: string;
     enabled: boolean;
+    available: boolean;
+    unavailableReason?: GovernorModelUnavailableReason;
     multiplierPpm: number;
     capabilities: string[];
     quality: Partial<Record<TaskType, number>>;
@@ -1580,6 +1656,10 @@ export class GovernorService extends Service {
       provider: updated.provider,
       model: updated.model,
       enabled: updated.enabled,
+      available: this._modelAvailable(updated),
+      ...(this._modelUnavailableReason(updated) !== undefined
+        ? { unavailableReason: this._modelUnavailableReason(updated)! }
+        : {}),
       multiplierPpm: updated.multiplierPpm,
       capabilities: [...updated.capabilities],
       quality: updated.quality,

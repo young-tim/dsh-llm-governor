@@ -55,6 +55,12 @@ export class GovernorService extends Service {
     _usageAggregator = new UsageAggregator();
     _decisions = [];
     _modelDirectory = [];
+    /** DSH adapter registry 当前活动的 provider；不由 catalog/model 反向推导。 */
+    _activeProviders = new Set();
+    /** 已活动但当前不可调用的 provider 及安全原因码。 */
+    _unavailableProviders = new Map();
+    /** 并发刷新 latest-wins，避免旧 credential 状态在新事件之后覆盖。 */
+    _directoryRefreshGeneration = 0;
     _maxAttempts;
     _afterPartialOutput;
     _fallbackEnabled;
@@ -152,6 +158,9 @@ export class GovernorService extends Service {
         this._audit = new AuditPipeline(repository, options?.sessionEventSink ?? new NullSessionEventSink());
         // 从配置构建初始模型目录（DSH advisory 在 refreshModelDirectory 时合并）
         this._modelDirectory = this._buildDirectoryFromConfig();
+        // 独立使用 GovernorService 时保留显式配置路由的原语义；真实插件启动
+        // 会立即以 DSH adapter registry + credential availability 覆盖该初值。
+        this._activeProviders = new Set(this._modelDirectory.map((snapshot) => snapshot.provider));
     }
     /** bootstrap configRevision：空库初始化为 1 并记录来源；已有库不覆盖（GOV-CONFIG-001）。 */
     _bootstrapConfigRevision(repository) {
@@ -272,9 +281,12 @@ export class GovernorService extends Service {
         return state;
     }
     /** 更新模型目录（从 DSH advisory 合并治理策略）。 */
-    async refreshModelDirectory(listProviders, listModels) {
+    async refreshModelDirectory(listProviders, listModels, providerAvailability) {
+        const generation = ++this._directoryRefreshGeneration;
+        const providers = listProviders();
         const advisoryByProvider = new Map();
-        for (const p of listProviders()) {
+        const unavailableProviders = new Map();
+        for (const p of providers) {
             const models = await listModels(p.id);
             advisoryByProvider.set(p.id, models.map((m) => ({
                 provider: p.id,
@@ -283,6 +295,18 @@ export class GovernorService extends Service {
                 ...(m.description ? { description: m.description } : {}),
                 ...(m.inputModalities ? { inputModalities: m.inputModalities } : {}),
             })));
+            if (providerAvailability !== undefined) {
+                try {
+                    const availability = await providerAvailability(p.id);
+                    if (!availability.available) {
+                        unavailableProviders.set(p.id, availability.reason ?? 'availability_check_failed');
+                    }
+                }
+                catch {
+                    // 可用性检查本身失败时 fail closed，但保留目录以便管理面修复。
+                    unavailableProviders.set(p.id, 'availability_check_failed');
+                }
+            }
         }
         // 从配置构建 ModelPolicyEntry
         const policies = new Map();
@@ -302,11 +326,16 @@ export class GovernorService extends Service {
                 quality: (cfg.quality ?? {}),
             });
         }
-        this._modelDirectory = buildModelDirectory(advisoryByProvider, policies);
+        const directory = buildModelDirectory(advisoryByProvider, policies);
+        if (generation !== this._directoryRefreshGeneration)
+            return;
+        this._modelDirectory = directory;
         // 如果刷新结果为空（DSH advisory 不可用），保留配置构建的初始目录
         if (this._modelDirectory.length === 0) {
             this._modelDirectory = this._buildDirectoryFromConfig();
         }
+        this._activeProviders = new Set(providers.map((provider) => provider.id));
+        this._unavailableProviders = unavailableProviders;
     }
     /** 绑定身份到 session（同时持久化到 SQLite）。 */
     async bindIdentity(sessionId, identity) {
@@ -394,8 +423,11 @@ export class GovernorService extends Service {
     get globalDefault() {
         const result = new Set();
         for (const snap of this._modelDirectory) {
-            if (snap.enabled)
+            if (snap.enabled &&
+                this._activeProviders.has(snap.provider) &&
+                !this._unavailableProviders.has(snap.provider)) {
                 result.add(snap.routeId);
+            }
         }
         return result;
     }
@@ -423,7 +455,8 @@ export class GovernorService extends Service {
             });
         return {
             snapshots,
-            activeProviders: new Set(snapshots.map((s) => s.provider)),
+            activeProviders: this._activeProviders,
+            unavailableProviders: new Set(this._unavailableProviders.keys()),
             globalDefault: this.globalDefault,
             userPolicy: accessPolicy,
             excludedRoutes: state.fallback.excludedRoutes,
@@ -1058,6 +1091,10 @@ export class GovernorService extends Service {
             provider: s.provider,
             model: s.model,
             enabled: s.enabled,
+            available: this._activeProviders.has(s.provider) && !this._unavailableProviders.has(s.provider),
+            ...(this._unavailableProviders.get(s.provider) !== undefined
+                ? { unavailableReason: this._unavailableProviders.get(s.provider) }
+                : {}),
             multiplierPpm: s.multiplierPpm,
             capabilities: [...s.capabilities],
             quality: s.quality,
@@ -1200,6 +1237,11 @@ export class GovernorService extends Service {
             provider: updated.provider,
             model: updated.model,
             enabled: updated.enabled,
+            available: this._activeProviders.has(updated.provider) &&
+                !this._unavailableProviders.has(updated.provider),
+            ...(this._unavailableProviders.get(updated.provider) !== undefined
+                ? { unavailableReason: this._unavailableProviders.get(updated.provider) }
+                : {}),
             multiplierPpm: updated.multiplierPpm,
             capabilities: [...updated.capabilities],
             quality: updated.quality,

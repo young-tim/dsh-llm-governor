@@ -168,6 +168,7 @@ const REASON_LABELS = {
     NO_MODEL_MATCHED: '没有匹配模型',
     quality_missing: '缺少任务 Quality',
     disabled: '模型已禁用',
+    provider_unavailable: 'Provider 当前不可用',
     access_denied: '无访问权限',
     capability_not_supported: '能力不匹配',
     quota_exceeded: '额度已耗尽',

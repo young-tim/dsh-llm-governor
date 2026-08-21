@@ -109,6 +109,7 @@ function makeFilterInput(snapshots: readonly ModelSnapshot[]): FilterInput {
   return {
     snapshots,
     activeProviders: new Set(snapshots.map((s) => s.provider)),
+    unavailableProviders: new Set(),
     globalDefault: new Set(snapshots.map((s) => s.routeId)),
     userPolicy: undefined,
     excludedRoutes: new Set(),

@@ -79,6 +79,8 @@ const modelResultSchema = z
     provider: z.string(),
     model: z.string(),
     enabled: z.boolean(),
+    available: z.boolean(),
+    unavailableReason: z.enum(['credential_missing', 'availability_check_failed']).optional(),
     multiplierPpm: z.number().int().nonnegative(),
     capabilities: z.array(z.string()),
     quality: z.record(z.string(), z.number()),

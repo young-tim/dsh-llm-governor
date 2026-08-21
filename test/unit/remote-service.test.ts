@@ -55,7 +55,9 @@ async function expectRemoteFailure(
     throw new Error('expected Remote failure');
   } catch (error) {
     expect(error).toBeInstanceOf(TypertLookupFailure);
-    expect((error as TypertLookupFailure<{ code: string }>).failure.code).toBe(code);
+    const remoteError = error as TypertLookupFailure<{ code: string }>;
+    expect(remoteError.failure.code).toBe(code);
+    expect(remoteError.message).toBe(code);
   }
 }
 
@@ -317,6 +319,26 @@ describe('Governor Typert Remote capability boundary', () => {
         ok: false,
         error: { code: 'REVISION_CONFLICT' },
       });
+      const invalidMinimumQuality = await dispatchRpc.call(
+        ctx.typertGateway,
+        'governor/updateRouting',
+        {
+          args: {
+            patch: { creditFirst: { minimumQuality: 101 } },
+          },
+        },
+        undefined,
+      );
+      expect(invalidMinimumQuality).toMatchObject({
+        ok: false,
+        error: {
+          code: 'INVALID_MINIMUM_QUALITY',
+          message: 'INVALID_MINIMUM_QUALITY',
+        },
+      });
+      expect(JSON.stringify(invalidMinimumQuality)).not.toContain(
+        'Typert lookup policy rejected the requested identity',
+      );
     } finally {
       await disposeContribution();
       await gatewayFiber.dispose();
@@ -390,5 +412,13 @@ describe('Governor Typert Remote capability boundary', () => {
       () => manage.updateRouting({ creditFirst: { minimumQuality: 101 } }),
       'INVALID_MINIMUM_QUALITY',
     );
+    try {
+      await manage.updateRouting({ creditFirst: { minimumQuality: 101 } });
+      throw new Error('expected Remote failure');
+    } catch (error) {
+      expect(error).toBeInstanceOf(TypertLookupFailure);
+      expect((error as Error).message).toBe('INVALID_MINIMUM_QUALITY');
+      expect(String(error)).toBe('Error: INVALID_MINIMUM_QUALITY');
+    }
   });
 });

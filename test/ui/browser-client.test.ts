@@ -162,6 +162,7 @@ function remoteFace(): GovernorRemoteFace {
         provider: 'p',
         model: 'a',
         enabled: true,
+        available: true,
         multiplierPpm: 1_000_000,
         capabilities: [],
         quality: {},
@@ -368,6 +369,30 @@ describe('dsh.client lifecycle', () => {
       pluginCss: 'dsh-llm-governor',
     });
     expect(tag.textContent).toContain('.dsh-governor-settings');
+    expect(tag.textContent).toContain(
+      '.dsh-governor-model-select .dsh-governor-model-controls>select,.dsh-governor-model-select .dsh-governor-model-controls>input{height:28px;padding:4px 8px;font-size:13px;font-weight:500;line-height:20px}',
+    );
+    expect(tag.textContent).toContain(
+      '.dsh-governor-model-select .dsh-governor-model-controls>select option{font-size:13px;font-weight:500;line-height:20px}',
+    );
+    expect(tag.textContent).toContain(
+      '.dsh-governor-model-select .dsh-governor-effort{font-size:12px;font-weight:400;line-height:18px}',
+    );
+    expect(tag.textContent).toContain(
+      '.dsh-governor-model-select .dsh-governor-effort select:disabled{color:var(--dsw-alias-label-secondary);opacity:1',
+    );
+    expect(tag.textContent).toContain(
+      '.dsh-governor-model-error{position:absolute;left:50%;bottom:calc(100% + 12px)',
+    );
+    expect(tag.textContent).toContain('width:max-content;max-width:min(520px,calc(100% - 24px))');
+    expect(tag.textContent).toContain('transform:translateX(-50%)');
+    expect(tag.textContent).toContain('pointer-events:none');
+    expect(tag.textContent).toContain(
+      '.dsh-governor-model-error.notice{border-color:var(--dsw-alias-border-l2)',
+    );
+    expect(tag.textContent).not.toMatch(
+      /\.dsh-governor-model-select\{[^}]*position\s*:\s*relative/,
+    );
     await dispose();
     expect(remove).toHaveBeenCalledTimes(1);
     await disposeDeclaration();
@@ -383,7 +408,26 @@ describe('dsh.client lifecycle', () => {
   });
 });
 
-function modelStore() {
+function modelStore(modelCount = 6) {
+  const models = [
+    {
+      id: 'a',
+      name: 'Alpha',
+      reasoning: {
+        defaultEffort: 'medium',
+        efforts: [
+          { id: 'low', name: 'Low' },
+          { id: 'medium', name: 'Medium' },
+          { id: 'high', name: 'High' },
+        ],
+      },
+    },
+    { id: 'b', name: 'Beta' },
+    ...Array.from({ length: Math.max(0, modelCount - 2) }, (_, index) => ({
+      id: `m${String(index + 3)}`,
+      name: `Model ${String(index + 3)}`,
+    })),
+  ];
   const snapshot = {
     current: { provider: 'p', model: 'a', reasoningEffort: 'medium' },
     routable: true,
@@ -391,21 +435,7 @@ function modelStore() {
       {
         id: 'p',
         name: 'Provider P',
-        models: [
-          {
-            id: 'a',
-            name: 'Alpha',
-            reasoning: {
-              defaultEffort: 'medium',
-              efforts: [
-                { id: 'low', name: 'Low' },
-                { id: 'medium', name: 'Medium' },
-                { id: 'high', name: 'High' },
-              ],
-            },
-          },
-          { id: 'b', name: 'Beta' },
-        ],
+        models,
       },
     ],
     failures: [],
@@ -417,6 +447,16 @@ function modelStore() {
     getSnapshot: () => snapshot,
   };
 }
+
+const COMPLETE_QUALITY = {
+  general: 85,
+  coding: 85,
+  reasoning: 85,
+  writing: 85,
+  data_analysis: 85,
+  vision: 85,
+  tool_use: 85,
+} as const;
 
 function emptySettingsApi(overrides: Partial<GovernorClientApi> = {}): GovernorClientApi {
   const routing: GovernorRoutingView = {
@@ -463,6 +503,7 @@ describe('native rendered surfaces', () => {
       provider: 'p',
       model: 'DeepSeek-V4-flash',
       enabled: true,
+      available: true,
       multiplierPpm: 1_000_000,
       capabilities: [],
       quality: {},
@@ -472,7 +513,42 @@ describe('native rendered surfaces', () => {
     expect(suggestedQualityPreset('DeepSeek-V4-pro')).toBe(95);
     expect(suggestedQualityPreset('doubao-seed-2.0-lite')).toBe(75);
     expect(autoSetupIssue([empty])).toContain('Settings → Governor → 模型');
-    expect(autoSetupIssue([{ ...empty, quality: { general: 85 } }])).toBeNull();
+    expect(autoSetupIssue([{ ...empty, quality: { general: 85 } }])).toContain('1/7');
+    expect(autoSetupIssue([{ ...empty, quality: COMPLETE_QUALITY }])).toBeNull();
+    expect(
+      autoSetupIssue([
+        {
+          ...empty,
+          available: false,
+          unavailableReason: 'credential_missing',
+          quality: COMPLETE_QUALITY,
+        },
+      ]),
+    ).toContain('没有可用的已启用模型');
+    expect(
+      autoSetupIssue([
+        { ...empty, quality: { general: 85 } },
+        {
+          ...empty,
+          routeId: 'p:unavailable',
+          model: 'unavailable',
+          available: false,
+          unavailableReason: 'model_not_listed',
+          quality: COMPLETE_QUALITY,
+        },
+      ]),
+    ).toContain('1/7');
+    expect(
+      autoSetupIssue([
+        { ...empty, quality: { general: 85, coding: 85, reasoning: 85 } },
+        {
+          ...empty,
+          routeId: 'p:b',
+          model: 'b',
+          quality: { writing: 75, data_analysis: 75, vision: 75, tool_use: 75 },
+        },
+      ]),
+    ).toBeNull();
     expect(autoSetupIssue([{ ...empty, enabled: false }])).toContain('没有已启用模型');
   });
 
@@ -522,9 +598,10 @@ describe('native rendered surfaces', () => {
           provider: 'p',
           model: 'a',
           enabled: true,
+          available: true,
           multiplierPpm: 1_000_000,
           capabilities: [],
-          quality: { general: 85 },
+          quality: COMPLETE_QUALITY,
           configRevision: 1,
         },
       ],
@@ -563,14 +640,43 @@ describe('native rendered surfaces', () => {
       expectedRevision: 8,
       lastManualRoute: 'p:b',
     });
-    const search = renderer.root.find(
-      (node) => node.type === 'input' && node.props['aria-label'] === '搜索模型 / Search models',
-    );
+    expect(
+      renderer.root.findAll(
+        (node) => node.type === 'input' && node.props['aria-label'] === '筛选模型 / Filter models',
+      ),
+    ).toHaveLength(0);
+  });
+
+  it('Composer only shows filtering for long model directories and retains the current model', async () => {
+    const sessionId = 'session-long-directory' as SessionId;
+    let renderer!: TestRenderer.ReactTestRenderer;
     await act(async () => {
-      search.props.onChange({ currentTarget: { value: 'beta' } });
+      renderer = TestRenderer.create(
+        createElement(GovernorModelSelect, {
+          locked: false,
+          available: true,
+          sessionId,
+          directory: modelStore(9),
+          load: vi.fn(),
+          selectModel: vi.fn(async () => true),
+          api: emptySettingsApi(),
+        }),
+      );
+    });
+    const filter = renderer.root.findByProps({
+      'aria-label': '筛选模型 / Filter models',
+    });
+    await act(async () => {
+      filter.props.onChange({ currentTarget: { value: 'model 9' } });
     });
     expect(
-      renderer.root.findAllByType('option').some((node) => node.props.value === 'p\u0000b'),
+      renderer.root.findAllByType('option').some((node) => node.props.value === 'p\u0000m9'),
+    ).toBe(true);
+    expect(
+      renderer.root.findByProps({ 'aria-label': '模型选择 / Model selection' }).props.value,
+    ).toBe('p\u0000a');
+    expect(
+      renderer.root.findAllByType('option').some((node) => node.props.value === 'p\u0000a'),
     ).toBe(true);
   });
 
@@ -589,9 +695,10 @@ describe('native rendered surfaces', () => {
           provider: 'p',
           model: 'a',
           enabled: true,
+          available: true,
           multiplierPpm: 1_000_000,
           capabilities: [],
-          quality: { general: 85 },
+          quality: COMPLETE_QUALITY,
           configRevision: 1,
         },
       ],
@@ -641,6 +748,7 @@ describe('native rendered surfaces', () => {
           provider: 'p',
           model: 'a',
           enabled: true,
+          available: true,
           multiplierPpm: 1_000_000,
           capabilities: [],
           quality: {},
@@ -673,6 +781,107 @@ describe('native rendered surfaces', () => {
     expect(selectMode).not.toHaveBeenCalled();
   });
 
+  it('Composer marks a restored but incomplete Auto profile as not ready', async () => {
+    const sessionId = 'session-restored-auto' as SessionId;
+    const selectMode = vi.fn(async (_id: SessionId, mode: 'auto' | 'manual') => ({
+      mode,
+      selectionRevision: 4,
+    }));
+    const api = emptySettingsApi({
+      selection: async () => ({ mode: 'auto', selectionRevision: 3 }),
+      selectMode,
+      models: async () => [
+        {
+          routeId: 'p:a',
+          provider: 'p',
+          model: 'a',
+          enabled: true,
+          available: true,
+          multiplierPpm: 1_000_000,
+          capabilities: [],
+          quality: { general: 85 },
+          configRevision: 1,
+        },
+      ],
+    });
+    let renderer!: TestRenderer.ReactTestRenderer;
+    await act(async () => {
+      renderer = TestRenderer.create(
+        createElement(GovernorModelSelect, {
+          locked: false,
+          available: true,
+          sessionId,
+          directory: modelStore(),
+          load: vi.fn(),
+          selectModel: vi.fn(async () => true),
+          api,
+        }),
+      );
+    });
+
+    const modelSelect = renderer.root.findByProps({
+      'aria-label': '模型选择 / Model selection',
+    });
+    expect(selectMode).toHaveBeenCalledWith(sessionId, 'manual', {
+      expectedRevision: 3,
+      lastManualRoute: 'p:a',
+    });
+    expect(modelSelect.props.value).toBe('p\u0000a');
+    expect(renderer.root.findByProps({ role: 'alert' }).children.join('')).toContain(
+      'Auto 未就绪，已切换到 a',
+    );
+    expect(renderer.root.findByProps({ role: 'alert' }).children.join('')).toContain(
+      'Quality 档位',
+    );
+    expect(renderer.root.findByProps({ role: 'alert' }).props.className).toContain('notice');
+  });
+
+  it('Composer shows Auto-decided reasoning instead of the stale concrete effort', async () => {
+    const sessionId = 'session-ready-auto' as SessionId;
+    let renderer!: TestRenderer.ReactTestRenderer;
+    await act(async () => {
+      renderer = TestRenderer.create(
+        createElement(GovernorModelSelect, {
+          locked: false,
+          available: true,
+          sessionId,
+          directory: modelStore(),
+          load: vi.fn(),
+          selectModel: vi.fn(async () => true),
+          api: emptySettingsApi({
+            selection: async () => ({ mode: 'auto', selectionRevision: 3 }),
+            models: async () => [
+              {
+                routeId: 'p:a',
+                provider: 'p',
+                model: 'a',
+                enabled: true,
+                available: true,
+                multiplierPpm: 1_000_000,
+                capabilities: [],
+                quality: COMPLETE_QUALITY,
+                configRevision: 1,
+              },
+            ],
+          }),
+        }),
+      );
+    });
+
+    expect(renderer.root.findAllByType('option')[0]?.children).toEqual(['Auto（Governor）']);
+    const effort = renderer.root.findByProps({
+      'aria-label': '推理强度 / Reasoning effort',
+    });
+    expect(effort.props.disabled).toBe(true);
+    expect(effort.findByType('option').children).toEqual(['Auto 决定']);
+    expect(
+      renderer.root
+        .findByProps({ className: 'dsh-governor-effort' })
+        .findByType('span')
+        .children.join(''),
+    ).toBe('推理');
+  });
+
   it('Composer exposes reasoning effort and renders nothing for addressed subagents', async () => {
     const sessionId = 'session-2' as SessionId;
     const selectModel = vi.fn(async () => true);
@@ -695,6 +904,12 @@ describe('native rendered surfaces', () => {
       (node) =>
         node.type === 'select' && node.props['aria-label'] === '推理强度 / Reasoning effort',
     );
+    expect(
+      renderer.root
+        .findByProps({ className: 'dsh-governor-effort' })
+        .findByType('span')
+        .children.join(''),
+    ).toBe('推理');
     await act(async () => {
       await effort.props.onChange({ currentTarget: { value: 'high' } });
     });
@@ -790,6 +1005,7 @@ describe('native rendered surfaces', () => {
       provider: 'p',
       model: 'a',
       enabled: true,
+      available: true,
       multiplierPpm: 1_000_000,
       capabilities: ['coding'],
       quality: { coding: 90 },
@@ -959,6 +1175,134 @@ describe('native rendered surfaces', () => {
     expect(requests?.findByType('strong').children).toEqual(['1']);
   });
 
+  it('Routing validates minimum Quality locally and reports saving/saved states', async () => {
+    const routing = await emptySettingsApi().routing();
+    let releaseSave!: (value: GovernorRoutingView) => void;
+    let pendingSave!: Promise<GovernorRoutingView>;
+    const saveRouting = vi.fn(() => {
+      pendingSave = new Promise<GovernorRoutingView>((resolve) => {
+        releaseSave = resolve;
+      });
+      return pendingSave;
+    });
+    const api = emptySettingsApi({ saveRouting });
+    let renderer!: TestRenderer.ReactTestRenderer;
+    await act(async () => {
+      renderer = TestRenderer.create(createElement(GovernorSettings, { api }));
+    });
+    const minimumQuality = () =>
+      renderer.root.find(
+        (node) => node.type === 'input' && node.props['aria-describedby'] !== undefined,
+      );
+    const saveButton = () =>
+      renderer.root.findAllByType('button').find((node) => node.children.includes('保存路由设置'))!;
+
+    await act(async () => {
+      minimumQuality().props.onChange({ currentTarget: { valueAsNumber: 101 } });
+    });
+    await act(async () => {
+      saveButton().props.onClick();
+    });
+    expect(saveRouting).not.toHaveBeenCalled();
+    expect(renderer.root.findByProps({ role: 'alert' }).children.join('')).toContain('0–100');
+
+    await act(async () => {
+      minimumQuality().props.onChange({ currentTarget: { valueAsNumber: 80 } });
+    });
+    act(() => {
+      saveButton().props.onClick();
+    });
+    expect(JSON.stringify(renderer.toJSON())).toContain('保存中…');
+    await act(async () => {
+      releaseSave({
+        ...routing,
+        creditFirst: { ...routing.creditFirst, minimumQuality: 80 },
+      });
+      await pendingSave;
+    });
+    expect(renderer.root.findByProps({ role: 'status' }).children).toEqual(['已保存']);
+  });
+
+  it('Settings shows explicit empty states for models, users, and 31-day usage', async () => {
+    let renderer!: TestRenderer.ReactTestRenderer;
+    await act(async () => {
+      renderer = TestRenderer.create(createElement(GovernorSettings, { api: emptySettingsApi() }));
+    });
+    const tab = (label: string) =>
+      renderer.root.findAllByType('button').find((node) => node.children.includes(label))!;
+    for (const [label, emptyText] of [
+      ['模型', '暂无可配置模型'],
+      ['用户', '暂无用户策略'],
+      ['用量', '最近 31 天暂无用量记录'],
+    ] as const) {
+      await act(async () => {
+        tab(label).props.onClick();
+      });
+      expect(JSON.stringify(renderer.toJSON())).toContain(emptyText);
+    }
+  });
+
+  it('Models explains Provider unavailability without disabling policy controls', async () => {
+    const credentialMissing: GovernorModelView = {
+      routeId: 'p:credential-missing',
+      provider: 'p',
+      model: 'credential-missing',
+      enabled: true,
+      available: false,
+      unavailableReason: 'credential_missing',
+      multiplierPpm: 1_000_000,
+      capabilities: [],
+      quality: COMPLETE_QUALITY,
+      configRevision: 2,
+    };
+    const availabilityUnknown: GovernorModelView = {
+      ...credentialMissing,
+      routeId: 'q:availability-unknown',
+      provider: 'q',
+      model: 'availability-unknown',
+      unavailableReason: 'availability_check_failed',
+    };
+    const modelNotListed: GovernorModelView = {
+      ...credentialMissing,
+      routeId: 'r:model-not-listed',
+      provider: 'r',
+      model: 'model-not-listed',
+      unavailableReason: 'model_not_listed',
+    };
+    const api = emptySettingsApi({
+      models: async () => [credentialMissing, availabilityUnknown, modelNotListed],
+    });
+    let renderer!: TestRenderer.ReactTestRenderer;
+    await act(async () => {
+      renderer = TestRenderer.create(createElement(GovernorSettings, { api }));
+    });
+    await act(async () => {
+      renderer.root
+        .findAllByType('button')
+        .find((node) => node.children.includes('模型'))!
+        .props.onClick();
+    });
+
+    const rendered = JSON.stringify(renderer.toJSON());
+    expect(rendered).toContain('Provider 凭证未配置，不参与自动路由');
+    expect(rendered).toContain('Provider 可用性未知，不参与自动路由');
+    expect(rendered).toContain('当前模型目录未提供，不参与自动路由');
+    expect(rendered).toContain('没有可用的已启用模型，Auto 不可用');
+    expect(
+      renderer.root.findByProps({ 'aria-label': 'p:credential-missing 启用' }).props.disabled,
+    ).toBe(false);
+    expect(
+      renderer.root.findByProps({
+        'aria-label': 'p:credential-missing 全部任务 Quality 95',
+      }).props.disabled,
+    ).toBe(false);
+    expect(
+      renderer.root.findByProps({
+        'aria-label': 'r:model-not-listed 全部任务 Quality 85',
+      }).props.disabled,
+    ).toBe(false);
+  });
+
   it('describeAccess makes every manage control read-only while preserving native reads', async () => {
     const saveRouting = vi.fn(emptySettingsApi().saveRouting);
     const saveModel = vi.fn();
@@ -967,6 +1311,7 @@ describe('native rendered surfaces', () => {
       provider: 'p',
       model: 'a',
       enabled: true,
+      available: true,
       multiplierPpm: 1_000_000,
       capabilities: [],
       quality: {},
@@ -1026,6 +1371,7 @@ describe('native rendered surfaces', () => {
       provider: 'p',
       model: 'a',
       enabled: true,
+      available: true,
       multiplierPpm: 1_000_000,
       capabilities: [],
       quality: {},

@@ -279,6 +279,87 @@ describe('GovernorService/updateUser', () => {
 // ===== refreshModelDirectory =====
 
 describe('GovernorService/refreshModelDirectory', () => {
+  it('并发可用性刷新 latest-wins，较旧的缺凭证结果不会覆盖新状态', async () => {
+    const h = await bootFake(
+      providers,
+      models,
+      successScript('hi', { inputTokens: 1, outputTokens: 1 }),
+      defaultConfig(),
+    );
+    try {
+      let releaseOld!: (value: { available: false; reason: 'credential_missing' }) => void;
+      let markOldStarted!: () => void;
+      const oldStarted = new Promise<void>((resolve) => {
+        markOldStarted = resolve;
+      });
+      const oldAvailability = new Promise<{
+        available: false;
+        reason: 'credential_missing';
+      }>((resolve) => {
+        releaseOld = resolve;
+      });
+      const oldRefresh = h.governor!.refreshModelDirectory(
+        () => [{ id: 'fake-provider' }],
+        async () => models,
+        () => {
+          markOldStarted();
+          return oldAvailability;
+        },
+      );
+      await oldStarted;
+
+      await h.governor!.refreshModelDirectory(
+        () => [{ id: 'fake-provider' }],
+        async () => models,
+        async () => ({ available: true }),
+      );
+      releaseOld({ available: false, reason: 'credential_missing' });
+      await oldRefresh;
+
+      expect((await h.governor!.listModels()).every((row) => row.available)).toBe(true);
+    } finally {
+      await h.dispose();
+    }
+  });
+
+  it('保留未配置凭证的模型管理视图，但不让它进入路由候选', async () => {
+    const h = await bootFake(
+      providers,
+      models,
+      successScript('hi', { inputTokens: 1, outputTokens: 1 }),
+      defaultConfig(),
+    );
+    try {
+      await h.governor!.refreshModelDirectory(
+        () => [{ id: 'fake-provider' }],
+        async () => models,
+        async () => ({ available: false, reason: 'credential_missing' }),
+      );
+
+      const rows = await h.governor!.listModels();
+      expect(rows).toHaveLength(2);
+      expect(rows.every((row) => row.enabled)).toBe(true);
+      expect(rows.every((row) => !row.available)).toBe(true);
+      expect(rows.every((row) => row.unavailableReason === 'credential_missing')).toBe(true);
+
+      await expect(
+        h.governor!.selectModel('credential-missing', 1, 1, {
+          provider: 'fake-provider',
+          model: 'model-a',
+        }),
+      ).rejects.toMatchObject({
+        code: 'PROVIDER_UNAVAILABLE',
+        evidence: {
+          excluded: expect.arrayContaining([
+            { routeId: 'fake-provider:model-a', reason: 'provider_unavailable' },
+          ]),
+        },
+      });
+    } finally {
+      await h.dispose();
+    }
+  });
+
   it('用新的 advisory 刷新模型目录', async () => {
     const h = await bootFake(
       providers,

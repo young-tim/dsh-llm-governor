@@ -249,6 +249,40 @@ describe('GOV-TRACE-002 Trajectory 卡片 Definition', () => {
     expect(governorTrajectoryDefinition.buildViewNode(contextOf(undefined))).toBeNull();
   });
 
+  it('buildViewNode：Provider 不可用排除原因显示本地化文案', () => {
+    const rejected = governorTrajectoryDefinition.start(
+      contextOf(undefined),
+      matchOf(
+        decisionEvent({
+          outcome: 'rejected',
+          errorCode: 'NO_MODEL_MATCHED',
+          candidates: [],
+          selectedRoute: undefined,
+          excluded: [{ routeId: 'p:no-key', reason: 'provider_unavailable' }],
+        }),
+      ),
+    );
+    const markdown = markdownOf(governorTrajectoryDefinition.buildViewNode(contextOf(rejected))!);
+    expect(markdown).toContain('p:no-key · Provider 当前不可用 (provider_unavailable)');
+  });
+
+  it('buildViewNode：目录已移除模型显示明确原因', () => {
+    const rejected = governorTrajectoryDefinition.start(
+      contextOf(undefined),
+      matchOf(
+        decisionEvent({
+          outcome: 'rejected',
+          errorCode: 'NO_MODEL_MATCHED',
+          candidates: [],
+          selectedRoute: undefined,
+          excluded: [{ routeId: 'p:stale', reason: 'model_not_listed' }],
+        }),
+      ),
+    );
+    const markdown = markdownOf(governorTrajectoryDefinition.buildViewNode(contextOf(rejected))!);
+    expect(markdown).toContain('p:stale · 模型不在当前目录 (model_not_listed)');
+  });
+
   it('buildViewNode：Quality 缺失时在官方轨迹给出可操作的快速初始化指引', () => {
     const rejected = governorTrajectoryDefinition.start(
       contextOf(undefined),

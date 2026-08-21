@@ -15,7 +15,11 @@ import type {
 } from '../dsh-adapter/mod.js';
 import { GovernorService } from './service.js';
 import { uuidv7 } from '../routing/decision.js';
-import type { GovernorPluginConfig, GovernorServiceOptions } from './service.js';
+import type {
+  GovernorPluginConfig,
+  GovernorProviderAvailability,
+  GovernorServiceOptions,
+} from './service.js';
 import { observeStream } from '../usage/observer.js';
 import type { UsageEvent } from '../usage/types.js';
 import { computeCreditNanos } from '../credits/calc.js';
@@ -47,6 +51,88 @@ const GOVERNOR_WEB_PREFIX = '/governor';
 
 /** LLM 分类器的 Prompt 版本（与 classifier 缓存键约定一致，变更时 bump）。 */
 const CLASSIFIER_PROMPT_VERSION = 'v1';
+
+/** 只读取 Host 可安全公开的 credential 状态，不读取或缓存凭证值。 */
+interface GovernorCredentialStatusService {
+  describe(ref: string): Promise<{ readonly configured: boolean }>;
+}
+
+/** Governor 只需 settings resolved value；不读取未脱敏 document。 */
+interface GovernorSettingsReadService {
+  get(namespace: string): unknown;
+}
+
+function valueAtPath(root: unknown, path: readonly string[]): unknown {
+  let value = root;
+  for (const segment of path) {
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
+    value = (value as Record<string, unknown>)[segment];
+  }
+  return value;
+}
+
+/**
+ * 复用 Host Models 页的 providerUsable 事实源：
+ * active adapter + resolved profile + credential describe(configured)。
+ *
+ * 没有 configurable settings 地址、或 profile 未命名 `apiKeyEnv` 的活动 provider
+ * 可以使用 provider 自身的身份链；显式命名 credential ref 时则必须由
+ * Host credentials seam 确认已配置。整个判定不接触 secret value。
+ */
+export async function resolveGovernorProviderAvailability(
+  ctx: Context,
+  provider: string,
+): Promise<GovernorProviderAvailability> {
+  const entry = ctx.llm
+    .listConfigurableProviders()
+    .find((candidate) => candidate.provider === provider);
+  if (entry === undefined || entry.settingsNs.length === 0) return { available: true };
+
+  // `settings` / `credentials` 是可选 Host service，必须从声明了相应 inject 的
+  // nested context 读取。主 Governor context 只 inject llm；在生产 Cordis 作用域
+  // 中通过 ctx.get() 猜测可选 service 会得到 undefined，进而把全部 provider 误判。
+  const services = ctx as unknown as {
+    readonly settings: GovernorSettingsReadService;
+    readonly credentials: GovernorCredentialStatusService;
+  };
+  const settings = services.settings;
+  const namespace = settings.get(entry.settingsNs as unknown as string);
+  if (namespace === undefined) {
+    return { available: false, reason: 'availability_check_failed' };
+  }
+  const profile = valueAtPath(namespace, entry.settingsPath);
+  if (typeof profile !== 'object' || profile === null || Array.isArray(profile)) {
+    return { available: false, reason: 'availability_check_failed' };
+  }
+  const ref = (profile as Record<string, unknown>)['apiKeyEnv'];
+  if (ref === undefined) return { available: true };
+  if (typeof ref !== 'string' || ref.length === 0) {
+    return { available: false, reason: 'availability_check_failed' };
+  }
+
+  try {
+    const status = await services.credentials.describe(ref);
+    return status.configured
+      ? { available: true }
+      : { available: false, reason: 'credential_missing' };
+  } catch {
+    return { available: false, reason: 'availability_check_failed' };
+  }
+}
+
+async function refreshGovernorModelDirectory(
+  ctx: Context,
+  service: GovernorService,
+  availabilityCtx?: Context,
+): Promise<void> {
+  await service.refreshModelDirectory(
+    () => ctx.llm.listProviders(),
+    (provider) => ctx.llm.listModels(provider),
+    ...(availabilityCtx === undefined
+      ? []
+      : [(provider: string) => resolveGovernorProviderAvailability(availabilityCtx, provider)]),
+  );
+}
 
 /**
  * 解析默认 SQLite 路径：$DSH_HOME/dsh-llm-governor/governor.db。
@@ -81,6 +167,26 @@ function extractClassifyInput(messages: readonly unknown[]): {
     out.push({ type: msg.role ?? 'user', text });
   }
   return { messages: out, hasImage, hasToolContext };
+}
+
+/**
+ * Keep adapter-owned reasoning effort scoped to the exact route that exposed it.
+ *
+ * Composer selection contributes an effort for its concrete provider/model. When
+ * Governor replaces that route (Auto or fallback), carrying the opaque effort id
+ * into another adapter can make an otherwise valid request emit an unsupported
+ * provider parameter. Omitting it lets DSH resolve the selected route's own
+ * advertised default, when that route actually supports reasoning controls.
+ */
+export function isolateRouteOwnedReasoningEffort(
+  proposed: LlmCallConfig,
+  selected: LlmCallConfig,
+): LlmCallConfig {
+  const routeChanged = proposed.provider !== selected.provider || proposed.model !== selected.model;
+  if (!routeChanged || selected.reasoningEffort === undefined) return selected;
+  const isolated = { ...selected };
+  delete isolated.reasoningEffort;
+  return isolated;
 }
 
 /**
@@ -351,19 +457,40 @@ function toRuntimeConfig(resolved: GovernorConfig): GovernorPluginConfig {
  * @param service - 已构造的 Governor 服务实例。
  */
 export async function wireGovernorEvents(ctx: Context, service: GovernorService): Promise<void> {
-  // 4. llm/adapters-updated：刷新模型目录
-  ctx.on(
-    'llm/adapters-updated' as never,
-    (() => {
-      void service
-        .refreshModelDirectory(
-          () => ctx.llm.listProviders(),
-          (p) => ctx.llm.listModels(p),
-        )
-        .catch(() => {});
-    }) as never,
-    { global: true } as never,
-  );
+  let availabilityCtx: Context | undefined;
+  let directoryRefreshActive = true;
+  const refreshDirectory = () => {
+    if (!directoryRefreshActive) return;
+    // Capture one scope per refresh. GovernorService 的 generation guard 保证 scope
+    // 切换或事件重叠时 latest-wins，旧 credential 结果不能覆盖新状态。
+    const scopedSnapshot = availabilityCtx;
+    void refreshGovernorModelDirectory(ctx, service, scopedSnapshot).catch(() => {});
+  };
+
+  // 4. adapter/settings/credential 任一事实源变更都重新执行当前可用性 join。
+  //    监听器本身不访问可选 service；当 nested inject 活动时，它捕获的
+  //    scoped context 才能合法读取 settings / credentials。
+  ctx.on('llm/adapters-updated' as never, refreshDirectory as never, { global: true } as never);
+  ctx.on('credentials/updated' as never, refreshDirectory as never, { global: true } as never);
+  ctx.on('settings/updated' as never, refreshDirectory as never, { global: true } as never);
+
+  ctx.inject(['settings', 'credentials'] as never, (scopedCtx) => {
+    availabilityCtx = scopedCtx;
+    // 初次获得可选 service 时立即把启动阶段的 adapter-only 快照升级成 Host join。
+    refreshDirectory();
+    return () => {
+      if (availabilityCtx !== scopedCtx) return;
+      availabilityCtx = undefined;
+      // 可选 service 卸载时不能永久保留 stale unavailable。回退到活动 adapter
+      // 事实；这也保留未安装 Settings 的独立部署和 provider-owned auth chain。
+      refreshDirectory();
+    };
+  });
+  // Governor 本身卸载时，阻止 nested scope 的清理回调启动新的目录刷新。
+  ctx.effect(() => () => {
+    directoryRefreshActive = false;
+    availabilityCtx = undefined;
+  });
 
   // 5. agent/pre-step：读取本步新消息，执行 Hint/Rule/LLM 自动分类，
   //    并提取能力/模态要求（图片输入 → vision 能力 + image 模态）
@@ -406,7 +533,7 @@ export async function wireGovernorEvents(ctx: Context, service: GovernorService)
         payload.step,
         defaultConfig,
       );
-      return config;
+      return isolateRouteOwnedReasoningEffort(defaultConfig, config);
     }) as never,
     { global: true } as never,
   );
@@ -698,10 +825,7 @@ export const GovernorPlugin = {
 
     // 3. 从 DSH advisory 合并模型目录（初始目录从配置构建，在构造函数中完成）
     try {
-      await service.refreshModelDirectory(
-        () => ctx.llm.listProviders(),
-        (p) => ctx.llm.listModels(p),
-      );
+      await refreshGovernorModelDirectory(ctx, service);
     } catch {
       // DSH 未就绪时保留配置构建的初始目录
     }

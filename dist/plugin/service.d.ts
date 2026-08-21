@@ -164,6 +164,11 @@ export interface GovernorServiceOptions {
     /** Session Event 写入端（缺少 Session service 时默认 Null 并严格 fail closed）。 */
     sessionEventSink?: SessionEventSink;
 }
+/** Host 对一个已注册 provider 的当前可调用性判定；不包含 credential 值。 */
+export interface GovernorProviderAvailability {
+    readonly available: boolean;
+    readonly reason?: 'credential_missing' | 'availability_check_failed';
+}
 /**
  * Governor 核心服务。集成全部领域模块，提供事件监听器所需的方法和 Client Remote API。
  */
@@ -175,6 +180,12 @@ export declare class GovernorService extends Service {
     private _usageAggregator;
     private _decisions;
     private _modelDirectory;
+    /** DSH adapter registry 当前活动的 provider；不由 catalog/model 反向推导。 */
+    private _activeProviders;
+    /** 已活动但当前不可调用的 provider 及安全原因码。 */
+    private _unavailableProviders;
+    /** 并发刷新 latest-wins，避免旧 credential 状态在新事件之后覆盖。 */
+    private _directoryRefreshGeneration;
     private _maxAttempts;
     private _afterPartialOutput;
     private _fallbackEnabled;
@@ -223,7 +234,7 @@ export declare class GovernorService extends Service {
     /** 更新模型目录（从 DSH advisory 合并治理策略）。 */
     refreshModelDirectory(listProviders: () => {
         id: string;
-    }[], listModels: (p: string) => Promise<readonly LlmModelInfo[]>): Promise<void>;
+    }[], listModels: (p: string) => Promise<readonly LlmModelInfo[]>, providerAvailability?: (provider: string) => GovernorProviderAvailability | Promise<GovernorProviderAvailability>): Promise<void>;
     /** 绑定身份到 session（同时持久化到 SQLite）。 */
     bindIdentity(sessionId: string, identity: GovernorIdentity): Promise<void>;
     /**
@@ -364,14 +375,16 @@ export declare class GovernorService extends Service {
     /** 配置审计的字段路径。 */
     private _routingChangedFields;
     listModels(): Promise<{
-        routeId: string;
-        provider: string;
-        model: string;
-        enabled: boolean;
         multiplierPpm: number;
         capabilities: string[];
         quality: Readonly<Partial<Record<"general" | "coding" | "reasoning" | "writing" | "data_analysis" | "vision" | "tool_use", number>>>;
         configRevision: number;
+        unavailableReason?: NonNullable<"credential_missing" | "availability_check_failed" | undefined>;
+        routeId: string;
+        provider: string;
+        model: string;
+        enabled: boolean;
+        available: boolean;
     }[]>;
     /**
      * 更新模型策略（管理员写入；GOV-CONFIG-001：数据与新 revision 同事务提交）。
@@ -390,6 +403,8 @@ export declare class GovernorService extends Service {
         provider: string;
         model: string;
         enabled: boolean;
+        available: boolean;
+        unavailableReason?: 'credential_missing' | 'availability_check_failed';
         multiplierPpm: number;
         capabilities: string[];
         quality: Partial<Record<TaskType, number>>;
