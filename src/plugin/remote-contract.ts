@@ -5,6 +5,7 @@ import type {
   TypertSchema,
 } from '@deepseek-ai/dsh-typert-protocol';
 import { z } from 'zod/v4';
+import { TASK_TYPES } from '../index.js';
 
 function stringSchema(allowed?: readonly string[]): TypertSchema {
   return allowed === undefined ? z.string() : z.enum(allowed as [string, ...string[]]);
@@ -12,7 +13,12 @@ function stringSchema(allowed?: readonly string[]): TypertSchema {
 
 const revisionOptionsSchema = z.object({ expectedRevision: z.number().int().optional() }).strict();
 const modelPatchSchema = z
-  .object({ enabled: z.boolean().optional(), multiplier: z.number().optional() })
+  .object({
+    enabled: z.boolean().optional(),
+    multiplier: z.number().nonnegative().optional(),
+    capabilities: z.array(z.string().min(1)).optional(),
+    quality: z.partialRecord(z.enum(TASK_TYPES), z.number().min(0).max(100).nullable()).optional(),
+  })
   .strict();
 const userPatchSchema = z
   .object({ monthlyCredits: z.number().optional(), allow: z.array(z.string()).optional() })

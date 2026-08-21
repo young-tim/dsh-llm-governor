@@ -1,7 +1,7 @@
 /** Browser Client 挂载的 Governor Typert contribution 与类型声明。 */
 import type { RemoteResult } from '@deepseek-ai/dsh-typert-protocol';
 import type { AuditEntry, DecisionQueryResult } from '../storage/repository.js';
-import type { GovernorRoutingSettings, GovernorRoutingSettingsPatch, GovernorService, GovernorUsageQuery } from './service.js';
+import type { ModelPolicyPatch, GovernorRoutingSettings, GovernorRoutingSettingsPatch, GovernorService, GovernorUsageQuery } from './service.js';
 import type { GovernorRemoteUsage } from './remote-service.js';
 import { GOVERNOR_REMOTE_CONTRIBUTION } from './remote-contract.js';
 type Models = Awaited<ReturnType<GovernorService['listModels']>>;
@@ -16,10 +16,7 @@ export interface GovernorRemoteApi {
         capabilities: string[];
     }>>;
     listModels(): Promise<RemoteResult<Models>>;
-    updateModel(routeId: string, patch: {
-        enabled?: boolean;
-        multiplier?: number;
-    }, options?: {
+    updateModel(routeId: string, patch: ModelPolicyPatch, options?: {
         expectedRevision?: number;
     }): Promise<RemoteResult<ModelUpdate>>;
     listUsers(): Promise<RemoteResult<Users>>;

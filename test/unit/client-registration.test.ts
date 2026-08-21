@@ -5,7 +5,6 @@
 import { describe, expect, it } from 'vitest';
 import {
   GOVERNOR_CARD_LABELS,
-  governorDecisionViewDefinition,
   governorModelSeatSpec,
   governorSettingsSection,
   governorTrajectoryDefinition,
@@ -14,7 +13,6 @@ import type { GovernorService } from '../../src/plugin/service.js';
 import type {
   ConversationMatch,
   ConversationNodeContext,
-  ConversationViewNode,
 } from '@deepseek-ai/dsh-client-runtime/client';
 
 /** 构造一条 governor/routing-decision 事件（字段完整）。 */
@@ -77,15 +75,26 @@ function contextOf(state: unknown): ConversationNodeContext<unknown> {
       ? String((state as { decisionId: unknown }).decisionId)
       : 'unknown';
   const kind = 'governor-routing-decision';
+  const start = matchOf(decisionEvent());
   return {
     key: `${kind.length}:${kind}${decisionId}`,
     kind,
     id: decisionId,
-    matches: [],
-    start: undefined,
+    matches: [start],
+    start,
     state,
     current: new Map(),
   } as ConversationNodeContext<unknown>;
+}
+
+function markdownOf(node: { readonly data: unknown }): string {
+  const data = node.data as {
+    kind: 'node';
+    node: { kind: 'context'; content: Array<{ type: string; text: string }> };
+  };
+  expect(data.kind).toBe('node');
+  expect(data.node.kind).toBe('context');
+  return data.node.content[0]!.text;
 }
 
 describe('GOV-TRACE-002 Trajectory 卡片 Definition', () => {
@@ -193,7 +202,7 @@ describe('GOV-TRACE-002 Trajectory 卡片 Definition', () => {
     );
   });
 
-  it('buildViewNode：产出卡片视图节点（key/kind/id/target + 摘要与抽屉数据）', () => {
+  it('buildViewNode：将完整决策投影进官方 trajectory 的 context notice', () => {
     const state = governorTrajectoryDefinition.start(
       contextOf(undefined),
       matchOf(decisionEvent()),
@@ -203,23 +212,17 @@ describe('GOV-TRACE-002 Trajectory 卡片 Definition', () => {
       key: '25:governor-routing-decisionreq-1:0',
       kind: 'governor-routing-decision',
       id: 'req-1:0',
-      target: 'governor-decision',
+      target: 'trajectory',
+      anchorSeq: 42,
+      location: { kind: 'session' },
     });
-    const data = node!.data as {
-      summary: Record<string, unknown>;
-      detail: Record<string, unknown>;
-    };
-    // 摘要：选择模式、所选路由、策略、倍率/质量取自候选首位
-    expect(data.summary['selectionMode']).toBe('auto');
-    expect(data.summary['selectedRoute']).toBe('p:best');
-    expect(data.summary['effectiveStrategy']).toBe('quality_first');
-    expect(data.summary['multiplierPpm']).toBe(1_200_000);
-    expect(data.summary['quality']).toBe(90);
-    expect(data.summary['reason']).toBe('initial');
-    // 抽屉：候选排序、排除原因、分类、revision
-    expect(data.detail['candidates']).toHaveLength(2);
-    expect(data.detail['excluded']).toEqual([{ routeId: 'p:off', reason: 'disabled' }]);
-    expect(data.detail['configRevision']).toBe(5);
+    const markdown = markdownOf(node!);
+    expect(markdown).toContain('Governor 路由 · Turn 3 · Step 2');
+    expect(markdown).toContain('模式：自动选择 · 策略：质量优先');
+    expect(markdown).toContain('模型：p:best · Quality：90 · 倍率：×1.2');
+    expect(markdown).toContain('p:cheap · Q 70 · ×0.5');
+    expect(markdown).toContain('p:off · 模型已禁用 (disabled)');
+    expect(markdown).toContain('Revision：5');
   });
 
   it('buildViewNode：rejected 决策的原因摘要附带错误码；state 缺失返回 null', () => {
@@ -237,12 +240,12 @@ describe('GOV-TRACE-002 Trajectory 卡片 Definition', () => {
       ),
     );
     const node = governorTrajectoryDefinition.buildViewNode(contextOf(rejected));
-    const data = node!.data as { summary: Record<string, unknown> };
-    expect(data.summary['outcome']).toBe('rejected');
-    expect(data.summary['errorCode']).toBe('NO_MODEL_MATCHED');
-    expect(data.summary['reason']).toBe('fallback, config_change, NO_MODEL_MATCHED');
-    expect(data.summary['selectedRoute']).toBeNull();
-    expect(data.summary['multiplierPpm']).toBeNull();
+    const markdown = markdownOf(node!);
+    expect(markdown).toContain('状态：已拒绝');
+    expect(markdown).toContain('模型：未选择 · Quality：未知 · 倍率：×未知');
+    expect(markdown).toContain(
+      '原因：Fallback 重试 (fallback)、配置变更 (config_change)、没有匹配模型 (NO_MODEL_MATCHED)',
+    );
     expect(governorTrajectoryDefinition.buildViewNode(contextOf(undefined))).toBeNull();
   });
 
@@ -252,9 +255,7 @@ describe('GOV-TRACE-002 Trajectory 卡片 Definition', () => {
       matchOf(decisionEvent({ selectedRoute: 'p:other' })),
     );
     const node = governorTrajectoryDefinition.buildViewNode(contextOf(state));
-    const data = node!.data as { summary: Record<string, unknown> };
-    expect(data.summary['multiplierPpm']).toBeNull();
-    expect(data.summary['quality']).toBeNull();
+    expect(markdownOf(node!)).toContain('模型：p:other · Quality：未知 · 倍率：×未知');
   });
 
   it('卡片文案资源：中英文标签覆盖全部枚举（AC 2，不把内部枚举当 UI 文案）', () => {
@@ -269,49 +270,6 @@ describe('GOV-TRACE-002 Trajectory 卡片 Definition', () => {
       ]);
       expect(Object.keys(labels.outcome).sort()).toEqual(['rejected', 'selected', 'unknown']);
     }
-  });
-});
-
-describe('GOV-TRACE-002 governor-decision 视图构建器', () => {
-  /** 构造一个卡片视图节点。 */
-  function nodeOf(id: string): ConversationViewNode {
-    return {
-      key: `25:governor-routing-decision${id}`,
-      kind: 'governor-routing-decision',
-      id,
-      target: 'governor-decision',
-      data: { summary: {}, detail: {} },
-    };
-  }
-
-  it('target 为 governor-decision；create 返回带空快照的增量构建器', () => {
-    expect(governorDecisionViewDefinition.target).toBe('governor-decision');
-    const builder = governorDecisionViewDefinition.create();
-    expect(builder.empty).toEqual({ nodes: [], turnOrder: [] });
-  });
-
-  it('replace：全量替换节点集与 turn 顺序', () => {
-    const builder = governorDecisionViewDefinition.create();
-    const snapshot = builder.replace({
-      nodes: [nodeOf('a'), nodeOf('b')],
-      timeline: { turnOrder: [1, 2], turns: new Map() },
-    });
-    expect(snapshot.nodes.map((n) => n.id)).toEqual(['a', 'b']);
-    expect(snapshot.turnOrder).toEqual([1, 2]);
-  });
-
-  it('apply：按 key 合并变更节点（新节点追加、同 key 覆盖）', () => {
-    const builder = governorDecisionViewDefinition.create();
-    builder.replace({
-      nodes: [nodeOf('a'), nodeOf('b')],
-      timeline: { turnOrder: [1], turns: new Map() },
-    });
-    const snapshot = builder.apply({
-      upserts: [nodeOf('b'), nodeOf('c')],
-      timeline: { turnOrder: [1, 2], turns: new Map() },
-    });
-    expect(snapshot.nodes.map((n) => n.id)).toEqual(['a', 'b', 'c']);
-    expect(snapshot.turnOrder).toEqual([1, 2]);
   });
 });
 
@@ -401,7 +359,7 @@ describe('卡片视图数据（防御性解析的补充分支）', () => {
     expect(state['changedFields']).toEqual(['strategy']);
     // trigger 缺失时原因由存活 causes 提供（'fallback'），无错误码附加
     const node = governorTrajectoryDefinition.buildViewNode(contextOf(state));
-    expect((node!.data as { summary: Record<string, unknown> }).summary['reason']).toBe('fallback');
+    expect(markdownOf(node!)).toContain('原因：Fallback 重试 (fallback)');
   });
 
   it('trigger 与 cause 重复时原因摘要只保留一次', () => {
@@ -410,8 +368,6 @@ describe('卡片视图数据（防御性解析的补充分支）', () => {
       matchOf(decisionEvent({ trigger: 'step', causes: ['step', 'resume'] })),
     );
     const node = governorTrajectoryDefinition.buildViewNode(contextOf(state));
-    expect((node!.data as { summary: Record<string, unknown> }).summary['reason']).toBe(
-      'step, resume',
-    );
+    expect(markdownOf(node!)).toContain('原因：新步骤 (step)、resume');
   });
 });

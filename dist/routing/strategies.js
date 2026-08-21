@@ -55,7 +55,10 @@ export function routeManual(input, requestedProvider, requestedModel, configRevi
                     : reason === 'quota_exceeded'
                         ? 'QUOTA_EXCEEDED'
                         : 'MODEL_NOT_FOUND';
-        throw new RoutingError(code, `model ${routeId} excluded: ${reason}`, routeId);
+        throw new RoutingError(code, `model ${routeId} excluded: ${reason}`, routeId, {
+            candidates: [],
+            excluded: filterResult.excluded,
+        });
     }
     const selected = filterResult.candidates[0];
     const decision = buildDecision('manual', filterResult, selected, undefined, undefined, undefined, undefined, configRevision);
@@ -84,7 +87,7 @@ export function routeQualityFirst(input, taskType, configRevision = 1) {
     }
     const allExcluded = [...baseResult.excluded, ...qualityExcluded];
     if (candidates.length === 0) {
-        throw new RoutingError('NO_MODEL_MATCHED', 'no model with quality for task: ' + taskType);
+        throw new RoutingError('NO_MODEL_MATCHED', 'no model with quality for task: ' + taskType, undefined, { candidates: [], excluded: allExcluded });
     }
     // 稳定排序：Quality 降序 → Multiplier 升序 → route 字典序
     candidates.sort((a, b) => {
@@ -128,7 +131,7 @@ export function routeCreditFirst(input, taskType, minimumQuality, configRevision
             // 显式切换到 Quality First
             return routeQualityFirst({ ...input }, taskType, configRevision);
         }
-        throw new RoutingError('NO_MODEL_MATCHED', `no model meets minimum_quality ${minimumQuality} for task ${taskType}`);
+        throw new RoutingError('NO_MODEL_MATCHED', `no model meets minimum_quality ${minimumQuality} for task ${taskType}`, undefined, { candidates: [], excluded: allExcluded, minimumQuality });
     }
     // 稳定排序：Multiplier 升序 → Quality 降序 → route 字典序
     candidates.sort((a, b) => {

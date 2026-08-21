@@ -30,7 +30,7 @@ const wrapped = `window.__ModuleLoader__.load({
     var exports = module.exports;
 ${javascript.text
   .split('\n')
-  .map((line) => `    ${line}`)
+  .map((line) => (line === '' ? '' : `    ${line}`))
   .join('\n')}
     return module.exports;
   }

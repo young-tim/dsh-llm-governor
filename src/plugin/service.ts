@@ -5,7 +5,7 @@
 import { Service } from '../dsh-adapter/mod.js';
 import type { Context } from '../dsh-adapter/mod.js';
 import type { LlmCallConfig, LlmFailure, LlmModelInfo } from '../dsh-adapter/mod.js';
-import type { TaskType, RoutingMode } from '../index.js';
+import { TASK_TYPES, type TaskType, type RoutingMode } from '../index.js';
 import type { ModelSnapshot, CanonicalRoute } from '../model/canonical.js';
 import { buildModelDirectory, parseRoute } from '../model/canonical.js';
 import type { UserAccessPolicy } from '../access/evaluator.js';
@@ -74,6 +74,14 @@ interface ModelConfig {
   multiplier?: number;
   capabilities?: string[];
   quality?: Record<string, number>;
+}
+
+/** Administrator-managed model profile patch. Null removes one Quality score. */
+export interface ModelPolicyPatch {
+  readonly enabled?: boolean;
+  readonly multiplier?: number;
+  readonly capabilities?: readonly string[];
+  readonly quality?: Readonly<Partial<Record<TaskType, number | null>>>;
 }
 
 /** 管理面可回读、可事务更新的路由配置快照。 */
@@ -749,6 +757,37 @@ export class GovernorService extends Service {
     return routeQualityFirst(input, classification.taskType);
   }
 
+  /** Resolve the strategy that this attempt actually executes, including Auto protection. */
+  private _effectiveStrategy(
+    mode: RoutingMode,
+    state: RequestState,
+    manualFallback: boolean,
+  ): 'manual' | 'quality_first' | 'credit_first' {
+    if (mode === 'manual') {
+      if (!manualFallback) return 'manual';
+      if (this._fallbackStrategy === 'auto') {
+        const classification = state.classification ?? {
+          taskType: 'general',
+          complexity: 'medium',
+          confidence: 0.5,
+          source: 'rule',
+        };
+        return classification.confidence < this._confidenceThreshold
+          ? 'quality_first'
+          : 'credit_first';
+      }
+      return this._fallbackStrategy;
+    }
+    if (mode !== 'auto') return mode;
+    const classification = state.classification ?? {
+      taskType: 'general',
+      complexity: 'medium',
+      confidence: 0.5,
+      source: 'rule',
+    };
+    return classification.confidence < this._confidenceThreshold ? 'quality_first' : 'credit_first';
+  }
+
   /** 执行模型选择（被 agent/request 调用）。双写协议完成后才返回；fail closed。 */
   async selectModel(
     sessionId: string,
@@ -774,6 +813,12 @@ export class GovernorService extends Service {
     const snapshotRevision = this.configRevision;
     const causes = this._computeCauses(state, snapshotRevision, sessionId);
 
+    let attemptedMode: RoutingMode = this._defaultRouting;
+    let attemptedStrategy: 'manual' | 'quality_first' | 'credit_first' = this._effectiveStrategy(
+      attemptedMode,
+      state,
+      false,
+    );
     try {
       const filterInput = this.buildFilterInput(sessionId, turn, step);
 
@@ -783,14 +828,17 @@ export class GovernorService extends Service {
       const sessionMode = this.getSessionSelectionMode(sessionId);
       const mode: RoutingMode = sessionMode.isDefault ? this._defaultRouting : sessionMode.mode;
       state.mode = mode;
+      attemptedMode = mode;
+      const requestedRoute = `${defaultConfig.provider}:${defaultConfig.model}` as CanonicalRoute;
+      const manualFallback =
+        mode === 'manual' &&
+        this._fallbackEnabled &&
+        state.fallback.excludedRoutes.size > 0 &&
+        state.fallback.excludedRoutes.has(requestedRoute);
+      attemptedStrategy = this._effectiveStrategy(mode, state, manualFallback);
 
       if (mode === 'manual') {
-        const requestedRoute = `${defaultConfig.provider}:${defaultConfig.model}` as CanonicalRoute;
-        if (
-          this._fallbackEnabled &&
-          state.fallback.excludedRoutes.size > 0 &&
-          state.fallback.excludedRoutes.has(requestedRoute)
-        ) {
+        if (manualFallback) {
           // Fallback 例外：请求的模型已失败并被排除，按 fallback.strategy 重选剩余模型
           result = this._routeManualFallback(filterInput, state);
         } else {
@@ -838,12 +886,7 @@ export class GovernorService extends Service {
       state.fallbackIndex = state.fallback.attemptCount - 1;
 
       // 构造不可变决策并执行双写协议（pending → Session Event → committed）
-      const effectiveStrategy =
-        mode === 'auto'
-          ? result.decision.minimumQuality !== undefined
-            ? 'credit_first'
-            : 'quality_first'
-          : mode;
+      const effectiveStrategy = attemptedStrategy;
       const sealed = sealDecision({
         requestId: state.requestId,
         turn,
@@ -917,9 +960,8 @@ export class GovernorService extends Service {
           fallbackIndex: state.fallbackIndex,
           causes,
           changedFields: [],
-          selectionMode: this._defaultRouting === 'manual' ? 'manual' : 'auto',
-          effectiveStrategy:
-            this._defaultRouting === 'auto' ? 'credit_first' : this._defaultRouting,
+          selectionMode: attemptedMode === 'manual' ? 'manual' : 'auto',
+          effectiveStrategy: attemptedStrategy,
           ...(state.classification !== undefined
             ? {
                 classifier: {
@@ -930,13 +972,11 @@ export class GovernorService extends Service {
                 },
               }
             : {}),
-          candidates: [],
-          excluded: [
-            {
-              routeId: `${defaultConfig.provider}:${defaultConfig.model}`,
-              reason: 'excluded_in_request',
-            },
-          ],
+          ...(err.evidence?.minimumQuality !== undefined
+            ? { minimumQuality: err.evidence.minimumQuality }
+            : {}),
+          candidates: err.evidence?.candidates ?? [],
+          excluded: err.evidence?.excluded ?? [],
           outcome: 'rejected',
           errorCode: err.code,
           configRevision: snapshotRevision,
@@ -1380,14 +1420,15 @@ export class GovernorService extends Service {
   /**
    * 更新模型策略（管理员写入；GOV-CONFIG-001：数据与新 revision 同事务提交）。
    *
-   * 接受 enabled 和 multiplier（人类可读倍率，1.5 = 1.5x）。
+   * 接受 Enabled、Multiplier、Capability 与 Quality。Quality 的 null 值删除
+   * 对应任务评分；未配置评分的模型不会进入依赖该维度的自动策略。
    * 内部将 multiplier 转换为 multiplierPpm 存储。
    * 若 routeId 在目录中但不在配置 Map，则自动创建配置项。
    * expectedRevision 提供时做 compare-and-set，不匹配抛 REVISION_CONFLICT。
    */
   async updateModel(
     routeId: string,
-    patch: { enabled?: boolean; multiplier?: number },
+    patch: ModelPolicyPatch,
     options?: { expectedRevision?: number; actor?: string },
   ): Promise<{
     routeId: string;
@@ -1410,6 +1451,23 @@ export class GovernorService extends Service {
       (!Number.isFinite(patch.multiplier) || patch.multiplier < 0)
     ) {
       throw new Error('INVALID_MULTIPLIER');
+    }
+    if (
+      patch.capabilities !== undefined &&
+      (!Array.isArray(patch.capabilities) ||
+        patch.capabilities.some((value) => typeof value !== 'string' || value.trim() === ''))
+    ) {
+      throw new Error('INVALID_CAPABILITIES');
+    }
+    if (patch.quality !== undefined) {
+      for (const [taskType, score] of Object.entries(patch.quality)) {
+        if (!(TASK_TYPES as readonly string[]).includes(taskType)) {
+          throw new Error('INVALID_TASK_TYPE');
+        }
+        if (score !== null && (!Number.isFinite(score) || score < 0 || score > 100)) {
+          throw new Error('INVALID_QUALITY');
+        }
+      }
     }
 
     // expected-revision 冲突保护（多标签页并发写）
@@ -1439,6 +1497,26 @@ export class GovernorService extends Service {
     const newEnabled = patch.enabled !== undefined ? patch.enabled : (cfg.enabled ?? true);
     const newMultiplier = patch.multiplier !== undefined ? patch.multiplier : (cfg.multiplier ?? 1);
     const newMultiplierPpm = Math.round(newMultiplier * 1_000_000);
+    const newCapabilities =
+      patch.capabilities === undefined
+        ? [...existingSnap.capabilities]
+        : [...new Set(patch.capabilities.map((value) => value.trim()))].sort();
+    if (JSON.stringify(newCapabilities) !== JSON.stringify(existingSnap.capabilities)) {
+      changedFields.push('capabilities');
+    }
+    const newQuality: Partial<Record<TaskType, number>> = { ...existingSnap.quality };
+    for (const [taskType, score] of Object.entries(patch.quality ?? {}) as Array<
+      [TaskType, number | null]
+    >) {
+      const previous = existingSnap.quality[taskType];
+      if (score === null) {
+        delete newQuality[taskType];
+        if (previous !== undefined) changedFields.push(`quality.${taskType}`);
+      } else {
+        newQuality[taskType] = score;
+        if (score !== previous) changedFields.push(`quality.${taskType}`);
+      }
+    }
 
     // 管理写入持久化：数据与新 revision、审计条目在同一 SQLite 事务提交
     // （GOV-CONFIG-001：任一写入失败整体回滚，revision 不递增，内存不提交）。
@@ -1452,8 +1530,8 @@ export class GovernorService extends Service {
           model: existingSnap.model,
           enabled: newEnabled,
           multiplierPpm: newMultiplierPpm,
-          capabilities: [...existingSnap.capabilities],
-          quality: { ...existingSnap.quality },
+          capabilities: newCapabilities,
+          quality: newQuality,
         });
         if (changedFields.length > 0) {
           const next = currentRevision + 1;
@@ -1475,9 +1553,23 @@ export class GovernorService extends Service {
     }
 
     // 持久化成功后才提交内存状态（模型配置与目录快照）
-    this._models.set(routeId, { ...cfg, enabled: newEnabled, multiplier: newMultiplier });
+    this._models.set(routeId, {
+      ...cfg,
+      enabled: newEnabled,
+      multiplier: newMultiplier,
+      capabilities: newCapabilities,
+      quality: { ...newQuality },
+    });
     this._modelDirectory = this._modelDirectory.map((s) =>
-      s.routeId === routeId ? { ...s, enabled: newEnabled, multiplierPpm: newMultiplierPpm } : s,
+      s.routeId === routeId
+        ? {
+            ...s,
+            enabled: newEnabled,
+            multiplierPpm: newMultiplierPpm,
+            capabilities: newCapabilities,
+            quality: newQuality,
+          }
+        : s,
     );
 
     // 返回更新后的模型视图

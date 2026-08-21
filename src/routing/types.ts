@@ -31,11 +31,19 @@ export type RoutingErrorCode =
 export class RoutingError extends Error {
   readonly code: RoutingErrorCode;
   readonly routeId?: string;
-  constructor(code: RoutingErrorCode, message: string, routeId?: string) {
+  /** Evidence captured at the exact rejection point for durable diagnostics. */
+  readonly evidence?: RoutingRejectionEvidence;
+  constructor(
+    code: RoutingErrorCode,
+    message: string,
+    routeId?: string,
+    evidence?: RoutingRejectionEvidence,
+  ) {
     super(message);
     this.name = 'RoutingError';
     this.code = code;
     if (routeId !== undefined) this.routeId = routeId;
+    if (evidence !== undefined) this.evidence = evidence;
   }
 }
 
@@ -82,6 +90,13 @@ export interface DecisionCandidate {
   readonly routeId: CanonicalRoute;
   readonly quality: number | undefined;
   readonly multiplierPpm: number;
+}
+
+/** Truthful candidate/exclusion snapshot retained when a strategy rejects. */
+export interface RoutingRejectionEvidence {
+  readonly candidates: readonly DecisionCandidate[];
+  readonly excluded: ReadonlyArray<{ routeId: CanonicalRoute; reason: ExclusionReason }>;
+  readonly minimumQuality?: number;
 }
 
 /** 决策记录。 */

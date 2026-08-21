@@ -20,7 +20,7 @@ import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { randomBytes } from 'node:crypto';
-import type { GovernorService, GovernorUsageQuery } from '../plugin/service.js';
+import type { GovernorService, GovernorUsageQuery, ModelPolicyPatch } from '../plugin/service.js';
 import { normalizeGovernorUsageQuery } from '../plugin/service.js';
 import { RoutingError } from '../routing/types.js';
 import type { GovernorCapability } from '../security/governor-capabilities.js';
@@ -369,12 +369,9 @@ export function createGovernorRequestHandler(
           return;
         }
         const routeId = decodeURIComponent(path.slice('/api/models/'.length));
-        let patch: { enabled?: boolean; multiplier?: number };
+        let patch: ModelPolicyPatch;
         try {
-          patch = JSON.parse((await readBody(req)) || '{}') as {
-            enabled?: boolean;
-            multiplier?: number;
-          };
+          patch = JSON.parse((await readBody(req)) || '{}') as ModelPolicyPatch;
         } catch (err) {
           // 请求体超限与 JSON 解析失败给出可区分的安全错误码。
           if (err instanceof Error && err.message === 'PAYLOAD_TOO_LARGE') handleError(res, err);

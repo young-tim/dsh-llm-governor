@@ -1,6 +1,7 @@
 import { createElement, useEffect, useMemo, useState, useSyncExternalStore } from 'react';
 import { GOVERNOR_REMOTE_CONTRIBUTION, } from '../plugin/typert-remote-client.js';
-import { governorDecisionViewDefinition, governorTrajectoryDefinition, } from '../plugin/client-registration.js';
+import { TASK_TYPES } from '../index.js';
+import { governorTrajectoryDefinition } from '../plugin/client-registration.js';
 const CLIENT_ID = 'dsh-llm-governor';
 const AUTO_VALUE = '__governor_auto__';
 function unwrap(result, operation) {
@@ -174,49 +175,6 @@ export function GovernorModelSelect({ locked, available, sessionId, directory, l
             ? createElement('option', { value: '' }, '提供方默认')
             : null, reasoning.efforts.map((effort) => createElement('option', { key: effort.id, value: effort.id }, effort.name))), saving ? createElement('span', { role: 'status' }, '保存中…') : null, error === null ? null : createElement('span', { role: 'alert', title: error }, '!'));
 }
-function metric(value, suffix = '') {
-    return value === null ? '未知' : `${String(value)}${suffix}`;
-}
-function DecisionCard({ node }) {
-    const data = node.data;
-    const { summary, detail } = data;
-    const selectionLabel = summary.selectionMode === 'auto'
-        ? '自动选择'
-        : summary.selectionMode === 'manual'
-            ? '手动选择'
-            : '选择模式未知';
-    const locationLabel = `Turn ${detail.turn === null ? '未知' : String(detail.turn)} · Step ${detail.step === null ? '未知' : String(detail.step)}`;
-    return createElement('details', { className: 'dsh-governor-decision', 'data-decision-id': node.id }, createElement('summary', null, createElement('span', { className: 'dsh-governor-decision-heading' }, createElement('strong', null, selectionLabel), createElement('small', null, locationLabel)), createElement('span', null, summary.selectedRoute ?? '未知模型'), createElement('span', { className: `dsh-governor-outcome ${summary.outcome}` }, summary.outcome), createElement('span', null, `×${metric(summary.multiplierPpm === null ? null : summary.multiplierPpm / 1_000_000)}`)), createElement('dl', { className: 'dsh-governor-facts' }, createElement('dt', null, '策略'), createElement('dd', null, summary.effectiveStrategy), createElement('dt', null, '质量'), createElement('dd', null, metric(summary.quality)), createElement('dt', null, 'Fallback'), createElement('dd', null, String(summary.fallbackIndex)), createElement('dt', null, '原因'), createElement('dd', null, summary.reason ?? '未知'), createElement('dt', null, 'Request ID'), createElement('dd', null, detail.requestId), createElement('dt', null, 'Revision'), createElement('dd', null, metric(detail.configRevision))), createElement('h4', null, '候选排序'), createElement('ol', null, detail.candidates.map((candidate) => createElement('li', { key: candidate.routeId }, `${candidate.routeId} · Q ${metric(candidate.quality)} · ×${metric(candidate.multiplierPpm === null ? null : candidate.multiplierPpm / 1_000_000)}`))), detail.excluded.length === 0
-        ? null
-        : createElement('div', null, createElement('h4', null, '已排除'), createElement('ul', null, detail.excluded.map((item) => createElement('li', { key: item.routeId }, `${item.routeId} · ${item.reason}`)))));
-}
-/** Native conversation-view entry backed by the registered Governor view target. */
-export function GovernorDecisionView({ useSession }) {
-    const snapshot = useSession((session) => session.views.get('governor-decision'));
-    if (snapshot === undefined || snapshot.nodes.length === 0) {
-        return createElement('div', { className: 'dsh-governor-empty' }, '当前会话暂无 Governor 决策');
-    }
-    const turnRank = new Map(snapshot.turnOrder.map((turn, index) => [turn, index]));
-    const nodes = [...snapshot.nodes].sort((left, right) => {
-        const a = left.data.detail;
-        const b = right.data.detail;
-        const aRank = a.turn === null ? Number.MAX_SAFE_INTEGER : (turnRank.get(a.turn) ?? a.turn);
-        const bRank = b.turn === null ? Number.MAX_SAFE_INTEGER : (turnRank.get(b.turn) ?? b.turn);
-        return (aRank - bRank ||
-            (a.step ?? Number.MAX_SAFE_INTEGER) - (b.step ?? Number.MAX_SAFE_INTEGER) ||
-            a.fallbackIndex - b.fallbackIndex ||
-            left.key.localeCompare(right.key));
-    });
-    const groups = new Map();
-    for (const node of nodes) {
-        const detail = node.data.detail;
-        const key = `${String(detail.turn)}:${String(detail.step)}`;
-        const group = groups.get(key) ?? { turn: detail.turn, step: detail.step, nodes: [] };
-        group.nodes.push(node);
-        groups.set(key, group);
-    }
-    return createElement('section', { className: 'dsh-governor-view', 'aria-label': 'Governor 路由轨迹' }, [...groups.entries()].map(([key, group]) => createElement('section', { className: 'dsh-governor-step-group', key }, createElement('h3', null, `Turn ${group.turn === null ? '未知' : String(group.turn)} · Step ${group.step === null ? '未知' : String(group.step)}`), group.nodes.map((node) => createElement(DecisionCard, { key: node.key, node })))));
-}
 function ErrorNotice({ error }) {
     return error === null
         ? null
@@ -297,9 +255,40 @@ function ModelsSettings({ api, canManage }) {
         disabled: !canManage,
         'aria-label': `${row.routeId} 倍率`,
         onBlur: (event) => void save(row, { multiplier: event.currentTarget.valueAsNumber }),
-    })), createElement('td', null, row.capabilities.join(', ') || '—'), createElement('td', null, Object.entries(row.quality)
-        .map(([key, score]) => `${key} ${score}`)
-        .join(' · ') || '—')))))));
+    })), createElement('td', null, createElement('input', {
+        type: 'text',
+        defaultValue: row.capabilities.join(', '),
+        placeholder: 'vision, tool_use',
+        disabled: !canManage,
+        'aria-label': `${row.routeId} 能力`,
+        onBlur: (event) => void save(row, {
+            capabilities: [
+                ...new Set(event.currentTarget.value
+                    .split(',')
+                    .map((value) => value.trim())
+                    .filter(Boolean)),
+            ],
+        }),
+    })), createElement('td', null, createElement('details', { className: 'dsh-governor-quality' }, createElement('summary', null, Object.keys(row.quality).length === 0
+        ? '未配置（Auto 不可用）'
+        : Object.entries(row.quality)
+            .map(([key, score]) => `${key} ${score}`)
+            .join(' · ')), TASK_TYPES.map((taskType) => createElement('label', { key: taskType }, taskType, createElement('input', {
+        type: 'number',
+        min: 0,
+        max: 100,
+        step: 1,
+        defaultValue: row.quality[taskType] ?? '',
+        placeholder: '0–100',
+        disabled: !canManage,
+        'aria-label': `${row.routeId} ${taskType} Quality`,
+        onBlur: (event) => {
+            const score = event.currentTarget.value.trim() === ''
+                ? null
+                : event.currentTarget.valueAsNumber;
+            void save(row, { quality: { [taskType]: score } });
+        },
+    })))))))))));
 }
 function formatCreditNanos(value) {
     const nanos = BigInt(value);
@@ -408,9 +397,9 @@ export function GovernorSettings({ api }) {
 }
 const STYLES = `
 .dsh-governor-model-select{display:inline-flex;align-items:center;gap:6px}.dsh-governor-model-select select,.dsh-governor-model-select input{max-width:250px;border:0;border-radius:9px;background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary);padding:5px 8px;font:inherit}.dsh-governor-model-select input{width:110px}.dsh-governor-model-select [role=status],.dsh-governor-model-select [role=alert]{font-size:11px;color:var(--dsw-alias-label-tertiary)}
-.dsh-governor-view{box-sizing:border-box;display:grid;gap:16px;max-width:920px;margin:0 auto;padding:18px}.dsh-governor-step-group{display:grid;gap:10px}.dsh-governor-step-group>h3{margin:0;color:var(--dsw-alias-label-tertiary);font-size:12px;font-weight:500;letter-spacing:.04em}.dsh-governor-empty{padding:48px;text-align:center;color:var(--dsw-alias-label-tertiary)}.dsh-governor-decision{border:1px solid var(--dsw-alias-border-l2);border-radius:14px;background:var(--dsw-alias-bg-layer-2);overflow:hidden}.dsh-governor-decision summary{cursor:pointer;display:grid;grid-template-columns:minmax(110px,1fr) minmax(160px,2fr) auto auto;align-items:center;gap:12px;padding:14px 16px}.dsh-governor-decision-heading strong,.dsh-governor-decision-heading small{display:block}.dsh-governor-decision-heading small{margin-top:2px;color:var(--dsw-alias-label-tertiary);font-size:10px}.dsh-governor-decision>dl,.dsh-governor-decision>h4,.dsh-governor-decision>ol,.dsh-governor-decision>div{margin-left:18px;margin-right:18px}.dsh-governor-outcome{font-size:12px;padding:2px 8px;border-radius:999px;background:var(--dsw-alias-interactive-bg-hover)}.dsh-governor-outcome.rejected{color:var(--dsw-alias-state-error-primary)}.dsh-governor-facts{display:grid;grid-template-columns:max-content 1fr;gap:6px 14px;border-top:1px solid var(--dsw-alias-border-l2);padding-top:14px}.dsh-governor-facts dt{color:var(--dsw-alias-label-tertiary)}.dsh-governor-facts dd{margin:0;overflow-wrap:anywhere}
 .dsh-governor-settings{color:var(--dsw-alias-label-primary)}.dsh-governor-settings>header{display:flex;justify-content:space-between;align-items:end;border-bottom:1px solid var(--dsw-alias-border-l2);padding:6px 0 14px}.dsh-governor-settings>header p{margin:0;color:var(--dsw-alias-label-tertiary);font-size:10px;letter-spacing:.14em}.dsh-governor-settings>header h2{margin:2px 0 0;font:600 25px/1.2 Georgia,serif}.dsh-governor-settings>header>span,.dsh-governor-readonly{font-size:12px;color:var(--dsw-alias-label-tertiary)}.dsh-governor-settings nav{display:flex;gap:4px;padding:14px 0}.dsh-governor-settings nav button,.dsh-governor-form button{border:0;border-radius:9px;background:transparent;color:inherit;padding:7px 12px;font:inherit;cursor:pointer}.dsh-governor-settings nav button:hover,.dsh-governor-settings nav button.active{background:var(--dsw-alias-interactive-bg-hover)}.dsh-governor-settings-body{min-height:280px}.dsh-governor-form{display:grid;max-width:420px;gap:14px}.dsh-governor-form label,.dsh-governor-user label{display:grid;gap:6px;font-size:13px}.dsh-governor-form input,.dsh-governor-form select,.dsh-governor-user input,.dsh-governor-table-wrap input{box-sizing:border-box;border:1px solid var(--dsw-alias-border-l2);border-radius:9px;background:var(--dsw-alias-bg-layer-1);color:inherit;padding:8px}.dsh-governor-form button{justify-self:start;background:var(--dsw-alias-label-primary);color:var(--dsw-alias-bg-layer-2)}.dsh-governor-table-wrap{max-width:100%;overflow:auto}.dsh-governor-table-wrap table{width:100%;border-collapse:collapse;font-size:13px}.dsh-governor-table-wrap th,.dsh-governor-table-wrap td{text-align:left;border-bottom:1px solid var(--dsw-alias-border-l2);padding:10px 8px;vertical-align:top}.dsh-governor-table-wrap small{display:block;color:var(--dsw-alias-label-tertiary)}.dsh-governor-user{display:grid;grid-template-columns:1fr 2fr auto;gap:12px;border:1px solid var(--dsw-alias-border-l2);border-radius:12px;margin:0 0 10px;padding:12px}.dsh-governor-user legend{padding:0 5px}.dsh-governor-metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:12px 0}.dsh-governor-metrics>div{border:1px solid var(--dsw-alias-border-l2);border-radius:12px;padding:12px}.dsh-governor-metrics strong,.dsh-governor-metrics span{display:block}.dsh-governor-metrics strong{font-size:22px}.dsh-governor-metrics span{font-size:11px;color:var(--dsw-alias-label-tertiary)}.dsh-governor-error{border-radius:8px;background:var(--dsw-alias-interactive-bg-hover-danger);color:var(--dsw-alias-state-error-primary);padding:8px 10px;font-size:12px}
-@media(max-width:600px){.dsh-governor-decision summary{grid-template-columns:1fr auto}.dsh-governor-user{grid-template-columns:1fr}.dsh-governor-metrics{grid-template-columns:1fr}.dsh-governor-settings nav{overflow-x:auto}}
+.dsh-governor-quality{min-width:210px}.dsh-governor-quality summary{cursor:pointer;color:var(--dsw-alias-label-secondary)}.dsh-governor-quality label{display:grid;grid-template-columns:1fr 78px;align-items:center;gap:8px;margin-top:7px;font-size:11px}.dsh-governor-quality input{width:78px}
+@media(max-width:600px){.dsh-governor-user{grid-template-columns:1fr}.dsh-governor-metrics{grid-template-columns:1fr}.dsh-governor-settings nav{overflow-x:auto}}
 `;
 function installStyles() {
     if (typeof document === 'undefined')
@@ -426,14 +415,7 @@ function installStyles() {
     return () => tag.remove();
 }
 /** Required rc.8 client services. */
-export const inject = [
-    'conversationEvents',
-    'conversationViews',
-    'modelDirectories',
-    'remote',
-    'sessions',
-    'slots',
-];
+export const inject = ['conversationEvents', 'modelDirectories', 'remote', 'sessions', 'slots'];
 /** Mount all native Governor browser surfaces with one reversible lifecycle. */
 export async function apply(ctx) {
     const browser = ctx;
@@ -455,13 +437,6 @@ export async function apply(ctx) {
         const api = createGovernorClientApi(governorRemote);
         disposers.push(installStyles());
         disposers.push(browser.conversationEvents.register(governorTrajectoryDefinition));
-        disposers.push(browser.conversationViews.register(governorDecisionViewDefinition));
-        disposers.push(slots.inject('conversation.view', () => slots.register({
-            name: 'conversation.view',
-            id: 'governor',
-            order: 11,
-            label: () => 'Governor 轨迹',
-        }, GovernorDecisionView)));
         disposers.push(slots.inject('conversation.input.model', () => slots.register({
             name: 'conversation.input.model',
             // rc.8 single-slot cells reject equal priorities and render the

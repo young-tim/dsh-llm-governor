@@ -32,10 +32,7 @@ import { Context, Service } from '@deepseek-ai/cordis';
 import * as React from 'react';
 import * as CordisRuntime from '@deepseek-ai/cordis';
 import * as SlotRuntime from '@deepseek-ai/dsh-client-ui-slots';
-import {
-  governorDecisionViewDefinition,
-  governorTrajectoryDefinition,
-} from '../../src/plugin/client-registration.js';
+import { governorTrajectoryDefinition } from '../../src/plugin/client-registration.js';
 
 const require = createRequire(import.meta.url);
 
@@ -124,9 +121,22 @@ describe('rc.8 Trajectory definition seam（发布物取证）', () => {
         snapshot(target: string): unknown;
       };
     };
+    const trajectoryCapture = {
+      target: 'trajectory',
+      create: () => {
+        let snapshot: { nodes: readonly unknown[] } = { nodes: [] };
+        return {
+          empty: snapshot,
+          replace: (input: { readonly nodes: readonly unknown[] }) =>
+            (snapshot = { nodes: [...input.nodes] }),
+          apply: (input: { readonly upserts: readonly unknown[] }) =>
+            (snapshot = { nodes: [...snapshot.nodes, ...input.upserts] }),
+        };
+      },
+    };
     const assembler = new runtime.ConversationNodeAssembler(
       { entries: () => [governorTrajectoryDefinition], fallbackEntry: () => undefined },
-      { entries: () => [governorDecisionViewDefinition] },
+      { entries: () => [trajectoryCapture] },
     );
     const decision = {
       schemaVersion: 1,
@@ -180,7 +190,7 @@ describe('rc.8 Trajectory definition seam（发布物取证）', () => {
       false,
     );
     expect(assembler.flush()).toBe(true);
-    const snapshot = assembler.snapshot('governor-decision') as {
+    const snapshot = assembler.snapshot('trajectory') as {
       nodes: Array<{ key: string; id: string; data: unknown }>;
     };
     expect(snapshot.nodes).toEqual(
@@ -197,14 +207,15 @@ describe('rc.8 Trajectory definition seam（发布物取证）', () => {
           key: '25:governor-routing-decisionreq-assembler:1',
           id: 'req-assembler:1',
           data: expect.objectContaining({
-            summary: expect.objectContaining({ outcome: 'rejected' }),
+            kind: 'node',
+            node: expect.objectContaining({ kind: 'context' }),
           }),
         }),
       ]),
     );
   });
 
-  it('ClientModuleRegistry 扫描 Governor + 3 个官方客户端，并物化真实 bundle', async () => {
+  it('ClientModuleRegistry 扫描 Governor + 官方 Trajectory 依赖，并物化真实 bundle', async () => {
     const governorRoot = pkgRoot('dsh-llm-governor');
     const fixtureRoot = mkdtempSync(join(tmpdir(), 'governor-client-scan-'));
     const fixtureModules = join(fixtureRoot, 'node_modules');
@@ -230,6 +241,7 @@ describe('rc.8 Trajectory definition seam（发布物取证）', () => {
       '@deepseek-ai/dsh-client-runtime',
       '@deepseek-ai/dsh-client-ui-conversation',
       '@deepseek-ai/dsh-client-ui-model-selection',
+      '@deepseek-ai/dsh-client-ui-trajectory',
       'dsh-llm-governor',
     ];
     const loader = {
@@ -264,6 +276,7 @@ describe('rc.8 Trajectory definition seam（发布物取证）', () => {
           '@deepseek-ai/dsh-client-ui-conversation',
           '@deepseek-ai/dsh-client-ui-model-selection',
           '@deepseek-ai/dsh-client-ui-settings',
+          '@deepseek-ai/dsh-client-ui-trajectory',
         ]),
       });
       expect(registry.clientPath('dsh-llm-governor')).toBe(realpathSync(fixtureClient));
@@ -287,8 +300,9 @@ describe('rc.8 Trajectory definition seam（发布物取证）', () => {
         throw new Error(`unexpected client external: ${specifier}`);
       }) as Record<string, unknown>;
       expect(exports['inject']).toEqual(
-        expect.arrayContaining(['conversationEvents', 'conversationViews', 'slots', 'remote']),
+        expect.arrayContaining(['conversationEvents', 'slots', 'remote']),
       );
+      expect(exports['inject']).not.toContain('conversationViews');
       // Governor owns this namespace and mounts it during apply; making it a
       // static dependency would deadlock activation.
       expect(exports['inject']).not.toContain('remote.governor');

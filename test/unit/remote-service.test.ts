@@ -283,6 +283,30 @@ describe('Governor Typert Remote capability boundary', () => {
           {
             args: {
               routeId: 'p:a',
+              patch: {
+                capabilities: ['coding'],
+                quality: { general: 91, coding: 95 },
+              },
+              options: { expectedRevision: 1 },
+            },
+          },
+          undefined,
+        ),
+      ).resolves.toMatchObject({
+        ok: true,
+        value: {
+          capabilities: ['coding'],
+          quality: { general: 91, coding: 95 },
+          configRevision: 1,
+        },
+      });
+      await expect(
+        dispatchRpc.call(
+          ctx.typertGateway,
+          'governor/updateModel',
+          {
+            args: {
+              routeId: 'p:a',
               patch: { multiplier: 2 },
               options: { expectedRevision: 999 },
             },

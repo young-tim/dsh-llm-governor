@@ -10,7 +10,9 @@ export type RoutingErrorCode = 'MODEL_NOT_FOUND' | 'AMBIGUOUS_MODEL_ROUTE' | 'MO
 export declare class RoutingError extends Error {
     readonly code: RoutingErrorCode;
     readonly routeId?: string;
-    constructor(code: RoutingErrorCode, message: string, routeId?: string);
+    /** Evidence captured at the exact rejection point for durable diagnostics. */
+    readonly evidence?: RoutingRejectionEvidence;
+    constructor(code: RoutingErrorCode, message: string, routeId?: string, evidence?: RoutingRejectionEvidence);
 }
 /** 排除原因码。 */
 export type ExclusionReason = 'disabled' | 'not_active_provider' | 'access_denied' | 'capability_not_supported' | 'excluded_in_request' | 'quality_missing' | 'quota_exceeded';
@@ -48,6 +50,15 @@ export interface DecisionCandidate {
     readonly routeId: CanonicalRoute;
     readonly quality: number | undefined;
     readonly multiplierPpm: number;
+}
+/** Truthful candidate/exclusion snapshot retained when a strategy rejects. */
+export interface RoutingRejectionEvidence {
+    readonly candidates: readonly DecisionCandidate[];
+    readonly excluded: ReadonlyArray<{
+        routeId: CanonicalRoute;
+        reason: ExclusionReason;
+    }>;
+    readonly minimumQuality?: number;
 }
 /** 决策记录。 */
 export interface DecisionRecord {

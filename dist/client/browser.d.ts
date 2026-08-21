@@ -11,6 +11,7 @@ import type { SnapshotStore } from '@deepseek-ai/dsh-client-runtime/client';
 import type { SessionId } from '@deepseek-ai/dsh-api-remotes/client';
 import { type GovernorRemoteApi } from '../plugin/typert-remote-client.js';
 import type { GovernorRoutingSettings, GovernorRoutingSettingsPatch } from '../plugin/service.js';
+import type { ModelPolicyPatch } from '../plugin/service.js';
 export interface SelectionModeView {
     readonly mode: 'auto' | 'manual';
     readonly selectionRevision: number;
@@ -64,10 +65,7 @@ export interface GovernorClientApi {
     routing(): Promise<GovernorRoutingView>;
     saveRouting(patch: GovernorRoutingSettingsPatch, expectedRevision?: number): Promise<GovernorRoutingView>;
     models(): Promise<readonly GovernorModelView[]>;
-    saveModel(routeId: string, patch: {
-        enabled?: boolean;
-        multiplier?: number;
-    }, expectedRevision?: number): Promise<GovernorModelView>;
+    saveModel(routeId: string, patch: ModelPolicyPatch, expectedRevision?: number): Promise<GovernorModelView>;
     users(): Promise<readonly GovernorUserView[]>;
     saveUser(userId: string, patch: {
         monthlyCredits?: number;
@@ -117,15 +115,6 @@ interface AutoModelSelectProps {
 export declare function GovernorModelSelect({ locked, available, sessionId, directory, load, selectModel, api, }: AutoModelSelectProps): import("react").DetailedReactHTMLElement<{
     className: string;
 }, HTMLElement> | null;
-interface GovernorDecisionViewProps {
-    readonly useSession: <T>(selector: (snapshot: {
-        views: ReadonlyMap<string, unknown>;
-    }) => T) => T;
-}
-/** Native conversation-view entry backed by the registered Governor view target. */
-export declare function GovernorDecisionView({ useSession }: GovernorDecisionViewProps): import("react").DetailedReactHTMLElement<{
-    className: string;
-}, HTMLElement>;
 interface GovernorSettingsProps {
     readonly api: GovernorClientApi;
 }

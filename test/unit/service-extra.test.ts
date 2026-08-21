@@ -140,6 +140,33 @@ describe('GovernorService/updateModel', () => {
       await h.dispose();
     }
   });
+
+  it('更新 Capability 与 Quality，并支持用 null 删除单项 Quality', async () => {
+    const h = await bootFake(
+      providers,
+      models,
+      successScript('hi', { inputTokens: 1, outputTokens: 1 }),
+      defaultConfig(),
+    );
+    try {
+      const updated = await h.governor!.updateModel('fake-provider:model-a', {
+        capabilities: ['vision', 'coding', 'vision'],
+        quality: { general: 95, coding: 88 },
+      });
+      expect(updated.capabilities).toEqual(['coding', 'vision']);
+      expect(updated.quality).toMatchObject({ general: 95, coding: 88 });
+
+      const removed = await h.governor!.updateModel('fake-provider:model-a', {
+        quality: { coding: null },
+      });
+      expect(removed.quality).toEqual({ general: 95 });
+      await expect(
+        h.governor!.updateModel('fake-provider:model-a', { quality: { general: 101 } }),
+      ).rejects.toThrow('INVALID_QUALITY');
+    } finally {
+      await h.dispose();
+    }
+  });
 });
 
 // ===== updateUser =====
@@ -529,6 +556,50 @@ describe('GovernorService/getCurrentTurnStep + getSelectedRoute', () => {
 // ===== auto routing + setClassification =====
 
 describe('GovernorService/auto routing + setClassification', () => {
+  it('Auto 无 Quality 时 rejected 决策保留真实模式、策略与 quality_missing 证据', async () => {
+    const h = await bootFake(
+      providers,
+      models,
+      successScript('hi', { inputTokens: 1, outputTokens: 1 }),
+      {
+        identity: { provider: 'local' as const, local_user_id: 'local' },
+        routing: { default: 'manual' as const },
+        models: {
+          'fake-provider:model-a': { enabled: true },
+          'fake-provider:model-b': { enabled: true },
+        },
+      },
+    );
+    try {
+      await h.governor!.setSessionSelectionMode('session-no-quality', 'auto', {
+        currentRoute: 'fake-provider:model-a',
+      });
+      await expect(
+        h.governor!.selectModel('session-no-quality', 1, 1, {
+          provider: 'fake-provider',
+          model: 'model-a',
+        }),
+      ).rejects.toMatchObject({ code: 'NO_MODEL_MATCHED' });
+      const decisions = await h.governor!.listDecisions();
+      expect(decisions.items).toHaveLength(1);
+      expect(decisions.items[0]).toMatchObject({
+        selectionMode: 'auto',
+        effectiveStrategy: 'quality_first',
+        outcome: 'rejected',
+        errorCode: 'NO_MODEL_MATCHED',
+        excluded: [
+          { routeId: 'fake-provider:model-a', reason: 'quality_missing' },
+          { routeId: 'fake-provider:model-b', reason: 'quality_missing' },
+        ],
+      });
+      expect(decisions.items[0]!.excluded).not.toContainEqual(
+        expect.objectContaining({ reason: 'excluded_in_request' }),
+      );
+    } finally {
+      await h.dispose();
+    }
+  });
+
   it('auto 路由使用默认分类（未设置 classification 时）', async () => {
     const h = await bootFake(
       providers,

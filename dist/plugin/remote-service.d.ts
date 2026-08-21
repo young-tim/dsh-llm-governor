@@ -8,7 +8,7 @@
 import { TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol';
 import type { Context } from '../dsh-adapter/mod.js';
 import type { GovernorCapability, GovernorPrincipalResolver } from '../security/governor-capabilities.js';
-import type { GovernorRoutingSettingsPatch, GovernorService, GovernorUsageQuery } from './service.js';
+import type { ModelPolicyPatch, GovernorRoutingSettingsPatch, GovernorService, GovernorUsageQuery } from './service.js';
 /** Remote 请求体上限（与兼容 API 相同）。 */
 export declare const GOVERNOR_REMOTE_MAX_BYTES: number;
 /** 向后兼容的 Remote 边界常量别名。 */
@@ -73,10 +73,7 @@ export declare class GovernorRemoteService extends TypertRemoteService {
         quality: Readonly<Partial<Record<"general" | "coding" | "reasoning" | "writing" | "data_analysis" | "vision" | "tool_use", number>>>;
         configRevision: number;
     }[]>;
-    updateModel(routeId: string, patch: {
-        enabled?: boolean;
-        multiplier?: number;
-    }, options?: {
+    updateModel(routeId: string, patch: ModelPolicyPatch, options?: {
         expectedRevision?: number;
     }): Promise<{
         routeId: string;

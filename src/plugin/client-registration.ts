@@ -6,11 +6,10 @@
  */
 import type {
   ConversationMatch,
+  ConversationLocation,
   ConversationNodeContext,
   ConversationNodeDefinition,
-  ConversationTimelineSnapshot,
-  ConversationViewBuilder,
-  ConversationViewDefinition,
+  ContextMessageNode,
   ConversationViewNode,
 } from '@deepseek-ai/dsh-client-runtime/client';
 import {
@@ -22,8 +21,15 @@ import type { GovernorService } from './service.js';
 /** Trajectory 卡片 Definition 的唯一 kind（会话引擎内的 Context 类别）。 */
 const GOVERNOR_DECISION_KIND = 'governor-routing-decision';
 
-/** 卡片视图的唯一 target（视图构建器注册名）。 */
-const GOVERNOR_DECISION_TARGET = 'governor-decision';
+/** Governor 决策直接贡献给官方 Trajectory target。 */
+const GOVERNOR_DECISION_TARGET = 'trajectory';
+
+interface GovernorTrajectoryViewNode extends ConversationViewNode {
+  readonly target: 'trajectory';
+  readonly anchorSeq: number;
+  readonly location: ConversationLocation;
+  readonly data: { readonly kind: 'node'; readonly node: ContextMessageNode };
+}
 
 /** Composer 单占位模型选择座席（ui-conversation SlotMap 声明，官方 occupant 之外）。 */
 const GOVERNOR_MODEL_SEAT = 'conversation.input.model';
@@ -59,6 +65,7 @@ export interface GovernorDecisionCardState {
   }>;
   readonly excluded: ReadonlyArray<{ readonly routeId: string; readonly reason: string }>;
   readonly configRevision: number | null;
+  readonly occurredAt: number | null;
 }
 
 /** 卡片摘要（折叠态展示；GOV-TRACE-002：选择模式、模型、策略、倍率与原因）。 */
@@ -203,6 +210,7 @@ function toCardState(data: GovernorRoutingDecisionEventData): GovernorDecisionCa
     candidates,
     excluded,
     configRevision: readNumber(raw['configRevision']),
+    occurredAt: readNumber(raw['occurredAt']),
   };
 }
 
@@ -263,18 +271,89 @@ function buildCardViewData(state: GovernorDecisionCardState): GovernorDecisionCa
   };
 }
 
+const REASON_LABELS: Readonly<Record<string, string>> = {
+  initial: '初始请求',
+  selection_mode_change: '选择模式变更',
+  fallback: 'Fallback 重试',
+  config_change: '配置变更',
+  step: '新步骤',
+  NO_MODEL_MATCHED: '没有匹配模型',
+  quality_missing: '缺少任务 Quality',
+  disabled: '模型已禁用',
+  access_denied: '无访问权限',
+  capability_not_supported: '能力不匹配',
+  quota_exceeded: '额度已耗尽',
+  excluded_in_request: '本次请求已排除',
+};
+
+function reasonLabel(value: string): string {
+  const label = REASON_LABELS[value];
+  return label === undefined ? value : `${label} (${value})`;
+}
+
+function knownMetric(value: number | null, suffix = ''): string {
+  return value === null ? '未知' : `${String(value)}${suffix}`;
+}
+
+/** Format the decision as a native Trajectory context notice. */
+function decisionMarkdown(state: GovernorDecisionCardState): string {
+  const { summary, detail } = buildCardViewData(state);
+  const labels = GOVERNOR_CARD_LABELS.zh;
+  const location = `Turn ${detail.turn === null ? '未知' : String(detail.turn)} · Step ${
+    detail.step === null ? '未知' : String(detail.step)
+  }`;
+  const lines = [
+    `**Governor 路由 · ${location}**`,
+    `状态：${labels.outcome[summary.outcome]} · 模式：${labels.selectionMode[summary.selectionMode]} · 策略：${labels.strategy[summary.effectiveStrategy]}`,
+    `模型：${summary.selectedRoute ?? '未选择'} · Quality：${knownMetric(summary.quality)} · 倍率：×${knownMetric(summary.multiplierPpm === null ? null : summary.multiplierPpm / 1_000_000)} · Fallback：${String(summary.fallbackIndex)}`,
+  ];
+  if (summary.reason !== null) {
+    lines.push(`原因：${summary.reason.split(', ').map(reasonLabel).join('、')}`);
+  }
+  if (detail.classification !== null) {
+    lines.push(
+      `分类：${detail.classification.taskType} / ${detail.classification.complexity} / ${Math.round(detail.classification.confidence * 100)}% (${detail.classification.source})`,
+    );
+  }
+  if (detail.minimumQuality !== null) {
+    lines.push(`最低 Quality：${String(detail.minimumQuality)}`);
+  }
+  lines.push('', '候选排序：');
+  if (detail.candidates.length === 0) lines.push('- 无');
+  else {
+    for (const candidate of detail.candidates) {
+      lines.push(
+        `- ${candidate.routeId} · Q ${knownMetric(candidate.quality)} · ×${knownMetric(candidate.multiplierPpm === null ? null : candidate.multiplierPpm / 1_000_000)}`,
+      );
+    }
+  }
+  if (detail.excluded.length > 0) {
+    lines.push('', '已排除：');
+    for (const item of detail.excluded) {
+      lines.push(`- ${item.routeId} · ${reasonLabel(item.reason)}`);
+    }
+  }
+  lines.push(
+    '',
+    `Request ID：${detail.requestId}`,
+    `Revision：${knownMetric(detail.configRevision)}`,
+  );
+  return lines.join('\n');
+}
+
 /**
  * Governor 轨迹卡片 Definition：匹配 rc.8 兼容的
  * `request/context.data.governorDecision`，并保留旧 `governor/routing-decision`
  * 的只读兼容，
- * 为每个 decisionId 建立独立 Context，`buildViewNode` 产出卡片视图节点。
+ * 为每个 decisionId 建立独立 Context，`buildViewNode` 产出官方 Trajectory
+ * 可消费的 context notice，不再注册平行的 Governor 页签。
  *
  * 事件是纯信息记录且自包含（无 update 事件）：`update` 恒返回既有状态；
  * 相同 route 的重复决策拥有不同 decisionId，各自成卡（折叠是渲染层行为）。
  */
 export const governorTrajectoryDefinition: ConversationNodeDefinition<GovernorDecisionCardState> = {
   kind: GOVERNOR_DECISION_KIND,
-  /** 卡片视图 target：由 `governorDecisionViewDefinition` 的构建器消费。 */
+  /** 直接进入 DSH 官方 Trajectory snapshot builder。 */
   target: GOVERNOR_DECISION_TARGET,
   /** 提取本 Definition 的业务身份：decisionId（幂等键，稳定且唯一）。 */
   match(event: { type: string; data: unknown; seq?: number }): {
@@ -315,62 +394,41 @@ export const governorTrajectoryDefinition: ConversationNodeDefinition<GovernorDe
   ): GovernorDecisionCardState {
     return context.state;
   },
-  /** 渲染实现：产出卡片视图节点（摘要 + 抽屉数据）。 */
+  /** 渲染实现：用官方 `kind: node` contribution 投影为 context notice。 */
   buildViewNode(
     context: ConversationNodeContext<GovernorDecisionCardState>,
   ): ConversationViewNode | null {
     const state = context.state;
     if (state === undefined) return null;
-    return {
+    const anchorSeq = context.start?.event.seq ?? 0;
+    const eventTime = context.start?.event.time;
+    const time =
+      state.occurredAt ??
+      (typeof eventTime === 'number' && Number.isFinite(eventTime) ? eventTime : 0);
+    const source = { kind: 'plugin', plugin: 'dsh-llm-governor', form: 'notice' } as const;
+    const viewNode: GovernorTrajectoryViewNode = {
       // The assembler owns identity (including the seq fallback for a damaged
       // legacy event) and rejects a node reconstructed from state identity.
       key: context.key,
       kind: context.kind,
       id: context.id,
       target: GOVERNOR_DECISION_TARGET,
-      data: buildCardViewData(state),
-    };
-  },
-};
-
-// ===== 视图构建器（governor-decision target 的 per-session 快照） =====
-
-/** Governor 决策卡片视图快照：当前卡片节点集 + turn 顺序。 */
-export interface GovernorDecisionViewSnapshot {
-  readonly nodes: readonly ConversationViewNode[];
-  readonly turnOrder: readonly number[];
-}
-
-/**
- * `governor-decision` 视图构建器注册：为每个 Session 创建增量构建器
- * （`replace` 全量替换、`apply` 按 key 合并变更节点）。
- */
-export const governorDecisionViewDefinition: ConversationViewDefinition<
-  ConversationViewNode,
-  GovernorDecisionViewSnapshot
-> = {
-  target: GOVERNOR_DECISION_TARGET,
-  create(): ConversationViewBuilder<ConversationViewNode, GovernorDecisionViewSnapshot> {
-    let snapshot: GovernorDecisionViewSnapshot = { nodes: [], turnOrder: [] };
-    return {
-      empty: snapshot,
-      replace(input: {
-        readonly nodes: readonly ConversationViewNode[];
-        readonly timeline: ConversationTimelineSnapshot;
-      }): GovernorDecisionViewSnapshot {
-        snapshot = { nodes: [...input.nodes], turnOrder: [...input.timeline.turnOrder] };
-        return snapshot;
-      },
-      apply(input: {
-        readonly upserts: readonly ConversationViewNode[];
-        readonly timeline: ConversationTimelineSnapshot;
-      }): GovernorDecisionViewSnapshot {
-        const merged = new Map(snapshot.nodes.map((node) => [node.key, node] as const));
-        for (const node of input.upserts) merged.set(node.key, node);
-        snapshot = { nodes: [...merged.values()], turnOrder: [...input.timeline.turnOrder] };
-        return snapshot;
+      anchorSeq,
+      location: context.start?.location ?? { kind: 'unresolved' },
+      data: {
+        kind: 'node',
+        node: {
+          kind: 'context',
+          seq: anchorSeq,
+          time,
+          content: [{ type: 'text', text: decisionMarkdown(state) }],
+          source,
+          provenance: { role: 'inject', label: 'dsh-llm-governor' },
+          form: 'notice',
+        },
       },
     };
+    return viewNode;
   },
 };
 

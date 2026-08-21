@@ -2,6 +2,7 @@
 import type { RemoteResult } from '@deepseek-ai/dsh-typert-protocol';
 import type { AuditEntry, DecisionQueryResult } from '../storage/repository.js';
 import type {
+  ModelPolicyPatch,
   GovernorRoutingSettings,
   GovernorRoutingSettingsPatch,
   GovernorService,
@@ -22,7 +23,7 @@ export interface GovernorRemoteApi {
   listModels(): Promise<RemoteResult<Models>>;
   updateModel(
     routeId: string,
-    patch: { enabled?: boolean; multiplier?: number },
+    patch: ModelPolicyPatch,
     options?: { expectedRevision?: number },
   ): Promise<RemoteResult<ModelUpdate>>;
   listUsers(): Promise<RemoteResult<Users>>;

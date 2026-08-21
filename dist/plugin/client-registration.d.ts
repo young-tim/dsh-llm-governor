@@ -4,7 +4,7 @@
  * real rc.8 `dsh.client` bundle; the host client-module registry discovers that
  * bundle from the live Loader package entry and owns its HMR lifecycle.
  */
-import type { ConversationNodeDefinition, ConversationViewDefinition, ConversationViewNode } from '@deepseek-ai/dsh-client-runtime/client';
+import type { ConversationNodeDefinition } from '@deepseek-ai/dsh-client-runtime/client';
 import type { GovernorService } from './service.js';
 /** Trajectory 卡片状态：`start` 从一条 routing-decision 事件构建。 */
 export interface GovernorDecisionCardState {
@@ -38,6 +38,7 @@ export interface GovernorDecisionCardState {
         readonly reason: string;
     }>;
     readonly configRevision: number | null;
+    readonly occurredAt: number | null;
 }
 /** 卡片摘要（折叠态展示；GOV-TRACE-002：选择模式、模型、策略、倍率与原因）。 */
 export interface GovernorDecisionCardSummary {
@@ -115,22 +116,13 @@ export declare const GOVERNOR_CARD_LABELS: {
  * Governor 轨迹卡片 Definition：匹配 rc.8 兼容的
  * `request/context.data.governorDecision`，并保留旧 `governor/routing-decision`
  * 的只读兼容，
- * 为每个 decisionId 建立独立 Context，`buildViewNode` 产出卡片视图节点。
+ * 为每个 decisionId 建立独立 Context，`buildViewNode` 产出官方 Trajectory
+ * 可消费的 context notice，不再注册平行的 Governor 页签。
  *
  * 事件是纯信息记录且自包含（无 update 事件）：`update` 恒返回既有状态；
  * 相同 route 的重复决策拥有不同 decisionId，各自成卡（折叠是渲染层行为）。
  */
 export declare const governorTrajectoryDefinition: ConversationNodeDefinition<GovernorDecisionCardState>;
-/** Governor 决策卡片视图快照：当前卡片节点集 + turn 顺序。 */
-export interface GovernorDecisionViewSnapshot {
-    readonly nodes: readonly ConversationViewNode[];
-    readonly turnOrder: readonly number[];
-}
-/**
- * `governor-decision` 视图构建器注册：为每个 Session 创建增量构建器
- * （`replace` 全量替换、`apply` 按 key 合并变更节点）。
- */
-export declare const governorDecisionViewDefinition: ConversationViewDefinition<ConversationViewNode, GovernorDecisionViewSnapshot>;
 /**
  * Composer 模型选择座席的 Governor 注入面（浏览器组件消费）。
  *

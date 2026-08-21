@@ -6,7 +6,6 @@ import type { SessionId } from '@deepseek-ai/dsh-api-remotes/client';
 import { SlotCore, type StoredEntry } from '@deepseek-ai/dsh-client-ui-slots';
 import {
   apply,
-  GovernorDecisionView,
   GovernorModelSelect,
   GovernorSettings,
   createGovernorClientApi,
@@ -17,7 +16,6 @@ import {
   type GovernorUserView,
   type GovernorUsageView,
 } from '../../src/client/index.js';
-import type { GovernorDecisionCardViewData } from '../../src/plugin/client-registration.js';
 
 type Dispose = () => void | Promise<void>;
 
@@ -189,7 +187,6 @@ function remoteFace(): GovernorRemoteFace {
 
 function browserHarness(slots = new SlotLedger()) {
   const eventDefinitions: unknown[] = [];
-  const viewDefinitions: unknown[] = [];
   let mounts = 0;
   let unmounts = 0;
   const governor = remoteFace();
@@ -228,18 +225,11 @@ function browserHarness(slots = new SlotLedger()) {
         return () => eventDefinitions.splice(eventDefinitions.indexOf(definition), 1);
       },
     },
-    conversationViews: {
-      register: (definition: unknown) => {
-        viewDefinitions.push(definition);
-        return () => viewDefinitions.splice(viewDefinitions.indexOf(definition), 1);
-      },
-    },
   };
   return {
     ctx,
     slots,
     eventDefinitions,
-    viewDefinitions,
     remote,
     loadDirectory,
     selectDirectory,
@@ -249,7 +239,7 @@ function browserHarness(slots = new SlotLedger()) {
 
 describe('dsh.client lifecycle', () => {
   it.each(['official-first', 'governor-first'] as const)(
-    '%s: three visible surfaces mount and Governor unload restores official occupants',
+    '%s: two Governor surfaces mount and unload restores official occupants',
     async (order) => {
       const harness = browserHarness();
       let disposeDeclaration: Dispose | undefined;
@@ -258,21 +248,19 @@ describe('dsh.client lifecycle', () => {
       if (order === 'governor-first') disposeDeclaration = harness.slots.declareOfficialSurfaces();
 
       expect(harness.eventDefinitions).toHaveLength(1);
-      expect(harness.viewDefinitions).toHaveLength(1);
       expect(
         harness.slots
           .governor()
           .map((record) => record.options)
           .map((options) => options.id ?? 'conversation.input.model')
           .sort(),
-      ).toEqual(['conversation.input.model', 'governor', 'governor'].sort());
+      ).toEqual(['conversation.input.model', 'governor'].sort());
       expect(harness.remote.$mount).toHaveBeenCalledTimes(1);
       expect(harness.slots.modelWinner()?.component).toBe(GovernorModelSelect);
       expect(harness.slots.modelWinner()?.options.priority).toBe(-10);
       await dispose();
 
       expect(harness.eventDefinitions).toHaveLength(0);
-      expect(harness.viewDefinitions).toHaveLength(0);
       expect(harness.slots.governor()).toHaveLength(0);
       expect(harness.slots.officialCount()).toBe(3);
       expect(harness.slots.modelWinner()?.component).toBe(OfficialModelSelect);
@@ -287,15 +275,13 @@ describe('dsh.client lifecycle', () => {
     const disposeDeclaration = harness.slots.declareOfficialSurfaces();
     for (let cycle = 0; cycle < 10; cycle += 1) {
       const dispose = await apply(harness.ctx as never);
-      expect(harness.slots.governor()).toHaveLength(3);
+      expect(harness.slots.governor()).toHaveLength(2);
       expect(harness.eventDefinitions).toHaveLength(1);
-      expect(harness.viewDefinitions).toHaveLength(1);
       expect(harness.slots.modelWinner()?.component).toBe(GovernorModelSelect);
       await dispose();
       await dispose();
       expect(harness.slots.governor()).toHaveLength(0);
       expect(harness.eventDefinitions).toHaveLength(0);
-      expect(harness.viewDefinitions).toHaveLength(0);
       expect(harness.slots.pending()).toBe(0);
       expect(harness.slots.modelWinner()?.component).toBe(OfficialModelSelect);
     }
@@ -305,12 +291,11 @@ describe('dsh.client lifecycle', () => {
 
   it('partial setup failure unwinds mounted Remote and earlier definitions', async () => {
     const harness = browserHarness();
-    harness.ctx.conversationViews.register = () => {
-      throw new Error('VIEW_REGISTRATION_FAILED');
+    harness.ctx.conversationEvents.register = () => {
+      throw new Error('EVENT_REGISTRATION_FAILED');
     };
-    await expect(apply(harness.ctx as never)).rejects.toThrow('VIEW_REGISTRATION_FAILED');
+    await expect(apply(harness.ctx as never)).rejects.toThrow('EVENT_REGISTRATION_FAILED');
     expect(harness.eventDefinitions).toHaveLength(0);
-    expect(harness.viewDefinitions).toHaveLength(0);
     expect(harness.slots.governor()).toHaveLength(0);
     expect(harness.counts()).toEqual({ mounts: 1, unmounts: 1 });
   });
@@ -329,10 +314,9 @@ describe('dsh.client lifecycle', () => {
     const harness = browserHarness();
     const disposeDeclaration = harness.slots.declareOfficialSurfaces();
     const dispose = await apply(harness.ctx as never);
-    const view = harness.slots.governor('conversation.view')[0]!;
     const settings = harness.slots.governor('settings.section')[0]!;
     const model = harness.slots.governor('conversation.input.model')[0]!;
-    expect((view.options.label as () => string)()).toBe('Governor 轨迹');
+    expect(harness.slots.governor('conversation.view')).toHaveLength(0);
     expect((settings.options.label as () => string)()).toBe('Governor');
     expect(settings.inject?.()).toHaveProperty('api');
 
@@ -710,194 +694,6 @@ describe('native rendered surfaces', () => {
     );
   });
 
-  it('conversation.view renders a visible, expandable Governor trajectory card', () => {
-    const data: GovernorDecisionCardViewData = {
-      summary: {
-        selectionMode: 'auto',
-        effectiveStrategy: 'quality_first',
-        selectedRoute: 'p:a',
-        outcome: 'selected',
-        errorCode: null,
-        reason: 'initial',
-        fallbackIndex: 0,
-        multiplierPpm: 1_200_000,
-        quality: 91,
-      },
-      detail: {
-        requestId: 'req-1',
-        turn: 1,
-        step: 1,
-        fallbackIndex: 0,
-        classification: {
-          taskType: 'coding',
-          complexity: 'high',
-          confidence: 0.9,
-          source: 'llm',
-        },
-        minimumQuality: 80,
-        candidates: [{ routeId: 'p:a', quality: 91, multiplierPpm: 1_200_000 }],
-        excluded: [{ routeId: 'p:b', reason: 'disabled' }],
-        configRevision: 4,
-        causes: ['initial'],
-        changedFields: [],
-      },
-    };
-    const renderer = TestRenderer.create(
-      createElement(GovernorDecisionView, {
-        useSession: (selector) =>
-          selector({
-            views: new Map([
-              [
-                'governor-decision',
-                {
-                  nodes: [
-                    {
-                      key: '25:governor-routing-decisionreq-1:0',
-                      kind: 'governor-routing-decision',
-                      id: 'req-1:0',
-                      target: 'governor-decision',
-                      data,
-                    },
-                  ],
-                  turnOrder: [1],
-                },
-              ],
-            ]),
-          }),
-      }),
-    );
-    expect(renderer.root.findAllByType('details')).toHaveLength(1);
-    const rendered = JSON.stringify(renderer.toJSON());
-    expect(rendered).toContain('Governor 路由轨迹');
-    expect(rendered).toContain('Turn 1 · Step 1');
-    expect(rendered).toContain('p:a');
-    expect(rendered).toContain('候选排序');
-    expect(rendered).toContain('disabled');
-  });
-
-  it('trajectory labels unknown mode honestly instead of rendering it as manual', () => {
-    const data = {
-      summary: {
-        selectionMode: 'unknown',
-        effectiveStrategy: 'unknown',
-        selectedRoute: null,
-        outcome: 'unknown',
-        errorCode: null,
-        reason: null,
-        fallbackIndex: 0,
-        multiplierPpm: null,
-        quality: null,
-      },
-      detail: {
-        requestId: 'damaged',
-        turn: null,
-        step: null,
-        fallbackIndex: 0,
-        classification: null,
-        minimumQuality: null,
-        candidates: [],
-        excluded: [],
-        configRevision: null,
-        causes: [],
-        changedFields: [],
-      },
-    } satisfies GovernorDecisionCardViewData;
-    const renderer = TestRenderer.create(
-      createElement(GovernorDecisionView, {
-        useSession: (selector) =>
-          selector({
-            views: new Map([
-              [
-                'governor-decision',
-                {
-                  nodes: [
-                    {
-                      key: '25:governor-routing-decisionseq-7',
-                      kind: 'governor-routing-decision',
-                      id: 'seq-7',
-                      target: 'governor-decision',
-                      data,
-                    },
-                  ],
-                  turnOrder: [],
-                },
-              ],
-            ]),
-          }),
-      }),
-    );
-    const rendered = JSON.stringify(renderer.toJSON());
-    expect(rendered).toContain('选择模式未知');
-    expect(rendered).toContain('Turn 未知 · Step 未知');
-    expect(rendered).not.toContain('手动选择');
-  });
-
-  it('trajectory handles empty snapshots and orders groups by turn/step/fallback', () => {
-    const empty = TestRenderer.create(
-      createElement(GovernorDecisionView, {
-        useSession: (selector) => selector({ views: new Map() }),
-      }),
-    );
-    expect(JSON.stringify(empty.toJSON())).toContain('当前会话暂无 Governor 决策');
-
-    const card = (id: string, turn: number | null, step: number | null, fallbackIndex: number) => ({
-      key: `25:governor-routing-decision${id}`,
-      kind: 'governor-routing-decision',
-      id,
-      target: 'governor-decision',
-      data: {
-        summary: {
-          selectionMode: 'auto' as const,
-          effectiveStrategy: 'quality_first' as const,
-          selectedRoute: 'p:a',
-          outcome: 'selected' as const,
-          errorCode: null,
-          reason: null,
-          fallbackIndex,
-          multiplierPpm: null,
-          quality: null,
-        },
-        detail: {
-          requestId: id,
-          turn,
-          step,
-          fallbackIndex,
-          classification: null,
-          minimumQuality: null,
-          candidates: [],
-          excluded: [],
-          configRevision: null,
-          causes: [],
-          changedFields: [],
-        },
-      } satisfies GovernorDecisionCardViewData,
-    });
-    const renderer = TestRenderer.create(
-      createElement(GovernorDecisionView, {
-        useSession: (selector) =>
-          selector({
-            views: new Map([
-              [
-                'governor-decision',
-                {
-                  nodes: [
-                    card('turn-1', 1, 1, 0),
-                    card('turn-2-fallback', 2, 1, 1),
-                    card('unknown', null, null, 0),
-                    card('turn-2', 2, 1, 0),
-                  ],
-                  turnOrder: [2, 1],
-                },
-              ],
-            ]),
-          }),
-      }),
-    );
-    expect(
-      renderer.root.findAllByType('details').map((node) => node.props['data-decision-id']),
-    ).toEqual(['turn-2', 'turn-2-fallback', 'turn-1', 'unknown']);
-  });
-
   it('native Settings exposes Routing/Models/Users writes and 31-day Usage as read-only', async () => {
     const model: GovernorModelView = {
       routeId: 'p:a',
@@ -930,10 +726,12 @@ describe('native rendered surfaces', () => {
       createdAt: new Date().toISOString(),
     };
     const saveRouting = vi.fn(emptySettingsApi().saveRouting);
-    const saveModel = vi.fn(async (_routeId: string, patch: { enabled?: boolean }) => ({
-      ...model,
-      ...patch,
-    }));
+    const saveModel = vi.fn(
+      async (_routeId: string, patch: Parameters<GovernorClientApi['saveModel']>[1]) => ({
+        ...model,
+        ...patch,
+      }),
+    );
     const saveUser = vi.fn(async (_userId: string, patch: { monthlyCredits?: number }) => ({
       ...user,
       ...patch,
@@ -991,6 +789,29 @@ describe('native rendered surfaces', () => {
       await multiplier.props.onBlur({ currentTarget: { valueAsNumber: 1.5 } });
     });
     expect(saveModel).toHaveBeenCalledWith('p:a', { multiplier: 1.5 }, 2);
+    const capabilities = renderer.root.find(
+      (node) => node.type === 'input' && node.props['aria-label'] === 'p:a 能力',
+    );
+    await act(async () => {
+      await capabilities.props.onBlur({ currentTarget: { value: 'vision, coding, vision' } });
+    });
+    expect(saveModel).toHaveBeenCalledWith('p:a', { capabilities: ['vision', 'coding'] }, 2);
+    const codingQuality = renderer.root.find(
+      (node) => node.type === 'input' && node.props['aria-label'] === 'p:a coding Quality',
+    );
+    await act(async () => {
+      await codingQuality.props.onBlur({ currentTarget: { value: '95', valueAsNumber: 95 } });
+    });
+    expect(saveModel).toHaveBeenCalledWith('p:a', { quality: { coding: 95 } }, 2);
+    const generalQuality = renderer.root.find(
+      (node) => node.type === 'input' && node.props['aria-label'] === 'p:a general Quality',
+    );
+    await act(async () => {
+      await generalQuality.props.onBlur({
+        currentTarget: { value: '', valueAsNumber: Number.NaN },
+      });
+    });
+    expect(saveModel).toHaveBeenCalledWith('p:a', { quality: { general: null } }, 2);
 
     await act(async () => {
       button('用户').props.onClick();

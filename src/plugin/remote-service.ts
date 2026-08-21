@@ -17,6 +17,7 @@ import {
   requireGovernorCapability,
 } from '../security/governor-capabilities.js';
 import type {
+  ModelPolicyPatch,
   GovernorRoutingSettingsPatch,
   GovernorService,
   GovernorUsageQuery,
@@ -208,7 +209,7 @@ export class GovernorRemoteService extends TypertRemoteService {
 
   async updateModel(
     routeId: string,
-    patch: { enabled?: boolean; multiplier?: number },
+    patch: ModelPolicyPatch,
     options?: { expectedRevision?: number },
   ) {
     return this.execute(

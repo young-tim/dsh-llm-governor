@@ -21,11 +21,10 @@ window.__ModuleLoader__.load({
       return to;
     };
     var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
-    
+
     // src/client/index.ts
     var index_exports = {};
     __export(index_exports, {
-      GovernorDecisionView: () => GovernorDecisionView,
       GovernorModelSelect: () => GovernorModelSelect,
       GovernorSettings: () => GovernorSettings,
       apply: () => apply,
@@ -33,10 +32,10 @@ window.__ModuleLoader__.load({
       inject: () => inject
     });
     module.exports = __toCommonJS(index_exports);
-    
+
     // src/client/browser.ts
     var import_react = require("react");
-    
+
     // node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/classic/external.js
     var external_exports = {};
     __export(external_exports, {
@@ -279,7 +278,7 @@ window.__ModuleLoader__.load({
       xid: () => xid2,
       xor: () => xor
     });
-    
+
     // node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/core/index.js
     var core_exports2 = {};
     __export(core_exports2, {
@@ -558,7 +557,7 @@ window.__ModuleLoader__.load({
       util: () => util_exports,
       version: () => version
     });
-    
+
     // node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/core/core.js
     var _a;
     var NEVER = /* @__PURE__ */ Object.freeze({
@@ -635,7 +634,7 @@ window.__ModuleLoader__.load({
         Object.assign(globalConfig, newConfig);
       return globalConfig;
     }
-    
+
     // node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/core/util.js
     var util_exports = {};
     __export(util_exports, {
@@ -1331,7 +1330,7 @@ window.__ModuleLoader__.load({
       constructor(..._args) {
       }
     };
-    
+
     // node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/core/errors.js
     var initializer = (inst, def) => {
       inst.name = "$ZodError";
@@ -1470,7 +1469,7 @@ window.__ModuleLoader__.load({
       }
       return lines.join("\n");
     }
-    
+
     // node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/core/parse.js
     var _parse = (_Err) => (schema, value, _ctx, _params) => {
       const ctx = _ctx ? { ..._ctx, async: false } : { async: false };
@@ -1558,7 +1557,7 @@ window.__ModuleLoader__.load({
       return _safeParseAsync(_Err)(schema, value, _ctx);
     };
     var safeDecodeAsync = /* @__PURE__ */ _safeDecodeAsync($ZodRealError);
-    
+
     // node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/core/regexes.js
     var regexes_exports = {};
     __export(regexes_exports, {
@@ -1717,7 +1716,7 @@ window.__ModuleLoader__.load({
     var sha512_hex = /^[0-9a-fA-F]{128}$/;
     var sha512_base64 = /* @__PURE__ */ fixedBase64(86, "==");
     var sha512_base64url = /* @__PURE__ */ fixedBase64url(86);
-    
+
     // node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/core/checks.js
     var $ZodCheck = /* @__PURE__ */ $constructor("$ZodCheck", (inst, def) => {
       var _a3;
@@ -2265,7 +2264,7 @@ window.__ModuleLoader__.load({
         payload.value = def.tx(payload.value);
       };
     });
-    
+
     // node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/core/doc.js
     var Doc = class {
       constructor(args = []) {
@@ -2301,14 +2300,14 @@ window.__ModuleLoader__.load({
         return new F(...args, lines.join("\n"));
       }
     };
-    
+
     // node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/core/versions.js
     var version = {
       major: 4,
       minor: 4,
       patch: 3
     };
-    
+
     // node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/core/schemas.js
     var $ZodType = /* @__PURE__ */ $constructor("$ZodType", (inst, def) => {
       var _a3;
@@ -3172,7 +3171,7 @@ window.__ModuleLoader__.load({
                 path: [${k}]
               });
             }
-    
+
             if (${id}_present) {
               if (${id}.value === undefined) {
                 newResult[${k}] = undefined;
@@ -3180,7 +3179,7 @@ window.__ModuleLoader__.load({
                 newResult[${k}] = ${id}.value;
               }
             }
-    
+
           `);
           } else {
             doc.write(`
@@ -4401,7 +4400,7 @@ window.__ModuleLoader__.load({
         payload.issues.push(issue(_iss));
       }
     }
-    
+
     // node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/locales/index.js
     var locales_exports = {};
     __export(locales_exports, {
@@ -4458,7 +4457,7 @@ window.__ModuleLoader__.load({
       zhCN: () => zh_CN_default,
       zhTW: () => zh_TW_default
     });
-    
+
     // node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/locales/ar.js
     var error = () => {
       const Sizable = {
@@ -4565,7 +4564,7 @@ window.__ModuleLoader__.load({
         localeError: error()
       };
     }
-    
+
     // node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/locales/az.js
     var error2 = () => {
       const Sizable = {
@@ -4671,7 +4670,7 @@ window.__ModuleLoader__.load({
         localeError: error2()
       };
     }
-    
+
     // node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/locales/be.js
     function getBelarusianPlural(count, one, few, many) {
       const absCount = Math.abs(count);
@@ -4828,7 +4827,7 @@ window.__ModuleLoader__.load({
         localeError: error3()
       };
     }
-    
+
     // node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/locales/bg.js
     var error4 = () => {
       const Sizable = {
@@ -4949,7 +4948,7 @@ window.__ModuleLoader__.load({
         localeError: error4()
       };
     }
-    
+
     // node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/locales/ca.js
     var error5 = () => {
       const Sizable = {
@@ -5058,7 +5057,7 @@ window.__ModuleLoader__.load({
         localeError: error5()
       };
     }
-    
+
     // node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/locales/cs.js
     var error6 = () => {
       const Sizable = {
@@ -5170,7 +5169,7 @@ window.__ModuleLoader__.load({
         localeError: error6()
       };
     }
-    
+
     // node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/locales/da.js
     var error7 = () => {
       const Sizable = {
@@ -5286,7 +5285,7 @@ window.__ModuleLoader__.load({
         localeError: error7()
       };
     }
-    
+
     // node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/locales/de.js
     var error8 = () => {
       const Sizable = {
@@ -5395,7 +5394,7 @@ window.__ModuleLoader__.load({
         localeError: error8()
       };
     }
-    
+
     // node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/locales/el.js
     var error9 = () => {
       const Sizable = {
@@ -5505,7 +5504,7 @@ window.__ModuleLoader__.load({
         localeError: error9()
       };
     }
-    
+
     // node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/locales/en.js
     var error10 = () => {
       const Sizable = {
@@ -5618,7 +5617,7 @@ window.__ModuleLoader__.load({
         localeError: error10()
       };
     }
-    
+
     // node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/locales/eo.js
     var error11 = () => {
       const Sizable = {
@@ -5728,7 +5727,7 @@ window.__ModuleLoader__.load({
         localeError: error11()
       };
     }
-    
+
     // node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/locales/es.js
     var error12 = () => {
       const Sizable = {
@@ -5861,7 +5860,7 @@ window.__ModuleLoader__.load({
         localeError: error12()
       };
     }
-    
+
     // node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/locales/fa.js
     var error13 = () => {
       const Sizable = {
@@ -5976,7 +5975,7 @@ window.__ModuleLoader__.load({
         localeError: error13()
       };
     }
-    
+
     // node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/locales/fi.js
     var error14 = () => {
       const Sizable = {
@@ -6089,7 +6088,7 @@ window.__ModuleLoader__.load({
         localeError: error14()
       };
     }
-    
+
     // node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/locales/fr.js
     var error15 = () => {
       const Sizable = {
@@ -6215,7 +6214,7 @@ window.__ModuleLoader__.load({
         localeError: error15()
       };
     }
-    
+
     // node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/locales/fr-CA.js
     var error16 = () => {
       const Sizable = {
@@ -6323,7 +6322,7 @@ window.__ModuleLoader__.load({
         localeError: error16()
       };
     }
-    
+
     // node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/locales/he.js
     var error17 = () => {
       const TypeNames = {
@@ -6518,7 +6517,7 @@ window.__ModuleLoader__.load({
         localeError: error17()
       };
     }
-    
+
     // node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/locales/hr.js
     var error18 = () => {
       const Sizable = {
@@ -6641,7 +6640,7 @@ window.__ModuleLoader__.load({
         localeError: error18()
       };
     }
-    
+
     // node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/locales/hu.js
     var error19 = () => {
       const Sizable = {
@@ -6750,7 +6749,7 @@ window.__ModuleLoader__.load({
         localeError: error19()
       };
     }
-    
+
     // node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/locales/hy.js
     function getArmenianPlural(count, one, many) {
       return Math.abs(count) === 1 ? one : many;
@@ -6898,7 +6897,7 @@ window.__ModuleLoader__.load({
         localeError: error20()
       };
     }
-    
+
     // node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/locales/id.js
     var error21 = () => {
       const Sizable = {
@@ -7005,7 +7004,7 @@ window.__ModuleLoader__.load({
         localeError: error21()
       };
     }
-    
+
     // node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/locales/is.js
     var error22 = () => {
       const Sizable = {
@@ -7115,7 +7114,7 @@ window.__ModuleLoader__.load({
         localeError: error22()
       };
     }
-    
+
     // node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/locales/it.js
     var error23 = () => {
       const Sizable = {
@@ -7224,7 +7223,7 @@ window.__ModuleLoader__.load({
         localeError: error23()
       };
     }
-    
+
     // node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/locales/ja.js
     var error24 = () => {
       const Sizable = {
@@ -7332,7 +7331,7 @@ window.__ModuleLoader__.load({
         localeError: error24()
       };
     }
-    
+
     // node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/locales/ka.js
     var error25 = () => {
       const Sizable = {
@@ -7445,7 +7444,7 @@ window.__ModuleLoader__.load({
         localeError: error25()
       };
     }
-    
+
     // node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/locales/km.js
     var error26 = () => {
       const Sizable = {
@@ -7556,12 +7555,12 @@ window.__ModuleLoader__.load({
         localeError: error26()
       };
     }
-    
+
     // node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/locales/kh.js
     function kh_default() {
       return km_default();
     }
-    
+
     // node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/locales/ko.js
     var error27 = () => {
       const Sizable = {
@@ -7673,7 +7672,7 @@ window.__ModuleLoader__.load({
         localeError: error27()
       };
     }
-    
+
     // node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/locales/lt.js
     var capitalizeFirstCharacter = (text) => {
       return text.charAt(0).toUpperCase() + text.slice(1);
@@ -7877,7 +7876,7 @@ window.__ModuleLoader__.load({
         localeError: error28()
       };
     }
-    
+
     // node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/locales/mk.js
     var error29 = () => {
       const Sizable = {
@@ -7987,7 +7986,7 @@ window.__ModuleLoader__.load({
         localeError: error29()
       };
     }
-    
+
     // node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/locales/ms.js
     var error30 = () => {
       const Sizable = {
@@ -8095,7 +8094,7 @@ window.__ModuleLoader__.load({
         localeError: error30()
       };
     }
-    
+
     // node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/locales/nl.js
     var error31 = () => {
       const Sizable = {
@@ -8206,7 +8205,7 @@ window.__ModuleLoader__.load({
         localeError: error31()
       };
     }
-    
+
     // node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/locales/no.js
     var error32 = () => {
       const Sizable = {
@@ -8315,7 +8314,7 @@ window.__ModuleLoader__.load({
         localeError: error32()
       };
     }
-    
+
     // node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/locales/ota.js
     var error33 = () => {
       const Sizable = {
@@ -8425,7 +8424,7 @@ window.__ModuleLoader__.load({
         localeError: error33()
       };
     }
-    
+
     // node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/locales/ps.js
     var error34 = () => {
       const Sizable = {
@@ -8540,7 +8539,7 @@ window.__ModuleLoader__.load({
         localeError: error34()
       };
     }
-    
+
     // node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/locales/pl.js
     var error35 = () => {
       const Sizable = {
@@ -8650,7 +8649,7 @@ window.__ModuleLoader__.load({
         localeError: error35()
       };
     }
-    
+
     // node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/locales/pt.js
     var error36 = () => {
       const Sizable = {
@@ -8759,7 +8758,7 @@ window.__ModuleLoader__.load({
         localeError: error36()
       };
     }
-    
+
     // node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/locales/ro.js
     var error37 = () => {
       const Sizable = {
@@ -8879,7 +8878,7 @@ window.__ModuleLoader__.load({
         localeError: error37()
       };
     }
-    
+
     // node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/locales/ru.js
     function getRussianPlural(count, one, few, many) {
       const absCount = Math.abs(count);
@@ -9036,7 +9035,7 @@ window.__ModuleLoader__.load({
         localeError: error38()
       };
     }
-    
+
     // node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/locales/sl.js
     var error39 = () => {
       const Sizable = {
@@ -9146,7 +9145,7 @@ window.__ModuleLoader__.load({
         localeError: error39()
       };
     }
-    
+
     // node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/locales/sv.js
     var error40 = () => {
       const Sizable = {
@@ -9257,7 +9256,7 @@ window.__ModuleLoader__.load({
         localeError: error40()
       };
     }
-    
+
     // node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/locales/ta.js
     var error41 = () => {
       const Sizable = {
@@ -9368,7 +9367,7 @@ window.__ModuleLoader__.load({
         localeError: error41()
       };
     }
-    
+
     // node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/locales/th.js
     var error42 = () => {
       const Sizable = {
@@ -9479,7 +9478,7 @@ window.__ModuleLoader__.load({
         localeError: error42()
       };
     }
-    
+
     // node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/locales/tr.js
     var error43 = () => {
       const Sizable = {
@@ -9585,7 +9584,7 @@ window.__ModuleLoader__.load({
         localeError: error43()
       };
     }
-    
+
     // node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/locales/uk.js
     var error44 = () => {
       const Sizable = {
@@ -9694,12 +9693,12 @@ window.__ModuleLoader__.load({
         localeError: error44()
       };
     }
-    
+
     // node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/locales/ua.js
     function ua_default() {
       return uk_default();
     }
-    
+
     // node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/locales/ur.js
     var error45 = () => {
       const Sizable = {
@@ -9810,7 +9809,7 @@ window.__ModuleLoader__.load({
         localeError: error45()
       };
     }
-    
+
     // node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/locales/uz.js
     var error46 = () => {
       const Sizable = {
@@ -9921,7 +9920,7 @@ window.__ModuleLoader__.load({
         localeError: error46()
       };
     }
-    
+
     // node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/locales/vi.js
     var error47 = () => {
       const Sizable = {
@@ -10030,7 +10029,7 @@ window.__ModuleLoader__.load({
         localeError: error47()
       };
     }
-    
+
     // node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/locales/zh-CN.js
     var error48 = () => {
       const Sizable = {
@@ -10140,7 +10139,7 @@ window.__ModuleLoader__.load({
         localeError: error48()
       };
     }
-    
+
     // node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/locales/zh-TW.js
     var error49 = () => {
       const Sizable = {
@@ -10248,7 +10247,7 @@ window.__ModuleLoader__.load({
         localeError: error49()
       };
     }
-    
+
     // node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/locales/yo.js
     var error50 = () => {
       const Sizable = {
@@ -10356,7 +10355,7 @@ window.__ModuleLoader__.load({
         localeError: error50()
       };
     }
-    
+
     // node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/core/registries.js
     var _a2;
     var $output = Symbol("ZodOutput");
@@ -10406,7 +10405,7 @@ window.__ModuleLoader__.load({
     }
     (_a2 = globalThis).__zod_globalRegistry ?? (_a2.__zod_globalRegistry = registry());
     var globalRegistry = globalThis.__zod_globalRegistry;
-    
+
     // node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/core/api.js
     // @__NO_SIDE_EFFECTS__
     function _string(Class2, params) {
@@ -11445,7 +11444,7 @@ window.__ModuleLoader__.load({
       const inst = new Class2(def);
       return inst;
     }
-    
+
     // node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/core/to-json-schema.js
     function initializeContext(params) {
       let target = params?.target ?? "draft-2020-12";
@@ -11577,7 +11576,7 @@ window.__ModuleLoader__.load({
           const seen = entry[1];
           if (seen.cycle) {
             throw new Error(`Cycle detected: #/${seen.cycle?.join("/")}/<root>
-    
+
     Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.`);
           }
         }
@@ -11804,7 +11803,7 @@ window.__ModuleLoader__.load({
       extractDefs(ctx, schema);
       return finalize(ctx, schema);
     };
-    
+
     // node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/core/json-schema-processors.js
     var formatMap = {
       guid: "uuid",
@@ -12348,7 +12347,7 @@ window.__ModuleLoader__.load({
       extractDefs(ctx, input);
       return finalize(ctx, input);
     }
-    
+
     // node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/core/json-schema-generator.js
     var JSONSchemaGenerator = class {
       /** @deprecated Access via ctx instead */
@@ -12423,10 +12422,10 @@ window.__ModuleLoader__.load({
         return plainResult;
       }
     };
-    
+
     // node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/core/json-schema.js
     var json_schema_exports = {};
-    
+
     // node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/classic/schemas.js
     var schemas_exports2 = {};
     __export(schemas_exports2, {
@@ -12597,7 +12596,7 @@ window.__ModuleLoader__.load({
       xid: () => xid2,
       xor: () => xor
     });
-    
+
     // node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/classic/checks.js
     var checks_exports2 = {};
     __export(checks_exports2, {
@@ -12631,7 +12630,7 @@ window.__ModuleLoader__.load({
       trim: () => _trim,
       uppercase: () => _uppercase
     });
-    
+
     // node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/classic/iso.js
     var iso_exports = {};
     __export(iso_exports, {
@@ -12672,7 +12671,7 @@ window.__ModuleLoader__.load({
     function duration2(params) {
       return _isoDuration(ZodISODuration, params);
     }
-    
+
     // node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/classic/errors.js
     var initializer2 = (inst, issues) => {
       $ZodError.init(inst, issues);
@@ -12712,7 +12711,7 @@ window.__ModuleLoader__.load({
     var ZodRealError = /* @__PURE__ */ $constructor("ZodError", initializer2, {
       Parent: Error
     });
-    
+
     // node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/classic/parse.js
     var parse2 = /* @__PURE__ */ _parse(ZodRealError);
     var parseAsync2 = /* @__PURE__ */ _parseAsync(ZodRealError);
@@ -12726,7 +12725,7 @@ window.__ModuleLoader__.load({
     var safeDecode2 = /* @__PURE__ */ _safeDecode(ZodRealError);
     var safeEncodeAsync2 = /* @__PURE__ */ _safeEncodeAsync(ZodRealError);
     var safeDecodeAsync2 = /* @__PURE__ */ _safeDecodeAsync(ZodRealError);
-    
+
     // node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/classic/schemas.js
     var _installedGroups = /* @__PURE__ */ new WeakMap();
     function _installLazyMethods(inst, group, methods) {
@@ -14016,7 +14015,7 @@ window.__ModuleLoader__.load({
         out: schema
       });
     }
-    
+
     // node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/classic/compat.js
     var ZodIssueCode = {
       invalid_type: "invalid_type",
@@ -14042,7 +14041,7 @@ window.__ModuleLoader__.load({
     var ZodFirstPartyTypeKind;
     /* @__PURE__ */ (function(ZodFirstPartyTypeKind2) {
     })(ZodFirstPartyTypeKind || (ZodFirstPartyTypeKind = {}));
-    
+
     // node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/classic/from-json-schema.js
     var z = {
       ...schemas_exports2,
@@ -14522,7 +14521,7 @@ window.__ModuleLoader__.load({
       };
       return convertSchema(normalized, ctx);
     }
-    
+
     // node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/classic/coerce.js
     var coerce_exports = {};
     __export(coerce_exports, {
@@ -14547,16 +14546,32 @@ window.__ModuleLoader__.load({
     function date4(params) {
       return _coercedDate(ZodDate, params);
     }
-    
+
     // node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/classic/external.js
     config(en_default());
-    
+
+    // src/index.ts
+    var TASK_TYPES = [
+      "general",
+      "coding",
+      "reasoning",
+      "writing",
+      "data_analysis",
+      "vision",
+      "tool_use"
+    ];
+
     // src/plugin/remote-contract.ts
     function stringSchema(allowed) {
       return allowed === void 0 ? external_exports.string() : external_exports.enum(allowed);
     }
     var revisionOptionsSchema = external_exports.object({ expectedRevision: external_exports.number().int().optional() }).strict();
-    var modelPatchSchema = external_exports.object({ enabled: external_exports.boolean().optional(), multiplier: external_exports.number().optional() }).strict();
+    var modelPatchSchema = external_exports.object({
+      enabled: external_exports.boolean().optional(),
+      multiplier: external_exports.number().nonnegative().optional(),
+      capabilities: external_exports.array(external_exports.string().min(1)).optional(),
+      quality: external_exports.partialRecord(external_exports.enum(TASK_TYPES), external_exports.number().min(0).max(100).nullable()).optional()
+    }).strict();
     var userPatchSchema = external_exports.object({ monthlyCredits: external_exports.number().optional(), allow: external_exports.array(external_exports.string()).optional() }).strict();
     var routingPatchSchema = external_exports.object({
       default: external_exports.enum(["manual", "quality_first", "credit_first", "auto"]).optional(),
@@ -14773,16 +14788,38 @@ window.__ModuleLoader__.load({
       package: "dsh-llm-governor",
       descriptors: GOVERNOR_REMOTE_DESCRIPTORS
     });
-    
+
     // src/dsh-adapter/session-events.ts
     function governorDecisionFromEvent(event) {
       if (event.type === "governor/routing-decision") return event.data;
       return event.type === "request/context" ? event.data.governorDecision : void 0;
     }
-    
+
     // src/plugin/client-registration.ts
     var GOVERNOR_DECISION_KIND = "governor-routing-decision";
-    var GOVERNOR_DECISION_TARGET = "governor-decision";
+    var GOVERNOR_DECISION_TARGET = "trajectory";
+    var GOVERNOR_CARD_LABELS = {
+      zh: {
+        selectionMode: { auto: "\u81EA\u52A8\u9009\u62E9", manual: "\u624B\u52A8\u9009\u62E9", unknown: "\u672A\u77E5" },
+        strategy: {
+          manual: "\u624B\u52A8",
+          quality_first: "\u8D28\u91CF\u4F18\u5148",
+          credit_first: "\u989D\u5EA6\u4F18\u5148",
+          unknown: "\u672A\u77E5"
+        },
+        outcome: { selected: "\u5DF2\u9009\u62E9", rejected: "\u5DF2\u62D2\u7EDD", unknown: "\u672A\u77E5" }
+      },
+      en: {
+        selectionMode: { auto: "Auto", manual: "Manual", unknown: "Unknown" },
+        strategy: {
+          manual: "Manual",
+          quality_first: "Quality First",
+          credit_first: "Credit First",
+          unknown: "Unknown"
+        },
+        outcome: { selected: "Selected", rejected: "Rejected", unknown: "Unknown" }
+      }
+    };
     function readString(value) {
       return typeof value === "string" ? value : null;
     }
@@ -14844,7 +14881,8 @@ window.__ModuleLoader__.load({
         selectedRoute: readString(raw["selectedRoute"]),
         candidates,
         excluded,
-        configRevision: readNumber(raw["configRevision"])
+        configRevision: readNumber(raw["configRevision"]),
+        occurredAt: readNumber(raw["occurredAt"])
       };
     }
     function selectedRouteMetrics(state) {
@@ -14895,9 +14933,72 @@ window.__ModuleLoader__.load({
         }
       };
     }
+    var REASON_LABELS = {
+      initial: "\u521D\u59CB\u8BF7\u6C42",
+      selection_mode_change: "\u9009\u62E9\u6A21\u5F0F\u53D8\u66F4",
+      fallback: "Fallback \u91CD\u8BD5",
+      config_change: "\u914D\u7F6E\u53D8\u66F4",
+      step: "\u65B0\u6B65\u9AA4",
+      NO_MODEL_MATCHED: "\u6CA1\u6709\u5339\u914D\u6A21\u578B",
+      quality_missing: "\u7F3A\u5C11\u4EFB\u52A1 Quality",
+      disabled: "\u6A21\u578B\u5DF2\u7981\u7528",
+      access_denied: "\u65E0\u8BBF\u95EE\u6743\u9650",
+      capability_not_supported: "\u80FD\u529B\u4E0D\u5339\u914D",
+      quota_exceeded: "\u989D\u5EA6\u5DF2\u8017\u5C3D",
+      excluded_in_request: "\u672C\u6B21\u8BF7\u6C42\u5DF2\u6392\u9664"
+    };
+    function reasonLabel(value) {
+      const label = REASON_LABELS[value];
+      return label === void 0 ? value : `${label} (${value})`;
+    }
+    function knownMetric(value, suffix = "") {
+      return value === null ? "\u672A\u77E5" : `${String(value)}${suffix}`;
+    }
+    function decisionMarkdown(state) {
+      const { summary, detail } = buildCardViewData(state);
+      const labels = GOVERNOR_CARD_LABELS.zh;
+      const location = `Turn ${detail.turn === null ? "\u672A\u77E5" : String(detail.turn)} \xB7 Step ${detail.step === null ? "\u672A\u77E5" : String(detail.step)}`;
+      const lines = [
+        `**Governor \u8DEF\u7531 \xB7 ${location}**`,
+        `\u72B6\u6001\uFF1A${labels.outcome[summary.outcome]} \xB7 \u6A21\u5F0F\uFF1A${labels.selectionMode[summary.selectionMode]} \xB7 \u7B56\u7565\uFF1A${labels.strategy[summary.effectiveStrategy]}`,
+        `\u6A21\u578B\uFF1A${summary.selectedRoute ?? "\u672A\u9009\u62E9"} \xB7 Quality\uFF1A${knownMetric(summary.quality)} \xB7 \u500D\u7387\uFF1A\xD7${knownMetric(summary.multiplierPpm === null ? null : summary.multiplierPpm / 1e6)} \xB7 Fallback\uFF1A${String(summary.fallbackIndex)}`
+      ];
+      if (summary.reason !== null) {
+        lines.push(`\u539F\u56E0\uFF1A${summary.reason.split(", ").map(reasonLabel).join("\u3001")}`);
+      }
+      if (detail.classification !== null) {
+        lines.push(
+          `\u5206\u7C7B\uFF1A${detail.classification.taskType} / ${detail.classification.complexity} / ${Math.round(detail.classification.confidence * 100)}% (${detail.classification.source})`
+        );
+      }
+      if (detail.minimumQuality !== null) {
+        lines.push(`\u6700\u4F4E Quality\uFF1A${String(detail.minimumQuality)}`);
+      }
+      lines.push("", "\u5019\u9009\u6392\u5E8F\uFF1A");
+      if (detail.candidates.length === 0) lines.push("- \u65E0");
+      else {
+        for (const candidate of detail.candidates) {
+          lines.push(
+            `- ${candidate.routeId} \xB7 Q ${knownMetric(candidate.quality)} \xB7 \xD7${knownMetric(candidate.multiplierPpm === null ? null : candidate.multiplierPpm / 1e6)}`
+          );
+        }
+      }
+      if (detail.excluded.length > 0) {
+        lines.push("", "\u5DF2\u6392\u9664\uFF1A");
+        for (const item of detail.excluded) {
+          lines.push(`- ${item.routeId} \xB7 ${reasonLabel(item.reason)}`);
+        }
+      }
+      lines.push(
+        "",
+        `Request ID\uFF1A${detail.requestId}`,
+        `Revision\uFF1A${knownMetric(detail.configRevision)}`
+      );
+      return lines.join("\n");
+    }
     var governorTrajectoryDefinition = {
       kind: GOVERNOR_DECISION_KIND,
-      /** 卡片视图 target：由 `governorDecisionViewDefinition` 的构建器消费。 */
+      /** 直接进入 DSH 官方 Trajectory snapshot builder。 */
       target: GOVERNOR_DECISION_TARGET,
       /** 提取本 Definition 的业务身份：decisionId（幂等键，稳定且唯一）。 */
       match(event) {
@@ -14921,41 +15022,40 @@ window.__ModuleLoader__.load({
       update(context) {
         return context.state;
       },
-      /** 渲染实现：产出卡片视图节点（摘要 + 抽屉数据）。 */
+      /** 渲染实现：用官方 `kind: node` contribution 投影为 context notice。 */
       buildViewNode(context) {
         const state = context.state;
         if (state === void 0) return null;
-        return {
+        const anchorSeq = context.start?.event.seq ?? 0;
+        const eventTime = context.start?.event.time;
+        const time3 = state.occurredAt ?? (typeof eventTime === "number" && Number.isFinite(eventTime) ? eventTime : 0);
+        const source = { kind: "plugin", plugin: "dsh-llm-governor", form: "notice" };
+        const viewNode = {
           // The assembler owns identity (including the seq fallback for a damaged
           // legacy event) and rejects a node reconstructed from state identity.
           key: context.key,
           kind: context.kind,
           id: context.id,
           target: GOVERNOR_DECISION_TARGET,
-          data: buildCardViewData(state)
-        };
-      }
-    };
-    var governorDecisionViewDefinition = {
-      target: GOVERNOR_DECISION_TARGET,
-      create() {
-        let snapshot = { nodes: [], turnOrder: [] };
-        return {
-          empty: snapshot,
-          replace(input) {
-            snapshot = { nodes: [...input.nodes], turnOrder: [...input.timeline.turnOrder] };
-            return snapshot;
-          },
-          apply(input) {
-            const merged = new Map(snapshot.nodes.map((node) => [node.key, node]));
-            for (const node of input.upserts) merged.set(node.key, node);
-            snapshot = { nodes: [...merged.values()], turnOrder: [...input.timeline.turnOrder] };
-            return snapshot;
+          anchorSeq,
+          location: context.start?.location ?? { kind: "unresolved" },
+          data: {
+            kind: "node",
+            node: {
+              kind: "context",
+              seq: anchorSeq,
+              time: time3,
+              content: [{ type: "text", text: decisionMarkdown(state) }],
+              source,
+              provenance: { role: "inject", label: "dsh-llm-governor" },
+              form: "notice"
+            }
           }
         };
+        return viewNode;
       }
     };
-    
+
     // src/client/browser.ts
     var CLIENT_ID = "dsh-llm-governor";
     var AUTO_VALUE = "__governor_auto__";
@@ -15175,120 +15275,6 @@ window.__ModuleLoader__.load({
         error51 === null ? null : (0, import_react.createElement)("span", { role: "alert", title: error51 }, "!")
       );
     }
-    function metric(value, suffix = "") {
-      return value === null ? "\u672A\u77E5" : `${String(value)}${suffix}`;
-    }
-    function DecisionCard({ node }) {
-      const data = node.data;
-      const { summary, detail } = data;
-      const selectionLabel = summary.selectionMode === "auto" ? "\u81EA\u52A8\u9009\u62E9" : summary.selectionMode === "manual" ? "\u624B\u52A8\u9009\u62E9" : "\u9009\u62E9\u6A21\u5F0F\u672A\u77E5";
-      const locationLabel = `Turn ${detail.turn === null ? "\u672A\u77E5" : String(detail.turn)} \xB7 Step ${detail.step === null ? "\u672A\u77E5" : String(detail.step)}`;
-      return (0, import_react.createElement)(
-        "details",
-        { className: "dsh-governor-decision", "data-decision-id": node.id },
-        (0, import_react.createElement)(
-          "summary",
-          null,
-          (0, import_react.createElement)(
-            "span",
-            { className: "dsh-governor-decision-heading" },
-            (0, import_react.createElement)("strong", null, selectionLabel),
-            (0, import_react.createElement)("small", null, locationLabel)
-          ),
-          (0, import_react.createElement)("span", null, summary.selectedRoute ?? "\u672A\u77E5\u6A21\u578B"),
-          (0, import_react.createElement)(
-            "span",
-            { className: `dsh-governor-outcome ${summary.outcome}` },
-            summary.outcome
-          ),
-          (0, import_react.createElement)(
-            "span",
-            null,
-            `\xD7${metric(summary.multiplierPpm === null ? null : summary.multiplierPpm / 1e6)}`
-          )
-        ),
-        (0, import_react.createElement)(
-          "dl",
-          { className: "dsh-governor-facts" },
-          (0, import_react.createElement)("dt", null, "\u7B56\u7565"),
-          (0, import_react.createElement)("dd", null, summary.effectiveStrategy),
-          (0, import_react.createElement)("dt", null, "\u8D28\u91CF"),
-          (0, import_react.createElement)("dd", null, metric(summary.quality)),
-          (0, import_react.createElement)("dt", null, "Fallback"),
-          (0, import_react.createElement)("dd", null, String(summary.fallbackIndex)),
-          (0, import_react.createElement)("dt", null, "\u539F\u56E0"),
-          (0, import_react.createElement)("dd", null, summary.reason ?? "\u672A\u77E5"),
-          (0, import_react.createElement)("dt", null, "Request ID"),
-          (0, import_react.createElement)("dd", null, detail.requestId),
-          (0, import_react.createElement)("dt", null, "Revision"),
-          (0, import_react.createElement)("dd", null, metric(detail.configRevision))
-        ),
-        (0, import_react.createElement)("h4", null, "\u5019\u9009\u6392\u5E8F"),
-        (0, import_react.createElement)(
-          "ol",
-          null,
-          detail.candidates.map(
-            (candidate) => (0, import_react.createElement)(
-              "li",
-              { key: candidate.routeId },
-              `${candidate.routeId} \xB7 Q ${metric(candidate.quality)} \xB7 \xD7${metric(candidate.multiplierPpm === null ? null : candidate.multiplierPpm / 1e6)}`
-            )
-          )
-        ),
-        detail.excluded.length === 0 ? null : (0, import_react.createElement)(
-          "div",
-          null,
-          (0, import_react.createElement)("h4", null, "\u5DF2\u6392\u9664"),
-          (0, import_react.createElement)(
-            "ul",
-            null,
-            detail.excluded.map(
-              (item) => (0, import_react.createElement)("li", { key: item.routeId }, `${item.routeId} \xB7 ${item.reason}`)
-            )
-          )
-        )
-      );
-    }
-    function GovernorDecisionView({ useSession }) {
-      const snapshot = useSession(
-        (session) => session.views.get("governor-decision")
-      );
-      if (snapshot === void 0 || snapshot.nodes.length === 0) {
-        return (0, import_react.createElement)("div", { className: "dsh-governor-empty" }, "\u5F53\u524D\u4F1A\u8BDD\u6682\u65E0 Governor \u51B3\u7B56");
-      }
-      const turnRank = new Map(snapshot.turnOrder.map((turn, index) => [turn, index]));
-      const nodes = [...snapshot.nodes].sort((left, right) => {
-        const a = left.data.detail;
-        const b = right.data.detail;
-        const aRank = a.turn === null ? Number.MAX_SAFE_INTEGER : turnRank.get(a.turn) ?? a.turn;
-        const bRank = b.turn === null ? Number.MAX_SAFE_INTEGER : turnRank.get(b.turn) ?? b.turn;
-        return aRank - bRank || (a.step ?? Number.MAX_SAFE_INTEGER) - (b.step ?? Number.MAX_SAFE_INTEGER) || a.fallbackIndex - b.fallbackIndex || left.key.localeCompare(right.key);
-      });
-      const groups = /* @__PURE__ */ new Map();
-      for (const node of nodes) {
-        const detail = node.data.detail;
-        const key = `${String(detail.turn)}:${String(detail.step)}`;
-        const group = groups.get(key) ?? { turn: detail.turn, step: detail.step, nodes: [] };
-        group.nodes.push(node);
-        groups.set(key, group);
-      }
-      return (0, import_react.createElement)(
-        "section",
-        { className: "dsh-governor-view", "aria-label": "Governor \u8DEF\u7531\u8F68\u8FF9" },
-        [...groups.entries()].map(
-          ([key, group]) => (0, import_react.createElement)(
-            "section",
-            { className: "dsh-governor-step-group", key },
-            (0, import_react.createElement)(
-              "h3",
-              null,
-              `Turn ${group.turn === null ? "\u672A\u77E5" : String(group.turn)} \xB7 Step ${group.step === null ? "\u672A\u77E5" : String(group.step)}`
-            ),
-            group.nodes.map((node) => (0, import_react.createElement)(DecisionCard, { key: node.key, node }))
-          )
-        )
-      );
-    }
     function ErrorNotice({ error: error51 }) {
       return error51 === null ? null : (0, import_react.createElement)("p", { className: "dsh-governor-error", role: "alert" }, error51);
     }
@@ -15439,11 +15425,57 @@ window.__ModuleLoader__.load({
                       onBlur: (event) => void save(row, { multiplier: event.currentTarget.valueAsNumber })
                     })
                   ),
-                  (0, import_react.createElement)("td", null, row.capabilities.join(", ") || "\u2014"),
                   (0, import_react.createElement)(
                     "td",
                     null,
-                    Object.entries(row.quality).map(([key, score]) => `${key} ${score}`).join(" \xB7 ") || "\u2014"
+                    (0, import_react.createElement)("input", {
+                      type: "text",
+                      defaultValue: row.capabilities.join(", "),
+                      placeholder: "vision, tool_use",
+                      disabled: !canManage,
+                      "aria-label": `${row.routeId} \u80FD\u529B`,
+                      onBlur: (event) => void save(row, {
+                        capabilities: [
+                          ...new Set(
+                            event.currentTarget.value.split(",").map((value) => value.trim()).filter(Boolean)
+                          )
+                        ]
+                      })
+                    })
+                  ),
+                  (0, import_react.createElement)(
+                    "td",
+                    null,
+                    (0, import_react.createElement)(
+                      "details",
+                      { className: "dsh-governor-quality" },
+                      (0, import_react.createElement)(
+                        "summary",
+                        null,
+                        Object.keys(row.quality).length === 0 ? "\u672A\u914D\u7F6E\uFF08Auto \u4E0D\u53EF\u7528\uFF09" : Object.entries(row.quality).map(([key, score]) => `${key} ${score}`).join(" \xB7 ")
+                      ),
+                      TASK_TYPES.map(
+                        (taskType) => (0, import_react.createElement)(
+                          "label",
+                          { key: taskType },
+                          taskType,
+                          (0, import_react.createElement)("input", {
+                            type: "number",
+                            min: 0,
+                            max: 100,
+                            step: 1,
+                            defaultValue: row.quality[taskType] ?? "",
+                            placeholder: "0\u2013100",
+                            disabled: !canManage,
+                            "aria-label": `${row.routeId} ${taskType} Quality`,
+                            onBlur: (event) => {
+                              const score = event.currentTarget.value.trim() === "" ? null : event.currentTarget.valueAsNumber;
+                              void save(row, { quality: { [taskType]: score } });
+                            }
+                          })
+                        )
+                      )
+                    )
                   )
                 )
               )
@@ -15664,9 +15696,9 @@ window.__ModuleLoader__.load({
     }
     var STYLES = `
     .dsh-governor-model-select{display:inline-flex;align-items:center;gap:6px}.dsh-governor-model-select select,.dsh-governor-model-select input{max-width:250px;border:0;border-radius:9px;background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary);padding:5px 8px;font:inherit}.dsh-governor-model-select input{width:110px}.dsh-governor-model-select [role=status],.dsh-governor-model-select [role=alert]{font-size:11px;color:var(--dsw-alias-label-tertiary)}
-    .dsh-governor-view{box-sizing:border-box;display:grid;gap:16px;max-width:920px;margin:0 auto;padding:18px}.dsh-governor-step-group{display:grid;gap:10px}.dsh-governor-step-group>h3{margin:0;color:var(--dsw-alias-label-tertiary);font-size:12px;font-weight:500;letter-spacing:.04em}.dsh-governor-empty{padding:48px;text-align:center;color:var(--dsw-alias-label-tertiary)}.dsh-governor-decision{border:1px solid var(--dsw-alias-border-l2);border-radius:14px;background:var(--dsw-alias-bg-layer-2);overflow:hidden}.dsh-governor-decision summary{cursor:pointer;display:grid;grid-template-columns:minmax(110px,1fr) minmax(160px,2fr) auto auto;align-items:center;gap:12px;padding:14px 16px}.dsh-governor-decision-heading strong,.dsh-governor-decision-heading small{display:block}.dsh-governor-decision-heading small{margin-top:2px;color:var(--dsw-alias-label-tertiary);font-size:10px}.dsh-governor-decision>dl,.dsh-governor-decision>h4,.dsh-governor-decision>ol,.dsh-governor-decision>div{margin-left:18px;margin-right:18px}.dsh-governor-outcome{font-size:12px;padding:2px 8px;border-radius:999px;background:var(--dsw-alias-interactive-bg-hover)}.dsh-governor-outcome.rejected{color:var(--dsw-alias-state-error-primary)}.dsh-governor-facts{display:grid;grid-template-columns:max-content 1fr;gap:6px 14px;border-top:1px solid var(--dsw-alias-border-l2);padding-top:14px}.dsh-governor-facts dt{color:var(--dsw-alias-label-tertiary)}.dsh-governor-facts dd{margin:0;overflow-wrap:anywhere}
     .dsh-governor-settings{color:var(--dsw-alias-label-primary)}.dsh-governor-settings>header{display:flex;justify-content:space-between;align-items:end;border-bottom:1px solid var(--dsw-alias-border-l2);padding:6px 0 14px}.dsh-governor-settings>header p{margin:0;color:var(--dsw-alias-label-tertiary);font-size:10px;letter-spacing:.14em}.dsh-governor-settings>header h2{margin:2px 0 0;font:600 25px/1.2 Georgia,serif}.dsh-governor-settings>header>span,.dsh-governor-readonly{font-size:12px;color:var(--dsw-alias-label-tertiary)}.dsh-governor-settings nav{display:flex;gap:4px;padding:14px 0}.dsh-governor-settings nav button,.dsh-governor-form button{border:0;border-radius:9px;background:transparent;color:inherit;padding:7px 12px;font:inherit;cursor:pointer}.dsh-governor-settings nav button:hover,.dsh-governor-settings nav button.active{background:var(--dsw-alias-interactive-bg-hover)}.dsh-governor-settings-body{min-height:280px}.dsh-governor-form{display:grid;max-width:420px;gap:14px}.dsh-governor-form label,.dsh-governor-user label{display:grid;gap:6px;font-size:13px}.dsh-governor-form input,.dsh-governor-form select,.dsh-governor-user input,.dsh-governor-table-wrap input{box-sizing:border-box;border:1px solid var(--dsw-alias-border-l2);border-radius:9px;background:var(--dsw-alias-bg-layer-1);color:inherit;padding:8px}.dsh-governor-form button{justify-self:start;background:var(--dsw-alias-label-primary);color:var(--dsw-alias-bg-layer-2)}.dsh-governor-table-wrap{max-width:100%;overflow:auto}.dsh-governor-table-wrap table{width:100%;border-collapse:collapse;font-size:13px}.dsh-governor-table-wrap th,.dsh-governor-table-wrap td{text-align:left;border-bottom:1px solid var(--dsw-alias-border-l2);padding:10px 8px;vertical-align:top}.dsh-governor-table-wrap small{display:block;color:var(--dsw-alias-label-tertiary)}.dsh-governor-user{display:grid;grid-template-columns:1fr 2fr auto;gap:12px;border:1px solid var(--dsw-alias-border-l2);border-radius:12px;margin:0 0 10px;padding:12px}.dsh-governor-user legend{padding:0 5px}.dsh-governor-metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:12px 0}.dsh-governor-metrics>div{border:1px solid var(--dsw-alias-border-l2);border-radius:12px;padding:12px}.dsh-governor-metrics strong,.dsh-governor-metrics span{display:block}.dsh-governor-metrics strong{font-size:22px}.dsh-governor-metrics span{font-size:11px;color:var(--dsw-alias-label-tertiary)}.dsh-governor-error{border-radius:8px;background:var(--dsw-alias-interactive-bg-hover-danger);color:var(--dsw-alias-state-error-primary);padding:8px 10px;font-size:12px}
-    @media(max-width:600px){.dsh-governor-decision summary{grid-template-columns:1fr auto}.dsh-governor-user{grid-template-columns:1fr}.dsh-governor-metrics{grid-template-columns:1fr}.dsh-governor-settings nav{overflow-x:auto}}
+    .dsh-governor-quality{min-width:210px}.dsh-governor-quality summary{cursor:pointer;color:var(--dsw-alias-label-secondary)}.dsh-governor-quality label{display:grid;grid-template-columns:1fr 78px;align-items:center;gap:8px;margin-top:7px;font-size:11px}.dsh-governor-quality input{width:78px}
+    @media(max-width:600px){.dsh-governor-user{grid-template-columns:1fr}.dsh-governor-metrics{grid-template-columns:1fr}.dsh-governor-settings nav{overflow-x:auto}}
     `;
     function installStyles() {
       if (typeof document === "undefined") return () => {
@@ -15681,14 +15713,7 @@ window.__ModuleLoader__.load({
       document.head.append(tag);
       return () => tag.remove();
     }
-    var inject = [
-      "conversationEvents",
-      "conversationViews",
-      "modelDirectories",
-      "remote",
-      "sessions",
-      "slots"
-    ];
+    var inject = ["conversationEvents", "modelDirectories", "remote", "sessions", "slots"];
     async function apply(ctx) {
       const browser = ctx;
       const slots = browser.slots;
@@ -15703,21 +15728,6 @@ window.__ModuleLoader__.load({
         const api = createGovernorClientApi(governorRemote);
         disposers.push(installStyles());
         disposers.push(browser.conversationEvents.register(governorTrajectoryDefinition));
-        disposers.push(browser.conversationViews.register(governorDecisionViewDefinition));
-        disposers.push(
-          slots.inject(
-            "conversation.view",
-            () => slots.register(
-              {
-                name: "conversation.view",
-                id: "governor",
-                order: 11,
-                label: () => "Governor \u8F68\u8FF9"
-              },
-              GovernorDecisionView
-            )
-          )
-        );
         disposers.push(
           slots.inject(
             "conversation.input.model",
@@ -15783,7 +15793,7 @@ window.__ModuleLoader__.load({
         for (const dispose of disposers.reverse()) await dispose();
       };
     }
-    
+
     return module.exports;
   }
 });

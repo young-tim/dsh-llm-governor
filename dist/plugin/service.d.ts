@@ -5,7 +5,7 @@
 import { Service } from '../dsh-adapter/mod.js';
 import type { Context } from '../dsh-adapter/mod.js';
 import type { LlmCallConfig, LlmFailure, LlmModelInfo } from '../dsh-adapter/mod.js';
-import type { TaskType, RoutingMode } from '../index.js';
+import { type TaskType, type RoutingMode } from '../index.js';
 import type { GovernorRepository, DecisionQueryResult, AuditEntry } from '../storage/repository.js';
 import type { AutoClassification } from '../routing/strategies.js';
 import type { SessionEventSink, ReconcileResult } from './audit-pipeline.js';
@@ -19,6 +19,13 @@ interface ModelConfig {
     multiplier?: number;
     capabilities?: string[];
     quality?: Record<string, number>;
+}
+/** Administrator-managed model profile patch. Null removes one Quality score. */
+export interface ModelPolicyPatch {
+    readonly enabled?: boolean;
+    readonly multiplier?: number;
+    readonly capabilities?: readonly string[];
+    readonly quality?: Readonly<Partial<Record<TaskType, number | null>>>;
 }
 /** 管理面可回读、可事务更新的路由配置快照。 */
 export interface GovernorRoutingSettings {
@@ -271,6 +278,8 @@ export declare class GovernorService extends Service {
      * 注册同名自定义 RoutingStrategy 时由扩展接管。
      */
     private _routeManualFallback;
+    /** Resolve the strategy that this attempt actually executes, including Auto protection. */
+    private _effectiveStrategy;
     /** 执行模型选择（被 agent/request 调用）。双写协议完成后才返回；fail closed。 */
     selectModel(sessionId: string, turn: number, step: number, defaultConfig: LlmCallConfig): Promise<{
         config: LlmCallConfig;
@@ -367,15 +376,13 @@ export declare class GovernorService extends Service {
     /**
      * 更新模型策略（管理员写入；GOV-CONFIG-001：数据与新 revision 同事务提交）。
      *
-     * 接受 enabled 和 multiplier（人类可读倍率，1.5 = 1.5x）。
+     * 接受 Enabled、Multiplier、Capability 与 Quality。Quality 的 null 值删除
+     * 对应任务评分；未配置评分的模型不会进入依赖该维度的自动策略。
      * 内部将 multiplier 转换为 multiplierPpm 存储。
      * 若 routeId 在目录中但不在配置 Map，则自动创建配置项。
      * expectedRevision 提供时做 compare-and-set，不匹配抛 REVISION_CONFLICT。
      */
-    updateModel(routeId: string, patch: {
-        enabled?: boolean;
-        multiplier?: number;
-    }, options?: {
+    updateModel(routeId: string, patch: ModelPolicyPatch, options?: {
         expectedRevision?: number;
         actor?: string;
     }): Promise<{
