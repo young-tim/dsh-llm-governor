@@ -249,6 +249,31 @@ describe('GOV-TRACE-002 Trajectory 卡片 Definition', () => {
     expect(governorTrajectoryDefinition.buildViewNode(contextOf(undefined))).toBeNull();
   });
 
+  it('buildViewNode：Quality 缺失时在官方轨迹给出可操作的快速初始化指引', () => {
+    const rejected = governorTrajectoryDefinition.start(
+      contextOf(undefined),
+      matchOf(
+        decisionEvent({
+          outcome: 'rejected',
+          errorCode: 'NO_MODEL_MATCHED',
+          candidates: [],
+          selectedRoute: undefined,
+          classification: {
+            taskType: 'general',
+            complexity: 'medium',
+            confidence: 0,
+            source: 'rule',
+          },
+          excluded: [{ routeId: 'p:missing', reason: 'quality_missing' }],
+        }),
+      ),
+    );
+    const markdown = markdownOf(governorTrajectoryDefinition.buildViewNode(contextOf(rejected))!);
+    expect(markdown).toContain('Settings → Governor → 模型');
+    expect(markdown).toContain('Lite 75 / 均衡 85 / Pro 95');
+    expect(markdown).toContain('当前缺少 **general** Quality');
+  });
+
   it('buildViewNode：所选路由不在候选首位时倍率/质量显示未知（null）', () => {
     const state = governorTrajectoryDefinition.start(
       contextOf(undefined),

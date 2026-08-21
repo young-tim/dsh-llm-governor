@@ -49,6 +49,21 @@ Governor → DSH ctx.llm → DSH Provider Adapter → DSH Credentials Service �
 - 无外部模型费用的端到端功能验收使用真实 Cordis/DSH `LlmRuntime` 配合
   `FakeLlmAdapter`，覆盖选路、流式输出、Fallback、Usage 和 Credits。
 
+### 首次启用 Auto
+
+Auto、Quality First 和 Credit First 都依赖模型 Quality。首次安装后打开
+`Settings → Governor → 模型`，每个模型先选一个快速档位即可，不需要逐项填写七类
+任务：
+
+- `Lite 75`：省成本档；
+- `均衡 85`：Flash / 标准档；
+- `Pro 95`：高质量档。
+
+快速档位会显式把同一个初始分复制到七类任务；这些分数是管理员确认的相对初始估计，
+不是插件虚构的实测结果。相同模型经不同 Provider 提供时通常使用相同 Quality，价格差异
+通过 Multiplier 表达。积累评测或使用反馈后，再展开“高级微调”修改具体任务分数。
+未初始化时 Composer 和官方轨迹会直接给出上述配置路径，不会静默选择未知质量的模型。
+
 ## 账号边界与企业身份接入
 
 Governor 的 `Users` 不是账号目录，而是以外部 `user_id` 为键的治理策略表：它保存

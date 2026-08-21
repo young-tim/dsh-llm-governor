@@ -24,6 +24,65 @@ import { governorTrajectoryDefinition } from '../plugin/client-registration.js';
 const CLIENT_ID = 'dsh-llm-governor';
 const AUTO_VALUE = '__governor_auto__';
 
+/**
+ * Explicit onboarding presets. They align with Auto's default low / medium /
+ * high quality gates without pretending to be measured benchmark results.
+ */
+export const QUALITY_PRESETS = [
+  { score: 75, label: 'Lite', description: '省成本档' },
+  { score: 85, label: '均衡', description: 'Flash / 标准档' },
+  { score: 95, label: 'Pro', description: '高质量档' },
+] as const;
+
+type QualityPresetScore = (typeof QUALITY_PRESETS)[number]['score'];
+
+/** Suggest a visible, user-confirmed starting tier from conventional model names. */
+export function suggestedQualityPreset(model: string): QualityPresetScore {
+  const normalized = model.toLocaleLowerCase();
+  if (/(?:^|[-_.\s])(lite|mini|nano|small)(?:$|[-_.\s])/.test(normalized)) return 75;
+  if (/(?:^|[-_.\s])(pro|max|ultra)(?:$|[-_.\s])/.test(normalized)) return 95;
+  return 85;
+}
+
+function qualityPresetPatch(score: QualityPresetScore): ModelPolicyPatch {
+  return {
+    quality: Object.fromEntries(TASK_TYPES.map((taskType) => [taskType, score])) as Record<
+      TaskType,
+      number
+    >,
+  };
+}
+
+function configuredQualityTasks(rows: readonly GovernorModelView[]): readonly TaskType[] {
+  const enabled = rows.filter((row) => row.enabled);
+  return TASK_TYPES.filter((taskType) =>
+    enabled.some((row) => Number.isFinite(row.quality[taskType])),
+  );
+}
+
+/** Composer guard for the completely uninitialised state seen after first install. */
+export function autoSetupIssue(rows: readonly GovernorModelView[]): string | null {
+  if (!rows.some((row) => row.enabled)) {
+    return 'Auto 尚未就绪：没有已启用模型。请打开 Settings → Governor → 模型。';
+  }
+  if (configuredQualityTasks(rows).length === 0) {
+    return 'Auto 尚未初始化：请打开 Settings → Governor → 模型，为模型选择 Lite 75、均衡 85 或 Pro 95 快速档位。';
+  }
+  return null;
+}
+
+function qualitySummary(row: GovernorModelView): string {
+  const scores = TASK_TYPES.flatMap((taskType) => {
+    const score = row.quality[taskType];
+    return score === undefined ? [] : [score];
+  });
+  if (scores.length === 0) return '未配置（Auto 不可用）';
+  if (scores.length === TASK_TYPES.length && scores.every((score) => score === scores[0])) {
+    return `全部任务 ${String(scores[0])}`;
+  }
+  return `${String(scores.length)}/${String(TASK_TYPES.length)} 项已配置`;
+}
+
 type RemoteResult<T> =
   | { readonly ok: true; readonly value: T }
   | { readonly ok: false; readonly error: { readonly code: string; readonly message: string } };
@@ -289,6 +348,8 @@ export function GovernorModelSelect({
     setError(null);
     try {
       if (next === AUTO_VALUE) {
+        const setupIssue = autoSetupIssue(await api.models());
+        if (setupIssue !== null) throw new Error(setupIssue);
         const currentRoute =
           catalog.current === null
             ? undefined
@@ -393,7 +454,13 @@ export function GovernorModelSelect({
           ),
         ),
     saving ? createElement('span', { role: 'status' }, '保存中…') : null,
-    error === null ? null : createElement('span', { role: 'alert', title: error }, '!'),
+    error === null
+      ? null
+      : createElement(
+          'span',
+          { className: 'dsh-governor-model-error', role: 'alert', title: error },
+          error,
+        ),
   );
 }
 
@@ -507,10 +574,36 @@ function ModelsSettings({ api, canManage }: GovernorManagedSettingsProps) {
       setError(String(cause));
     }
   };
+  const coveredTasks = configuredQualityTasks(rows);
+  const missingTasks = TASK_TYPES.filter((taskType) => !coveredTasks.includes(taskType));
   return createElement(
     'div',
     null,
     createElement(ErrorNotice, { error }),
+    createElement(
+      'section',
+      {
+        className: `dsh-governor-onboarding${missingTasks.length === 0 ? ' ready' : ''}`,
+        'aria-label': 'Auto Quality 初始化状态',
+      },
+      createElement(
+        'strong',
+        null,
+        missingTasks.length === 0
+          ? 'Auto 已就绪 · 7/7 类任务有可用 Quality'
+          : coveredTasks.length === 0
+            ? '先初始化 Quality，再使用 Auto'
+            : `Auto 部分就绪 · ${String(coveredTasks.length)}/7 类任务已覆盖`,
+      ),
+      createElement(
+        'p',
+        null,
+        'Quality 是模型间的相对档位，不要求先做精确测评。每个模型先选一次 Lite 75、均衡 85 或 Pro 95，即可填满全部任务；之后只在“高级微调”里调整有证据的差异。',
+      ),
+      missingTasks.length === 0
+        ? null
+        : createElement('small', null, `尚未覆盖：${missingTasks.join('、')}`),
+    ),
     createElement(
       'div',
       { className: 'dsh-governor-table-wrap' },
@@ -593,17 +686,41 @@ function ModelsSettings({ api, canManage }: GovernorManagedSettingsProps) {
                 'td',
                 null,
                 createElement(
+                  'div',
+                  { className: 'dsh-governor-quality-presets' },
+                  createElement(
+                    'span',
+                    null,
+                    `快速初始化 · 按名称建议 ${String(suggestedQualityPreset(row.model))}`,
+                  ),
+                  createElement(
+                    'div',
+                    null,
+                    QUALITY_PRESETS.map((preset) =>
+                      createElement(
+                        'button',
+                        {
+                          key: preset.score,
+                          type: 'button',
+                          disabled: !canManage,
+                          className:
+                            suggestedQualityPreset(row.model) === preset.score
+                              ? 'suggested'
+                              : undefined,
+                          title: `${preset.description}：把全部 7 类任务的初始 Quality 设为 ${String(preset.score)}`,
+                          'aria-label': `${row.routeId} 全部任务 Quality ${String(preset.score)}`,
+                          onClick: () => void save(row, qualityPresetPatch(preset.score)),
+                        },
+                        `${preset.label} ${String(preset.score)}`,
+                      ),
+                    ),
+                  ),
+                  createElement('small', null, '初始估计，可随时覆盖；不会自动后台改分'),
+                ),
+                createElement(
                   'details',
                   { className: 'dsh-governor-quality' },
-                  createElement(
-                    'summary',
-                    null,
-                    Object.keys(row.quality).length === 0
-                      ? '未配置（Auto 不可用）'
-                      : Object.entries(row.quality)
-                          .map(([key, score]) => `${key} ${score}`)
-                          .join(' · '),
-                  ),
+                  createElement('summary', null, `高级微调 · ${qualitySummary(row)}`),
                   TASK_TYPES.map((taskType: TaskType) =>
                     createElement(
                       'label',
@@ -885,9 +1002,10 @@ export function GovernorSettings({ api }: GovernorSettingsProps) {
 }
 
 const STYLES = `
-.dsh-governor-model-select{display:inline-flex;align-items:center;gap:6px}.dsh-governor-model-select select,.dsh-governor-model-select input{max-width:250px;border:0;border-radius:9px;background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary);padding:5px 8px;font:inherit}.dsh-governor-model-select input{width:110px}.dsh-governor-model-select [role=status],.dsh-governor-model-select [role=alert]{font-size:11px;color:var(--dsw-alias-label-tertiary)}
+.dsh-governor-model-select{display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap}.dsh-governor-model-select select,.dsh-governor-model-select input{max-width:250px;border:0;border-radius:9px;background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary);padding:5px 8px;font:inherit}.dsh-governor-model-select input{width:110px}.dsh-governor-model-select [role=status]{font-size:11px;color:var(--dsw-alias-label-tertiary)}.dsh-governor-model-error{flex-basis:100%;max-width:520px;border-radius:7px;background:var(--dsw-alias-interactive-bg-hover-danger);color:var(--dsw-alias-state-error-primary);padding:6px 8px;font-size:11px;line-height:1.45}
 .dsh-governor-settings{color:var(--dsw-alias-label-primary)}.dsh-governor-settings>header{display:flex;justify-content:space-between;align-items:end;border-bottom:1px solid var(--dsw-alias-border-l2);padding:6px 0 14px}.dsh-governor-settings>header p{margin:0;color:var(--dsw-alias-label-tertiary);font-size:10px;letter-spacing:.14em}.dsh-governor-settings>header h2{margin:2px 0 0;font:600 25px/1.2 Georgia,serif}.dsh-governor-settings>header>span,.dsh-governor-readonly{font-size:12px;color:var(--dsw-alias-label-tertiary)}.dsh-governor-settings nav{display:flex;gap:4px;padding:14px 0}.dsh-governor-settings nav button,.dsh-governor-form button{border:0;border-radius:9px;background:transparent;color:inherit;padding:7px 12px;font:inherit;cursor:pointer}.dsh-governor-settings nav button:hover,.dsh-governor-settings nav button.active{background:var(--dsw-alias-interactive-bg-hover)}.dsh-governor-settings-body{min-height:280px}.dsh-governor-form{display:grid;max-width:420px;gap:14px}.dsh-governor-form label,.dsh-governor-user label{display:grid;gap:6px;font-size:13px}.dsh-governor-form input,.dsh-governor-form select,.dsh-governor-user input,.dsh-governor-table-wrap input{box-sizing:border-box;border:1px solid var(--dsw-alias-border-l2);border-radius:9px;background:var(--dsw-alias-bg-layer-1);color:inherit;padding:8px}.dsh-governor-form button{justify-self:start;background:var(--dsw-alias-label-primary);color:var(--dsw-alias-bg-layer-2)}.dsh-governor-table-wrap{max-width:100%;overflow:auto}.dsh-governor-table-wrap table{width:100%;border-collapse:collapse;font-size:13px}.dsh-governor-table-wrap th,.dsh-governor-table-wrap td{text-align:left;border-bottom:1px solid var(--dsw-alias-border-l2);padding:10px 8px;vertical-align:top}.dsh-governor-table-wrap small{display:block;color:var(--dsw-alias-label-tertiary)}.dsh-governor-user{display:grid;grid-template-columns:1fr 2fr auto;gap:12px;border:1px solid var(--dsw-alias-border-l2);border-radius:12px;margin:0 0 10px;padding:12px}.dsh-governor-user legend{padding:0 5px}.dsh-governor-metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:12px 0}.dsh-governor-metrics>div{border:1px solid var(--dsw-alias-border-l2);border-radius:12px;padding:12px}.dsh-governor-metrics strong,.dsh-governor-metrics span{display:block}.dsh-governor-metrics strong{font-size:22px}.dsh-governor-metrics span{font-size:11px;color:var(--dsw-alias-label-tertiary)}.dsh-governor-error{border-radius:8px;background:var(--dsw-alias-interactive-bg-hover-danger);color:var(--dsw-alias-state-error-primary);padding:8px 10px;font-size:12px}
-.dsh-governor-quality{min-width:210px}.dsh-governor-quality summary{cursor:pointer;color:var(--dsw-alias-label-secondary)}.dsh-governor-quality label{display:grid;grid-template-columns:1fr 78px;align-items:center;gap:8px;margin-top:7px;font-size:11px}.dsh-governor-quality input{width:78px}
+.dsh-governor-onboarding{margin:0 0 12px;border:1px solid var(--dsw-alias-border-l2);border-left:3px solid var(--dsw-alias-state-warning-primary,var(--dsw-alias-label-secondary));border-radius:10px;background:var(--dsw-alias-bg-layer-1);padding:11px 13px}.dsh-governor-onboarding.ready{border-left-color:var(--dsw-alias-state-success-primary,var(--dsw-alias-label-secondary))}.dsh-governor-onboarding strong,.dsh-governor-onboarding p,.dsh-governor-onboarding small{display:block}.dsh-governor-onboarding p{max-width:780px;margin:5px 0;color:var(--dsw-alias-label-secondary);font-size:12px;line-height:1.55}.dsh-governor-onboarding small{color:var(--dsw-alias-label-tertiary)}
+.dsh-governor-quality-presets{min-width:260px;margin-bottom:9px}.dsh-governor-quality-presets>span{display:block;margin-bottom:5px;font-size:11px;color:var(--dsw-alias-label-secondary)}.dsh-governor-quality-presets>div{display:flex;gap:5px}.dsh-governor-quality-presets button{border:1px solid var(--dsw-alias-border-l2);border-radius:7px;background:var(--dsw-alias-bg-layer-1);color:inherit;padding:5px 7px;font:inherit;font-size:11px;cursor:pointer}.dsh-governor-quality-presets button:hover,.dsh-governor-quality-presets button.suggested{border-color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-interactive-bg-hover)}.dsh-governor-quality-presets button:disabled{cursor:not-allowed;opacity:.5}.dsh-governor-quality-presets small{margin-top:5px;font-size:10px}.dsh-governor-quality{min-width:210px}.dsh-governor-quality summary{cursor:pointer;color:var(--dsw-alias-label-secondary);font-size:11px}.dsh-governor-quality label{display:grid;grid-template-columns:1fr 78px;align-items:center;gap:8px;margin-top:7px;font-size:11px}.dsh-governor-quality input{width:78px}
 @media(max-width:600px){.dsh-governor-user{grid-template-columns:1fr}.dsh-governor-metrics{grid-template-columns:1fr}.dsh-governor-settings nav{overflow-x:auto}}
 `;
 

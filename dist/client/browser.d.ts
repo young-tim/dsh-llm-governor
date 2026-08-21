@@ -12,6 +12,28 @@ import type { SessionId } from '@deepseek-ai/dsh-api-remotes/client';
 import { type GovernorRemoteApi } from '../plugin/typert-remote-client.js';
 import type { GovernorRoutingSettings, GovernorRoutingSettingsPatch } from '../plugin/service.js';
 import type { ModelPolicyPatch } from '../plugin/service.js';
+/**
+ * Explicit onboarding presets. They align with Auto's default low / medium /
+ * high quality gates without pretending to be measured benchmark results.
+ */
+export declare const QUALITY_PRESETS: readonly [{
+    readonly score: 75;
+    readonly label: "Lite";
+    readonly description: "省成本档";
+}, {
+    readonly score: 85;
+    readonly label: "均衡";
+    readonly description: "Flash / 标准档";
+}, {
+    readonly score: 95;
+    readonly label: "Pro";
+    readonly description: "高质量档";
+}];
+type QualityPresetScore = (typeof QUALITY_PRESETS)[number]['score'];
+/** Suggest a visible, user-confirmed starting tier from conventional model names. */
+export declare function suggestedQualityPreset(model: string): QualityPresetScore;
+/** Composer guard for the completely uninitialised state seen after first install. */
+export declare function autoSetupIssue(rows: readonly GovernorModelView[]): string | null;
 export interface SelectionModeView {
     readonly mode: 'auto' | 'manual';
     readonly selectionRevision: number;

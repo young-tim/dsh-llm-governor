@@ -333,6 +333,17 @@ function decisionMarkdown(state: GovernorDecisionCardState): string {
       lines.push(`- ${item.routeId} · ${reasonLabel(item.reason)}`);
     }
   }
+  if (
+    summary.outcome === 'rejected' &&
+    summary.errorCode === 'NO_MODEL_MATCHED' &&
+    detail.excluded.some((item) => item.reason === 'quality_missing')
+  ) {
+    const taskType = detail.classification?.taskType;
+    lines.push(
+      '',
+      `> 下一步：打开 **Settings → Governor → 模型**，为模型选择 **Lite 75 / 均衡 85 / Pro 95** 快速初始化${taskType === undefined ? '' : `；当前缺少 **${taskType}** Quality`}。七项高级分数可稍后按实测微调。`,
+    );
+  }
   lines.push(
     '',
     `Request ID：${detail.requestId}`,

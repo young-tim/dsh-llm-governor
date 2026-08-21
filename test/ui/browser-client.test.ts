@@ -6,9 +6,11 @@ import type { SessionId } from '@deepseek-ai/dsh-api-remotes/client';
 import { SlotCore, type StoredEntry } from '@deepseek-ai/dsh-client-ui-slots';
 import {
   apply,
+  autoSetupIssue,
   GovernorModelSelect,
   GovernorSettings,
   createGovernorClientApi,
+  suggestedQualityPreset,
   type GovernorClientApi,
   type GovernorModelView,
   type GovernorRemoteFace,
@@ -455,6 +457,25 @@ function emptySettingsApi(overrides: Partial<GovernorClientApi> = {}): GovernorC
 }
 
 describe('native rendered surfaces', () => {
+  it('Quality onboarding derives explicit presets and detects an uninitialised Auto profile', () => {
+    const empty: GovernorModelView = {
+      routeId: 'p:DeepSeek-V4-flash',
+      provider: 'p',
+      model: 'DeepSeek-V4-flash',
+      enabled: true,
+      multiplierPpm: 1_000_000,
+      capabilities: [],
+      quality: {},
+      configRevision: 1,
+    };
+    expect(suggestedQualityPreset('DeepSeek-V4-flash')).toBe(85);
+    expect(suggestedQualityPreset('DeepSeek-V4-pro')).toBe(95);
+    expect(suggestedQualityPreset('doubao-seed-2.0-lite')).toBe(75);
+    expect(autoSetupIssue([empty])).toContain('Settings → Governor → 模型');
+    expect(autoSetupIssue([{ ...empty, quality: { general: 85 } }])).toBeNull();
+    expect(autoSetupIssue([{ ...empty, enabled: false }])).toContain('没有已启用模型');
+  });
+
   it('typed Remote adapter covers every read/write and preserves Host errors/options', async () => {
     const remote = remoteFace();
     const api = createGovernorClientApi(remote);
@@ -493,7 +514,21 @@ describe('native rendered surfaces', () => {
       selectionRevision: 8,
     }));
     const selectModel = vi.fn(async () => true);
-    const api = emptySettingsApi({ selectMode });
+    const api = emptySettingsApi({
+      selectMode,
+      models: async () => [
+        {
+          routeId: 'p:a',
+          provider: 'p',
+          model: 'a',
+          enabled: true,
+          multiplierPpm: 1_000_000,
+          capabilities: [],
+          quality: { general: 85 },
+          configRevision: 1,
+        },
+      ],
+    });
     let renderer!: TestRenderer.ReactTestRenderer;
     await act(async () => {
       renderer = TestRenderer.create(
@@ -539,7 +574,7 @@ describe('native rendered surfaces', () => {
     ).toBe(true);
   });
 
-  it('Composer can enable Auto on a new session before any concrete model exists', async () => {
+  it('Composer can enable configured Auto on a new session before any concrete model exists', async () => {
     const sessionId = 'session-empty' as SessionId;
     const selectMode = vi.fn(async (_id: SessionId, mode: 'auto' | 'manual') => ({
       mode,
@@ -548,6 +583,18 @@ describe('native rendered surfaces', () => {
     const api = emptySettingsApi({
       selection: async () => ({ mode: 'manual', selectionRevision: 1 }),
       selectMode,
+      models: async () => [
+        {
+          routeId: 'p:a',
+          provider: 'p',
+          model: 'a',
+          enabled: true,
+          multiplierPpm: 1_000_000,
+          capabilities: [],
+          quality: { general: 85 },
+          configRevision: 1,
+        },
+      ],
     });
     const emptyDirectorySnapshot = {
       current: null,
@@ -581,6 +628,49 @@ describe('native rendered surfaces', () => {
         .props.onChange({ currentTarget: { value: '__governor_auto__' } });
     });
     expect(selectMode).toHaveBeenCalledWith(sessionId, 'auto', { expectedRevision: 1 });
+  });
+
+  it('Composer blocks completely uninitialised Auto and shows the setup path inline', async () => {
+    const sessionId = 'session-unconfigured' as SessionId;
+    const selectMode = vi.fn();
+    const api = emptySettingsApi({
+      selectMode,
+      models: async () => [
+        {
+          routeId: 'p:a',
+          provider: 'p',
+          model: 'a',
+          enabled: true,
+          multiplierPpm: 1_000_000,
+          capabilities: [],
+          quality: {},
+          configRevision: 1,
+        },
+      ],
+    });
+    let renderer!: TestRenderer.ReactTestRenderer;
+    await act(async () => {
+      renderer = TestRenderer.create(
+        createElement(GovernorModelSelect, {
+          locked: false,
+          available: true,
+          sessionId,
+          directory: modelStore(),
+          load: vi.fn(),
+          selectModel: vi.fn(async () => true),
+          api,
+        }),
+      );
+    });
+    await act(async () => {
+      await renderer.root
+        .findByProps({ 'aria-label': '模型选择 / Model selection' })
+        .props.onChange({ currentTarget: { value: '__governor_auto__' } });
+    });
+    expect(renderer.root.findByProps({ role: 'alert' }).children.join('')).toContain(
+      'Settings → Governor → 模型',
+    );
+    expect(selectMode).not.toHaveBeenCalled();
   });
 
   it('Composer exposes reasoning effort and renders nothing for addressed subagents', async () => {
@@ -812,6 +902,27 @@ describe('native rendered surfaces', () => {
       });
     });
     expect(saveModel).toHaveBeenCalledWith('p:a', { quality: { general: null } }, 2);
+    const quickPro = renderer.root.findByProps({
+      'aria-label': 'p:a 全部任务 Quality 95',
+    });
+    await act(async () => {
+      quickPro.props.onClick();
+    });
+    expect(saveModel).toHaveBeenCalledWith(
+      'p:a',
+      {
+        quality: {
+          general: 95,
+          coding: 95,
+          reasoning: 95,
+          writing: 95,
+          data_analysis: 95,
+          vision: 95,
+          tool_use: 95,
+        },
+      },
+      2,
+    );
 
     await act(async () => {
       button('用户').props.onClick();
